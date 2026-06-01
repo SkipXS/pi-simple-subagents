@@ -53,7 +53,7 @@ The orchestrator receives a short prompt plus the plan content/reference, then c
 - Scout/reviewer/orchestrator may write artifacts only inside the run directory.
 - Worker is the only role allowed to edit project/source files.
 - Reviewer cannot run before worker implementation.
-- Validation/tests/end-user checks are blocked until at least one worker implementation/fix and one review have run, and are instructed to happen after the review/fix loop.
+- Validation/tests/end-user checks are blocked until the latest successful worker implementation/fix has a successful review, and are instructed to happen after the review/fix loop.
 - Parallel workers are controlled by config and disabled by default.
 
 ## Tool policy
@@ -63,11 +63,13 @@ Child agents inherit installed Pi extensions by default, so efficient navigation
 Default role allowlists:
 
 - `orchestrator`: `read`, `write_run_artifact`, `run_role_agent`, `compact_session`, `ctx_search`
-- `scout`: `read`, `bash`, `write_run_artifact`, `ast_grep_search`, `ctx_execute`, `ctx_execute_file`, `ctx_search`, `ctx_batch_execute`
+- `scout`: `read`, `write_run_artifact`, `ast_grep_search`, `ctx_search`
 - `worker`: `read`, `bash`, `edit`, `write`, `write_run_artifact`, `compact_session`, `ast_grep_search`, `ast_grep_scan`, `ast_grep_rewrite`, `ctx_execute`, `ctx_execute_file`, `ctx_search`, `ctx_batch_execute`
-- `reviewer`: `read`, `bash`, `write_run_artifact`, `ast_grep_search`, `ast_grep_scan`, `ctx_execute`, `ctx_execute_file`, `ctx_search`, `ctx_batch_execute`
+- `reviewer`: `read`, `write_run_artifact`, `ast_grep_search`, `ast_grep_scan`, `ctx_search`
 
 Unknown tools are ignored by Pi when the backing extension is not installed.
+
+For non-worker roles, shell/arbitrary execution tools (`bash`, `ctx_execute`, `ctx_execute_file`, `ctx_batch_execute`) are runtime-blocked even if a local config accidentally adds them. They are reserved for `worker` because they can mutate files.
 
 ## Compaction policy
 
@@ -88,7 +90,7 @@ Artifacts remain the source of truth after compaction.
 - `reviewer` gets a fresh session for every review round: `sessions/reviewer-<timestamp>.jsonl`.
 - `scout` gets a fresh session for each scout call: `sessions/scout-<timestamp>.jsonl`.
 
-Reviewer context should be passed through curated artifacts (`input-plan.md`, `orchestration.md`, `scout.md`, worker reports, accepted fixes) plus direct inspection of the current git diff.
+Reviewer context should be passed through curated artifacts (`input-plan.md`, `orchestration.md`, `scout.md`, worker reports, accepted fixes) plus direct inspection of the relevant current files.
 
 ## Config
 

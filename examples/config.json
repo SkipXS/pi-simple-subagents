@@ -8,7 +8,7 @@
     "scout": {
       "model": "openai-codex/gpt-5.3-codex-spark",
       "thinking": "low",
-      "tools": ["read", "bash", "write_run_artifact", "ast_grep_search", "ctx_execute", "ctx_execute_file", "ctx_search", "ctx_batch_execute"]
+      "tools": ["read", "write_run_artifact", "ast_grep_search", "ctx_search"]
     },
     "worker": {
       "model": "openai-codex/gpt-5.3-codex",
@@ -18,7 +18,7 @@
     "reviewer": {
       "model": "openai-codex/gpt-5.5",
       "thinking": "high",
-      "tools": ["read", "bash", "write_run_artifact", "ast_grep_search", "ast_grep_scan", "ctx_execute", "ctx_execute_file", "ctx_search", "ctx_batch_execute"]
+      "tools": ["read", "write_run_artifact", "ast_grep_search", "ast_grep_scan", "ctx_search"]
     }
   },
   "workflow": {
