@@ -12,15 +12,18 @@ export function isInside(parent: string, child: string): boolean {
 	return isPathInside(parent, child);
 }
 
-export function blocksReadOnlyToolMutation(event: { toolName: string; input: unknown }): string | undefined {
-	if (["bash", "ctx_execute", "ctx_execute_file", "ctx_batch_execute"].includes(event.toolName)) {
-		return `${event.toolName} is blocked for read-only roles because it can execute arbitrary commands or code`;
+export function blocksNonWorkerProjectMutation(event: { toolName: string; input: unknown }, cwd: string, runDir: string | undefined): string | undefined {
+	if (event.toolName === "write" || event.toolName === "edit") {
+		const target = resolveToolPath(event.input, cwd);
+		if (!runDir) return `${event.toolName} is blocked for non-worker roles without an artifact directory`;
+		if (!target) return `${event.toolName} target could not be resolved; use write_run_artifact for handoff files`;
+		if (!isInside(path.resolve(runDir), target)) return `${event.toolName} may only write inside artifact directory: ${runDir}`;
 	}
 	if (event.toolName === "ast_grep_scan" && isObject(event.input) && event.input.applyFixes === true) {
-		return "ast_grep_scan applyFixes is blocked for read-only roles";
+		return "ast_grep_scan applyFixes writes files and is reserved for worker roles";
 	}
 	if (event.toolName === "ast_grep_rewrite" && isObject(event.input) && event.input.apply === true) {
-		return "ast_grep_rewrite apply=true is blocked for read-only roles";
+		return "ast_grep_rewrite apply=true writes files and is reserved for worker roles";
 	}
 	return undefined;
 }

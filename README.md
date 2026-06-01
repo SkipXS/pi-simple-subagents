@@ -73,20 +73,20 @@ or let the model call `review_target`. This creates a run directory, runs an opt
 
 ## Tool policy
 
+Pi is intentionally YOLO by default, and this extension now follows that model: role defaults do not pass a restrictive `--tools` allowlist. Scout, reviewer, orchestrator, and worker can use the normal Pi tool surface, including focused scripts or test commands when that improves evidence. You can still set `roles.<role>.tools` in config if you want a local opt-in restriction; when omitted, Pi's default tools are used.
+
+The boundary is write authority, not tool visibility:
+
+- `worker` is the only role allowed to persist project/source changes.
+- `scout`, `reviewer`, and `orchestrator` may write handoff artifacts inside the run directory.
+- Direct source-writing tools (`write`, `edit`, `ast_grep_scan.applyFixes=true`, `ast_grep_rewrite.apply=true`) are blocked for non-worker roles outside the artifact directory.
+- Scout/reviewer child runs are fenced with a pre-run snapshot; if a shell/script/test command changes the project/source snapshot, the extension attempts to restore the pre-run snapshot and the run fails with a policy-violation artifact.
+- Orchestration runs track an authorized source snapshot. Worker runs refresh that snapshot; if the orchestrator leaves extra project/source changes that were not produced by a worker run, the orchestration fails with a policy-violation artifact.
+- Ignored generated outputs such as caches, build folders, and coverage are normally excluded by gitignore or the filesystem fallback.
+
 Worker child agents inherit installed Pi extensions by default, so efficient implementation tools from packages such as `context-mode` and `pi-simple-ast-grep` can be used when they are installed. Read-only roles default to `inheritExtensionsForReadOnly: false` to avoid inherited extension/tool-name collisions; opt in only if you trust all inherited extensions.
 
-Default role allowlists:
-
-- `orchestrator`: `read`, `write_run_artifact`, `run_role_agent`, `mark_review_clean`, `compact_session`, `ctx_search`
-- `scout`: `read`, `write_run_artifact`, `ast_grep_search`, `ctx_search`
-- `worker`: `read`, `bash`, `edit`, `write`, `write_run_artifact`, `compact_session`, `ast_grep_search`, `ast_grep_scan`, `ast_grep_rewrite`, `ctx_execute`, `ctx_execute_file`, `ctx_search`, `ctx_batch_execute`
-- `reviewer`: `read`, `write_run_artifact`, `ast_grep_search`, `ast_grep_scan`, `ctx_search`
-
-Runtime read-only role policy also allows explicitly configured safe navigation tools: `ast_grep_scan`, `grep`, `find`, and `ls`. Mutating modes such as `ast_grep_scan.applyFixes=true`, `ast_grep_rewrite.apply=true`, shell tools, and arbitrary-code execution tools remain blocked for non-worker roles. This read-only policy prevents project/source writes by non-worker roles; it is not a confidentiality boundary or OS/container sandbox.
-
-Unknown tools are ignored by Pi when the backing extension is not installed. With the safer default `children.inheritExtensionsForReadOnly=false`, read-only roles usually have only Pi built-ins plus this extension's artifact tools.
-
-For non-worker roles, tool policy is default-deny at config/load time and runtime. Shell/arbitrary execution tools (`bash`, `ctx_execute`, `ctx_execute_file`, `ctx_batch_execute`) and mutating ast-grep modes are blocked for read-only roles. They are reserved for `worker` because they can mutate files. Run this extension only on trusted projects or inside an external sandbox when workers may touch untrusted code, secrets, or generated scripts.
+This policy protects the workflow boundary (which role may write project files); it is not a confidentiality boundary or OS/container sandbox. Run this extension only on trusted projects or inside an external sandbox when agents may execute untrusted code, access secrets, or run generated scripts.
 
 ## Compaction policy
 

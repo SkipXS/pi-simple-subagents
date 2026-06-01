@@ -2,23 +2,19 @@
   "roles": {
     "orchestrator": {
       "model": "openai-codex/gpt-5.5",
-      "thinking": "high",
-      "tools": ["read", "write_run_artifact", "run_role_agent", "mark_review_clean", "compact_session", "ctx_search"]
+      "thinking": "high"
     },
     "scout": {
       "model": "openai-codex/gpt-5.3-codex-spark",
-      "thinking": "low",
-      "tools": ["read", "write_run_artifact", "ast_grep_search", "ctx_search"]
+      "thinking": "low"
     },
     "worker": {
       "model": "openai-codex/gpt-5.3-codex",
-      "thinking": "high",
-      "tools": ["read", "bash", "edit", "write", "write_run_artifact", "compact_session", "ast_grep_search", "ast_grep_scan", "ast_grep_rewrite", "ctx_execute", "ctx_execute_file", "ctx_search", "ctx_batch_execute"]
+      "thinking": "high"
     },
     "reviewer": {
       "model": "openai-codex/gpt-5.5",
-      "thinking": "high",
-      "tools": ["read", "write_run_artifact", "ast_grep_search", "ast_grep_scan", "ctx_search"]
+      "thinking": "high"
     }
   },
   "workflow": {

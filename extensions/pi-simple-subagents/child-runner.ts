@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { appendArtifactFile, resolveRoleSessionFile, uniqueSuffix, writeArtifact } from "./artifacts.ts";
 import { applyThinking, type Config } from "./config.ts";
 import { roleSystemPrompt } from "./prompts.ts";
+import { createProjectWriteFence, type ProjectWriteFenceResult } from "./snapshots.ts";
 import {
 	MAX_PROGRESS_LINE_BYTES,
 	MAX_STDERR_BYTES,
@@ -114,6 +115,9 @@ export async function spawnPiRole(input: {
 	);
 	if (roleConfig.tools) args.push("--tools", roleConfig.tools.join(","));
 	args.push("-p", `@${taskPath}`);
+	const sourceWriteFence = input.role === "scout" || input.role === "reviewer"
+		? createProjectWriteFence(input.cwd, [input.runDir])
+		: undefined;
 
 	const env: NodeJS.ProcessEnv = {
 		...process.env,
@@ -191,10 +195,21 @@ export async function spawnPiRole(input: {
 			if (input.signal) input.signal.removeEventListener("abort", onAbort);
 			if (timeoutHandle) clearTimeout(timeoutHandle);
 			if (buffer.trim()) processLine(buffer);
-			const effectiveExitCode = exitCode === 0 && isFailedStopReason(assistantStopReason) ? 1 : exitCode;
-			const fullOutput = finalOutput
+			let policyViolation: (ProjectWriteFenceResult & { artifact: string }) | undefined;
+			if (sourceWriteFence) {
+				const result = sourceWriteFence.restoreIfChanged();
+				if (result.changed) {
+					const artifact = writeArtifact(input.runDir, `source-write-policy-violation-${input.role}-${stampBase}.md`, `# Source Write Policy Violation\n\nRole: ${input.role}\n\nThis role is read-only for project/source files. The project snapshot changed while it was running. Only worker roles may persist project/source changes. The extension attempted to restore the pre-run snapshot.\n\nRestored: ${result.restored}\n${result.error ? `Restore error: ${result.error}\n` : ""}\nBefore: ${JSON.stringify(result.before)}\n\nAfter: ${JSON.stringify(result.after)}\n\nRestored snapshot: ${JSON.stringify(result.restoredSnapshot)}\n`);
+					policyViolation = { ...result, artifact };
+				}
+			}
+			const effectiveExitCode = (exitCode === 0 && isFailedStopReason(assistantStopReason)) || policyViolation ? 1 : exitCode;
+			const baseOutput = finalOutput
 				|| (assistantErrorMessage ? `Assistant ${assistantStopReason ?? "failed"}: ${assistantErrorMessage}` : "")
 				|| (stderr ? `No assistant output. Stderr log: ${stderrPath}\n\n${stderr}` : "(no output)");
+			const fullOutput = policyViolation
+				? `[Policy] ${input.role} changed the project/source snapshot. Only worker roles may persist project/source changes. Restored: ${policyViolation.restored}. Artifact: ${policyViolation.artifact}\n\n${baseOutput}`
+				: baseOutput;
 			const outputPath = writeArtifact(input.runDir, `outputs/${input.role}-${stampBase}.md`, fullOutput);
 			const truncatedOutput = truncateForTool(fullOutput, MAX_TOOL_OUTPUT_BYTES);
 			const truncatedStderr = truncateForTool(stderr, MAX_STDERR_BYTES);

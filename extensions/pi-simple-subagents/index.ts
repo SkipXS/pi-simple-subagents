@@ -4,10 +4,9 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { copyArtifactFile, resolveArtifactPath, writeArtifact } from "./artifacts.ts";
 import { childEnvCounts, childResultText, throwChildRunError, spawnPiRole } from "./child-runner.ts";
 import { loadConfig } from "./config.ts";
-import { blocksReadOnlyToolMutation, isInside, resolveToolPath } from "./guards.ts";
+import { blocksNonWorkerProjectMutation } from "./guards.ts";
 import {
 	ROLE_ENV,
-	ROLE_TOOL_ALLOWLIST,
 	REVIEW_RUNS_ENV,
 	RUN_DIR_ENV,
 	WORKER_RUNS_ENV,
@@ -44,6 +43,10 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 	const persistState = () => {
 		if (!runDir) return undefined;
 		return writeOrchestrationState(runDir, { workerRuns, reviewRuns, reviewRunsSinceLatestWorker, latestWorkerRunReviewedClean });
+	};
+	const persistAuthorizedSourceSnapshot = (cwd: string) => {
+		if (!runDir) return undefined;
+		return writeArtifact(runDir, "source-snapshot-authorized.json", JSON.stringify(createProjectSnapshot(cwd, [runDir]), null, 2));
 	};
 
 	if (!role) {
@@ -134,10 +137,12 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 						onUpdate: (text) => onUpdate?.({ content: [{ type: "text", text }], details: {} }),
 					});
 					const succeeded = result.exitCode === 0;
+					if (params.role === "worker") persistAuthorizedSourceSnapshot(ctx.cwd);
 					let validationChangedTree: { before: ProjectSnapshot; after: ProjectSnapshot; artifact: string } | undefined;
 					if (validationBefore) {
 						const validationAfter = createProjectSnapshot(ctx.cwd, [runDir]);
 						if (validationBefore.hash !== validationAfter.hash) {
+							persistAuthorizedSourceSnapshot(ctx.cwd);
 							workerRuns++;
 							reviewRunsSinceLatestWorker = 0;
 							latestWorkerRunReviewedClean = false;
@@ -301,17 +306,7 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 		const currentRole = parseRoleEnv(process.env[ROLE_ENV]);
 		const currentRunDir = process.env[RUN_DIR_ENV];
 		if (!currentRole || currentRole === "worker") return;
-		if ((event.toolName === "write" || event.toolName === "edit") && currentRunDir) {
-			const target = resolveToolPath(event.input, ctx.cwd);
-			if (target && !isInside(path.resolve(currentRunDir), target)) {
-				return { block: true, reason: `${currentRole} may write only inside artifact directory: ${currentRunDir}` };
-			}
-		}
-		const allowedTools = ROLE_TOOL_ALLOWLIST[currentRole];
-		if (!allowedTools.has(event.toolName)) {
-			return { block: true, reason: `${currentRole} may only use approved read-only/artifact tools. Blocked tool: ${event.toolName}.` };
-		}
-		const mutationReason = blocksReadOnlyToolMutation(event);
+		const mutationReason = blocksNonWorkerProjectMutation(event, ctx.cwd, currentRunDir);
 		if (mutationReason) {
 			return { block: true, reason: `${currentRole} is read-only for project/source files; ${mutationReason}.` };
 		}

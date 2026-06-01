@@ -4,7 +4,6 @@ import * as path from "node:path";
 import {
 	DEFAULT_CHILD_RUN_TIMEOUT_MS,
 	DEFAULT_REFERENCE_FILE_BYTES,
-	ROLE_TOOL_ALLOWLIST,
 	THINKING_LEVELS,
 	isObject,
 	type RoleName,
@@ -46,22 +45,18 @@ export const DEFAULT_CONFIG: Config = {
 		orchestrator: {
 			model: "openai-codex/gpt-5.5",
 			thinking: "high",
-			tools: ["read", "write_run_artifact", "run_role_agent", "mark_review_clean", "compact_session", "ctx_search"],
 		},
 		scout: {
 			model: "openai-codex/gpt-5.3-codex-spark",
 			thinking: "low",
-			tools: ["read", "write_run_artifact", "ast_grep_search", "ctx_search"],
 		},
 		worker: {
 			model: "openai-codex/gpt-5.3-codex",
 			thinking: "high",
-			tools: ["read", "bash", "edit", "write", "write_run_artifact", "compact_session", "ast_grep_search", "ast_grep_scan", "ast_grep_rewrite", "ctx_execute", "ctx_execute_file", "ctx_search", "ctx_batch_execute"],
 		},
 		reviewer: {
 			model: "openai-codex/gpt-5.5",
 			thinking: "high",
-			tools: ["read", "write_run_artifact", "ast_grep_search", "ast_grep_scan", "ctx_search"],
 		},
 	},
 	workflow: {
@@ -147,15 +142,6 @@ function expectStringArray(value: unknown, source: string, pathName: string): st
 	return [...value];
 }
 
-function validateRoleTools(role: RoleName, tools: string[] | undefined, source: string): void {
-	if (!tools || role === "worker") return;
-	const allowed = ROLE_TOOL_ALLOWLIST[role];
-	const unsupported = tools.filter((tool) => !allowed.has(tool));
-	if (unsupported.length > 0) {
-		throw configError(source, `roles.${role}.tools contains unsupported read-only tool(s): ${unsupported.join(", ")}`);
-	}
-}
-
 function mergeConfig(base: Config, override: unknown, source = "unknown"): Config {
 	if (override === undefined) return cloneConfig(base);
 	const overrideObject = expectObject(override, source, "root");
@@ -171,7 +157,6 @@ function mergeConfig(base: Config, override: unknown, source = "unknown"): Confi
 			if (roleObject.model !== undefined) roleConfig.model = expectModel(roleObject.model, source, `roles.${role}.model`);
 			if (roleObject.thinking !== undefined) roleConfig.thinking = expectThinking(roleObject.thinking, source, `roles.${role}.thinking`);
 			if (roleObject.tools !== undefined) roleConfig.tools = expectStringArray(roleObject.tools, source, `roles.${role}.tools`);
-			validateRoleTools(role, roleConfig.tools, source);
 			next.roles[role] = roleConfig;
 		}
 	}
@@ -221,7 +206,8 @@ function readJsonIfExists(filePath: string): unknown {
 function ensureRequiredInternalTools(config: Config): Config {
 	const next = cloneConfig(config);
 	const ensure = (role: RoleName, tool: string) => {
-		const tools = next.roles[role].tools ?? [];
+		const tools = next.roles[role].tools;
+		if (!tools) return;
 		if (!tools.includes(tool)) next.roles[role].tools = [...tools, tool];
 	};
 	ensure("orchestrator", "run_role_agent");
@@ -229,7 +215,6 @@ function ensureRequiredInternalTools(config: Config): Config {
 	ensure("orchestrator", "mark_review_clean");
 	for (const role of ["scout", "worker", "reviewer"] as const) ensure(role, "write_run_artifact");
 	for (const role of ["orchestrator", "worker"] as const) ensure(role, "compact_session");
-	for (const role of ["orchestrator", "scout", "reviewer"] as const) validateRoleTools(role, next.roles[role].tools, "effective config");
 	return next;
 }
 

@@ -36,12 +36,6 @@ export function parseRoleEnv(value: string | undefined): RoleName | undefined {
 	throw new Error(`Invalid ${ROLE_ENV}: ${value}. Expected one of: ${ROLE_NAMES.join(", ")}`);
 }
 
-export const ROLE_TOOL_ALLOWLIST: Record<Exclude<RoleName, "worker">, Set<string>> = {
-	orchestrator: new Set(["read", "write_run_artifact", "run_role_agent", "mark_review_clean", "compact_session", "ctx_search"]),
-	scout: new Set(["read", "write_run_artifact", "ast_grep_search", "ast_grep_scan", "ctx_search", "grep", "find", "ls"]),
-	reviewer: new Set(["read", "write_run_artifact", "ast_grep_search", "ast_grep_scan", "ctx_search", "grep", "find", "ls"]),
-};
-
 export const ROLE_PURPOSES: Record<Exclude<RoleName, "orchestrator">, Set<Purpose>> = {
 	scout: new Set(["context"]),
 	worker: new Set(["implementation", "fix", "validation"]),
