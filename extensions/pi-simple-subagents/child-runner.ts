@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import { createRequire } from "node:module";
 import * as path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 import { appendArtifactFile, resolveRoleSessionFile, uniqueSuffix, writeArtifact } from "./artifacts.ts";
 import { applyThinking, type Config } from "./config.ts";
@@ -134,7 +135,9 @@ export async function spawnPiRole(input: {
 		const stderrPath = writeArtifact(input.runDir, `logs/${input.role}-${stampBase}.stderr.log`, "");
 
 		const invocation = getPiInvocation(args);
-		const child = spawn(invocation.command, invocation.args, { cwd: input.cwd, env, stdio: ["ignore", "pipe", "pipe"], shell: false });
+		const child = spawn(invocation.command, invocation.args, { cwd: input.cwd, env, stdio: ["ignore", "pipe", "pipe"], shell: false, detached: process.platform !== "win32" });
+		const stdoutDecoder = new StringDecoder("utf8");
+		const stderrDecoder = new StringDecoder("utf8");
 		let buffer = "";
 		let stderr = "";
 		let finalOutput = "";
@@ -165,6 +168,17 @@ export async function spawnPiRole(input: {
 				}
 			} catch { /* ignore non-json */ }
 		};
+		const signalChildTree = (signalName: NodeJS.Signals) => {
+			if (process.platform !== "win32" && child.pid) {
+				try {
+					process.kill(-child.pid, signalName);
+					return;
+				} catch {
+					// Fall back to signalling only the direct child below.
+				}
+			}
+			child.kill(signalName);
+		};
 		const abortChild = (reason = "Child run aborted.") => {
 			aborted = true;
 			const line = `${reason}\n`;
@@ -176,9 +190,9 @@ export async function spawnPiRole(input: {
 				killer.on("close", (code) => { if (code !== 0) child.kill(); });
 				return;
 			}
-			child.kill("SIGTERM");
+			signalChildTree("SIGTERM");
 			const killTimer = setTimeout(() => {
-				child.kill("SIGKILL");
+				signalChildTree("SIGKILL");
 			}, 5000);
 			(killTimer as { unref?: () => void }).unref?.();
 		};
@@ -194,6 +208,12 @@ export async function spawnPiRole(input: {
 			settled = true;
 			if (input.signal) input.signal.removeEventListener("abort", onAbort);
 			if (timeoutHandle) clearTimeout(timeoutHandle);
+			buffer += stdoutDecoder.end();
+			const stderrTail = stderrDecoder.end();
+			if (stderrTail) {
+				appendArtifactFile(input.runDir, stderrPath, stderrTail);
+				stderr = appendBoundedTail(stderr, stderrTail, MAX_STDERR_BYTES);
+			}
 			if (buffer.trim()) processLine(buffer);
 			let policyViolation: (ProjectWriteFenceResult & { artifact: string }) | undefined;
 			if (sourceWriteFence) {
@@ -231,14 +251,15 @@ export async function spawnPiRole(input: {
 				errorMessage: assistantErrorMessage,
 			});
 		};
-		child.stdout.on("data", (chunk) => {
-			buffer += chunk.toString();
+		child.stdout.on("data", (chunk: Buffer) => {
+			buffer += stdoutDecoder.write(chunk);
 			const lines = buffer.split("\n");
 			buffer = lines.pop() ?? "";
 			for (const line of lines) processLine(line);
 		});
-		child.stderr.on("data", (chunk) => {
-			const text = chunk.toString();
+		child.stderr.on("data", (chunk: Buffer) => {
+			const text = stderrDecoder.write(chunk);
+			if (!text) return;
 			appendArtifactFile(input.runDir, stderrPath, text);
 			stderr = appendBoundedTail(stderr, text, MAX_STDERR_BYTES);
 		});

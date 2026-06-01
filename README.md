@@ -60,7 +60,13 @@ Read-only review fanout for an existing target:
 /review-target @extensions/pi-simple-subagents/index.ts runtime bugs, security, packaging, UX
 ```
 
-or let the model call `review_target`. This creates a run directory, runs an optional scout plus fresh reviewers with distinct angles, and writes a synthesized `final-summary.md`. It does not run a worker and must not modify project/source files.
+The slash command also accepts a small option prefix before the target:
+
+```text
+/review-target --no-scout --reviewer "security boundaries" --reviewer "packaging UX" @extensions/pi-simple-subagents
+```
+
+or let the model call `review_target` for the full schema (`target`, `focus`, `reviewers`, `includeScout`). This creates a run directory, runs an optional scout plus fresh reviewers with distinct angles, and writes a synthesized `final-summary.md`. It does not run a worker and must not modify project/source files.
 
 ## Important workflow rules
 
@@ -81,8 +87,9 @@ The boundary is write authority, not tool visibility:
 - `scout`, `reviewer`, and `orchestrator` may write handoff artifacts inside the run directory.
 - Direct source-writing tools (`write`, `edit`, `ast_grep_scan.applyFixes=true`, `ast_grep_rewrite.apply=true`) are blocked for non-worker roles outside the artifact directory.
 - Scout/reviewer child runs are fenced with a pre-run snapshot; if a shell/script/test command changes the project/source snapshot, the extension attempts to restore the pre-run snapshot and the run fails with a policy-violation artifact.
-- Orchestration runs track an authorized source snapshot. Worker runs refresh that snapshot; if the orchestrator leaves extra project/source changes that were not produced by a worker run, the orchestration fails with a policy-violation artifact.
-- Ignored generated outputs such as caches, build folders, and coverage are normally excluded by gitignore or the filesystem fallback.
+- Orchestration runs track an authorized source snapshot archive. Only successful worker implementation/fix runs, plus validation runs that mutate source after a clean review, refresh that archive.
+- If the orchestrator leaves extra project/source changes that were not authorized by such a worker/validation run, the orchestration fails with a policy-violation artifact and attempts to restore the last authorized snapshot.
+- Ignored generated outputs such as caches, build folders, and coverage are normally excluded by gitignore or the filesystem fallback. Security-relevant control config at `.pi/pi-simple-subagents/config.json` is explicitly included in snapshots/fences even though `.pi` is otherwise ignored.
 
 Worker child agents inherit installed Pi extensions by default, so efficient implementation tools from packages such as `context-mode` and `pi-simple-ast-grep` can be used when they are installed. Read-only roles default to `inheritExtensionsForReadOnly: false` to avoid inherited extension/tool-name collisions; opt in only if you trust all inherited extensions.
 

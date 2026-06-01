@@ -4,6 +4,9 @@
   "description": "Small, opinionated Pi extension for plan-driven subagent orchestration with scout, worker, and fresh reviewers.",
   "license": "MIT",
   "type": "module",
+  "engines": {
+    "node": ">=22.6"
+  },
   "keywords": [
     "pi-package",
     "pi",
@@ -18,7 +21,8 @@
     ]
   },
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test tests/*.test.ts"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "^0.78.0",
@@ -30,7 +34,6 @@
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "^0.78.0",
     "@types/node": "^24.0.0",
-    "typebox": "^1.1.39",
     "typescript": "^5.9.3"
   },
   "files": [

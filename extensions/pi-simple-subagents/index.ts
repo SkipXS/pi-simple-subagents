@@ -27,7 +27,7 @@ import {
 	type ReviewTargetParams as ReviewTargetParamsType,
 	type RoleRunParams as RoleRunParamsType,
 } from "./schemas.ts";
-import { createProjectSnapshot, type ProjectSnapshot } from "./snapshots.ts";
+import { createProjectSnapshot, writeProjectSnapshotArchive, type ProjectSnapshot } from "./snapshots.ts";
 import { readOrchestrationState, writeOrchestrationState } from "./state.ts";
 import { parseReviewTargetCommand, runOrchestration, runReviewTarget } from "./workflows.ts";
 
@@ -46,7 +46,8 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 	};
 	const persistAuthorizedSourceSnapshot = (cwd: string) => {
 		if (!runDir) return undefined;
-		return writeArtifact(runDir, "source-snapshot-authorized.json", JSON.stringify(createProjectSnapshot(cwd, [runDir]), null, 2));
+		const snapshot = writeProjectSnapshotArchive(cwd, resolveArtifactPath(runDir, "source-snapshot-authorized.archive"), [runDir]);
+		return writeArtifact(runDir, "source-snapshot-authorized.json", JSON.stringify(snapshot, null, 2));
 	};
 
 	if (!role) {
@@ -137,7 +138,6 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 						onUpdate: (text) => onUpdate?.({ content: [{ type: "text", text }], details: {} }),
 					});
 					const succeeded = result.exitCode === 0;
-					if (params.role === "worker") persistAuthorizedSourceSnapshot(ctx.cwd);
 					let validationChangedTree: { before: ProjectSnapshot; after: ProjectSnapshot; artifact: string } | undefined;
 					if (validationBefore) {
 						const validationAfter = createProjectSnapshot(ctx.cwd, [runDir]);
@@ -160,6 +160,7 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 					}
 
 					if (succeeded && params.role === "worker" && (params.purpose === "implementation" || params.purpose === "fix")) {
+						persistAuthorizedSourceSnapshot(ctx.cwd);
 						workerRuns++;
 						reviewRunsSinceLatestWorker = 0;
 						latestWorkerRunReviewedClean = false;
