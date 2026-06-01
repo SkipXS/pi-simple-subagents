@@ -5,8 +5,7 @@ import { childResultText, spawnPiRole, throwChildRunError, type ChildRunResult }
 import { loadConfig } from "./config.ts";
 import { reviewTargetSystemPrompt } from "./prompts.ts";
 import { readPlanReference, readReference } from "./references.ts";
-import { createProjectSnapshot, restoreProjectSnapshotArchive, writeProjectSnapshotArchive, type ProjectSnapshot } from "./snapshots.ts";
-import { DEFAULT_REVIEW_ANGLES, MAX_REVIEW_ANGLES } from "./roles.ts";
+import { DEFAULT_REVIEW_ANGLES } from "./roles.ts";
 import type { ReviewTargetParams } from "./schemas.ts";
 
 function formatRunTask(planText: string, planSource: string, runDir: string): string {
@@ -102,56 +101,19 @@ export function parseReviewTargetCommand(input: string): ReviewTargetParams {
 	return focus ? { target: match[1], focus } : { target: match[1] };
 }
 
-function authorizedArchiveDir(runDir: string): string {
-	return resolveArtifactPath(runDir, "source-snapshot-authorized.archive");
-}
-
-function writeAuthorizedSourceSnapshot(cwd: string, runDir: string): ProjectSnapshot {
-	const snapshot = writeProjectSnapshotArchive(cwd, authorizedArchiveDir(runDir), [runDir]);
-	writeArtifact(runDir, "source-snapshot-authorized.json", JSON.stringify(snapshot, null, 2));
-	return snapshot;
-}
-
-function readAuthorizedSourceSnapshot(runDir: string): ProjectSnapshot | undefined {
-	const snapshotPath = resolveArtifactPath(runDir, "source-snapshot-authorized.json");
-	if (!fs.existsSync(snapshotPath)) return undefined;
-	try {
-		const parsed = JSON.parse(fs.readFileSync(snapshotPath, "utf8")) as Partial<ProjectSnapshot>;
-		if ((parsed.kind === "git" || parsed.kind === "filesystem") && typeof parsed.hash === "string" && typeof parsed.fileCount === "number") {
-			return { kind: parsed.kind, hash: parsed.hash, fileCount: parsed.fileCount };
-		}
-	} catch {
-		return undefined;
-	}
-	return undefined;
-}
-
 export async function runOrchestration(cwd: string, rawPlan: string, signal?: AbortSignal, onUpdate?: (text: string) => void): Promise<{ result: ChildRunResult; runDir: string; planSource: string }> {
 	const config = loadConfig(cwd);
 	const baseDir = resolveRunBaseDir(cwd, config);
 	const dir = path.join(baseDir, runId());
 	ensureDir(dir);
-	const initialSnapshot = writeAuthorizedSourceSnapshot(cwd, dir);
 	const { planText, planSource } = readPlanReference(cwd, rawPlan, config);
-	writeArtifact(dir, "input-plan.md", `Source: ${planSource}\n\n${planText}\n`);
+	writeArtifact(dir, "input-plan.md", `Source: ${planSource}
+
+${planText}
+`);
 	writeArtifact(dir, "config-effective.json", JSON.stringify(config, null, 2));
 	const task = formatRunTask(planText, planSource, dir);
 	const result = await spawnPiRole({ cwd, role: "orchestrator", task, runDir: dir, config, signal, onUpdate });
-	const authorizedSnapshot = readAuthorizedSourceSnapshot(dir) ?? initialSnapshot;
-	const finalSnapshot = createProjectSnapshot(cwd, [dir]);
-	if (authorizedSnapshot.hash !== finalSnapshot.hash) {
-		let restoreResult: ReturnType<typeof restoreProjectSnapshotArchive> | undefined;
-		let restoreError: string | undefined;
-		try {
-			restoreResult = restoreProjectSnapshotArchive(cwd, authorizedArchiveDir(dir), [dir]);
-		} catch (error) {
-			restoreError = error instanceof Error ? error.message : String(error);
-		}
-		const artifact = writeArtifact(dir, `orchestrator-source-write-policy-violation-${Date.now()}.md`, `# Orchestrator Source Write Policy Violation\n\nThe orchestrator is not allowed to persist project/source changes directly. Only successful worker implementation/fix runs and validation runs that mutate source may authorize project/source changes.\n\nThe extension attempted to restore the last authorized source snapshot.\n\nRestored: ${restoreResult?.restored ?? false}\n${restoreResult?.error ? `Restore error: ${restoreResult.error}\n` : ""}${restoreError ? `Restore error: ${restoreError}\n` : ""}\nAuthorized snapshot: ${JSON.stringify(authorizedSnapshot)}\n\nFinal snapshot before restore: ${JSON.stringify(finalSnapshot)}\n\nSnapshot after restore: ${JSON.stringify(restoreResult?.restoredSnapshot)}\n`);
-		const output = `[Policy] Orchestrator left project/source changes that were not authorized by a worker run. Restore attempted: ${restoreResult?.restored ?? false}. Artifact: ${artifact}\n\n${result.output}`;
-		const outputPath = writeArtifact(dir, `outputs/orchestrator-source-write-policy-${Date.now()}.md`, output);
-		return { result: { ...result, exitCode: 1, output, outputPath }, runDir: dir, planSource };
-	}
 	return { result, runDir: dir, planSource };
 }
 
@@ -162,7 +124,7 @@ export async function runReviewTarget(cwd: string, params: ReviewTargetParams, s
 	ensureDir(dir);
 	const target = readReference(cwd, params.target, "review target", config, { allowDirectory: true });
 	const focus = params.focus?.trim() || "runtime bugs, security boundaries, API/UX, packaging, and maintainability";
-	const reviewers = (params.reviewers && params.reviewers.length > 0 ? params.reviewers : [...DEFAULT_REVIEW_ANGLES]).slice(0, MAX_REVIEW_ANGLES);
+	const reviewers = params.reviewers && params.reviewers.length > 0 ? params.reviewers : [...DEFAULT_REVIEW_ANGLES];
 	writeArtifact(dir, "input-target.md", `Source: ${target.source}\nFocus: ${focus}\n\n${target.text}\n`);
 	writeArtifact(dir, "config-effective.json", JSON.stringify(config, null, 2));
 
@@ -193,7 +155,7 @@ export async function runReviewTarget(cwd: string, params: ReviewTargetParams, s
 		const result = await spawnPiRole({
 			cwd,
 			role: "reviewer",
-			task: `Review target source: ${target.source}\nFocus: ${focus}\nAssigned review angle: ${angle}\nRun directory: ${dir}\nRead input-target.md${scout ? " and scout-review-context.md" : ""}, inspect the target directly, and write ${expectedFile}. Do not modify project/source files.`,
+			task: `Review target source: ${target.source}\nFocus: ${focus}\nAssigned review angle: ${angle}\nRun directory: ${dir}\nRead input-target.md${scout ? " and scout-review-context.md" : ""}, inspect the target directly, and write ${expectedFile}. Prefer not to modify project/source files unless that is useful evidence for the review.`,
 			runDir: dir,
 			config,
 			signal,

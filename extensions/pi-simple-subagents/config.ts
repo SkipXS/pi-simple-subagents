@@ -2,8 +2,6 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
-	DEFAULT_CHILD_RUN_TIMEOUT_MS,
-	DEFAULT_REFERENCE_FILE_BYTES,
 	THINKING_LEVELS,
 	isObject,
 	type RoleName,
@@ -12,31 +10,17 @@ import {
 export interface RoleConfig {
 	model: string;
 	thinking?: typeof THINKING_LEVELS[number];
-	tools?: string[];
 }
 
 export interface Config {
 	roles: Record<RoleName, RoleConfig>;
-	workflow: {
-		maxReviewRounds: number;
-		allowParallelWorkers: boolean;
-		parallelWorkersRequireWorktrees: boolean;
-		runTestsOnlyAfterReviewLoop: boolean;
-	};
 	children: {
 		inheritExtensions: boolean;
 		inheritExtensionsForReadOnly: boolean;
 		inheritSkills: boolean;
-		roleTimeoutMs: number;
-	};
-	references: {
-		maxFileBytes: number;
-		allowOutsideCwd: boolean;
-		allowBinary: boolean;
 	};
 	artifacts: {
 		baseDir: string;
-		allowOutsideCwd: boolean;
 	};
 }
 
@@ -59,37 +43,23 @@ export const DEFAULT_CONFIG: Config = {
 			thinking: "high",
 		},
 	},
-	workflow: {
-		maxReviewRounds: 5,
-		allowParallelWorkers: false,
-		parallelWorkersRequireWorktrees: true,
-		runTestsOnlyAfterReviewLoop: true,
-	},
 	children: {
 		inheritExtensions: true,
 		inheritExtensionsForReadOnly: false,
 		inheritSkills: false,
-		roleTimeoutMs: DEFAULT_CHILD_RUN_TIMEOUT_MS,
 	},
-	references: {
-		maxFileBytes: DEFAULT_REFERENCE_FILE_BYTES,
-		allowOutsideCwd: false,
-		allowBinary: false,
-	},
-	artifacts: { baseDir: ".pi/agent-runs", allowOutsideCwd: false },
+	artifacts: { baseDir: ".pi/agent-runs" },
 };
 
 function cloneConfig(config: Config): Config {
 	return {
 		roles: {
-			orchestrator: { ...config.roles.orchestrator, tools: config.roles.orchestrator.tools ? [...config.roles.orchestrator.tools] : undefined },
-			scout: { ...config.roles.scout, tools: config.roles.scout.tools ? [...config.roles.scout.tools] : undefined },
-			worker: { ...config.roles.worker, tools: config.roles.worker.tools ? [...config.roles.worker.tools] : undefined },
-			reviewer: { ...config.roles.reviewer, tools: config.roles.reviewer.tools ? [...config.roles.reviewer.tools] : undefined },
+			orchestrator: { ...config.roles.orchestrator },
+			scout: { ...config.roles.scout },
+			worker: { ...config.roles.worker },
+			reviewer: { ...config.roles.reviewer },
 		},
-		workflow: { ...config.workflow },
 		children: { ...config.children },
-		references: { ...config.references },
 		artifacts: { ...config.artifacts },
 	};
 }
@@ -113,16 +83,6 @@ function expectBoolean(value: unknown, source: string, pathName: string): boolea
 	return value;
 }
 
-function expectPositiveInteger(value: unknown, source: string, pathName: string): number {
-	if (!Number.isInteger(value) || Number(value) < 1) throw configError(source, `${pathName} must be a positive integer`);
-	return Number(value);
-}
-
-function expectNonNegativeInteger(value: unknown, source: string, pathName: string): number {
-	if (!Number.isInteger(value) || Number(value) < 0) throw configError(source, `${pathName} must be a non-negative integer`);
-	return Number(value);
-}
-
 function expectModel(value: unknown, source: string, pathName: string): string {
 	const model = expectString(value, source, pathName);
 	if (!/^[A-Za-z0-9._+/@:-]+$/.test(model)) throw configError(source, `${pathName} contains unsupported characters`);
@@ -135,13 +95,6 @@ function expectThinking(value: unknown, source: string, pathName: string): typeo
 	return thinking as typeof THINKING_LEVELS[number];
 }
 
-function expectStringArray(value: unknown, source: string, pathName: string): string[] {
-	if (!Array.isArray(value) || value.length === 0 || value.some((item) => typeof item !== "string" || item.trim() === "")) {
-		throw configError(source, `${pathName} must be a non-empty array of non-empty strings`);
-	}
-	return [...value];
-}
-
 function mergeConfig(base: Config, override: unknown, source = "unknown"): Config {
 	if (override === undefined) return cloneConfig(base);
 	const overrideObject = expectObject(override, source, "root");
@@ -152,21 +105,11 @@ function mergeConfig(base: Config, override: unknown, source = "unknown"): Confi
 		for (const role of ["orchestrator", "scout", "worker", "reviewer"] as const) {
 			if (roles[role] === undefined) continue;
 			const roleObject = expectObject(roles[role], source, `roles.${role}`);
-			const existing = next.roles[role];
-			const roleConfig: RoleConfig = { ...existing, tools: existing.tools ? [...existing.tools] : undefined };
+			const roleConfig: RoleConfig = { ...next.roles[role] };
 			if (roleObject.model !== undefined) roleConfig.model = expectModel(roleObject.model, source, `roles.${role}.model`);
 			if (roleObject.thinking !== undefined) roleConfig.thinking = expectThinking(roleObject.thinking, source, `roles.${role}.thinking`);
-			if (roleObject.tools !== undefined) roleConfig.tools = expectStringArray(roleObject.tools, source, `roles.${role}.tools`);
 			next.roles[role] = roleConfig;
 		}
-	}
-
-	if (overrideObject.workflow !== undefined) {
-		const workflow = expectObject(overrideObject.workflow, source, "workflow");
-		if (workflow.maxReviewRounds !== undefined) next.workflow.maxReviewRounds = expectPositiveInteger(workflow.maxReviewRounds, source, "workflow.maxReviewRounds");
-		if (workflow.allowParallelWorkers !== undefined) next.workflow.allowParallelWorkers = expectBoolean(workflow.allowParallelWorkers, source, "workflow.allowParallelWorkers");
-		if (workflow.parallelWorkersRequireWorktrees !== undefined) next.workflow.parallelWorkersRequireWorktrees = expectBoolean(workflow.parallelWorkersRequireWorktrees, source, "workflow.parallelWorkersRequireWorktrees");
-		if (workflow.runTestsOnlyAfterReviewLoop !== undefined) next.workflow.runTestsOnlyAfterReviewLoop = expectBoolean(workflow.runTestsOnlyAfterReviewLoop, source, "workflow.runTestsOnlyAfterReviewLoop");
 	}
 
 	if (overrideObject.children !== undefined) {
@@ -174,23 +117,14 @@ function mergeConfig(base: Config, override: unknown, source = "unknown"): Confi
 		if (children.inheritExtensions !== undefined) next.children.inheritExtensions = expectBoolean(children.inheritExtensions, source, "children.inheritExtensions");
 		if (children.inheritExtensionsForReadOnly !== undefined) next.children.inheritExtensionsForReadOnly = expectBoolean(children.inheritExtensionsForReadOnly, source, "children.inheritExtensionsForReadOnly");
 		if (children.inheritSkills !== undefined) next.children.inheritSkills = expectBoolean(children.inheritSkills, source, "children.inheritSkills");
-		if (children.roleTimeoutMs !== undefined) next.children.roleTimeoutMs = expectPositiveInteger(children.roleTimeoutMs, source, "children.roleTimeoutMs");
-	}
-
-	if (overrideObject.references !== undefined) {
-		const references = expectObject(overrideObject.references, source, "references");
-		if (references.maxFileBytes !== undefined) next.references.maxFileBytes = expectPositiveInteger(references.maxFileBytes, source, "references.maxFileBytes");
-		if (references.allowOutsideCwd !== undefined) next.references.allowOutsideCwd = expectBoolean(references.allowOutsideCwd, source, "references.allowOutsideCwd");
-		if (references.allowBinary !== undefined) next.references.allowBinary = expectBoolean(references.allowBinary, source, "references.allowBinary");
 	}
 
 	if (overrideObject.artifacts !== undefined) {
 		const artifacts = expectObject(overrideObject.artifacts, source, "artifacts");
 		if (artifacts.baseDir !== undefined) next.artifacts.baseDir = expectString(artifacts.baseDir, source, "artifacts.baseDir");
-		if (artifacts.allowOutsideCwd !== undefined) next.artifacts.allowOutsideCwd = expectBoolean(artifacts.allowOutsideCwd, source, "artifacts.allowOutsideCwd");
 	}
 
-	return ensureRequiredInternalTools(next);
+	return next;
 }
 
 function readJsonIfExists(filePath: string): unknown {
@@ -203,28 +137,13 @@ function readJsonIfExists(filePath: string): unknown {
 	}
 }
 
-function ensureRequiredInternalTools(config: Config): Config {
-	const next = cloneConfig(config);
-	const ensure = (role: RoleName, tool: string) => {
-		const tools = next.roles[role].tools;
-		if (!tools) return;
-		if (!tools.includes(tool)) next.roles[role].tools = [...tools, tool];
-	};
-	ensure("orchestrator", "run_role_agent");
-	ensure("orchestrator", "write_run_artifact");
-	ensure("orchestrator", "mark_review_clean");
-	for (const role of ["scout", "worker", "reviewer"] as const) ensure(role, "write_run_artifact");
-	for (const role of ["orchestrator", "worker"] as const) ensure(role, "compact_session");
-	return next;
-}
-
 export function loadConfig(cwd: string): Config {
 	const globalConfigPath = path.join(os.homedir(), ".pi", "agent", "pi-simple-subagents", "config.json");
 	const projectConfigPath = path.join(cwd, ".pi", "pi-simple-subagents", "config.json");
 	let config = cloneConfig(DEFAULT_CONFIG);
 	config = mergeConfig(config, readJsonIfExists(globalConfigPath), globalConfigPath);
 	config = mergeConfig(config, readJsonIfExists(projectConfigPath), projectConfigPath);
-	return ensureRequiredInternalTools(config);
+	return config;
 }
 
 export function applyThinking(model: string, thinking: string | undefined): string {

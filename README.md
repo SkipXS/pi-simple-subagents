@@ -3,9 +3,9 @@
 Small, opinionated Pi extension for plan-driven orchestration with four roles:
 
 - `orchestrator` decides the workflow.
-- `scout` gathers read-only context and writes handoff artifacts.
-- `worker` is the only role allowed to modify project/source files.
-- `reviewer` performs read-only post-implementation review.
+- `scout` gathers context and writes handoff artifacts.
+- `worker` is the main implementation/fix/validation role.
+- `reviewer` performs post-implementation or target review.
 
 ## Installation
 
@@ -52,9 +52,9 @@ or ask naturally and let the model call the tool:
 Use orchestrate_plan for @docs/plan.md
 ```
 
-The orchestrator receives a short prompt plus the plan content/reference, then coordinates scout/worker/reviewer. Worker and reviewer loop until there are no blockers or fixes worth doing now, up to the configured review-round cap.
+The orchestrator receives a short prompt plus the plan content/reference, then coordinates scout/worker/reviewer. Worker and reviewer loop while it is useful; there is no default hard review-round cap.
 
-Read-only review fanout for an existing target:
+Review fanout for an existing target:
 
 ```text
 /review-target @extensions/pi-simple-subagents/index.ts runtime bugs, security, packaging, UX
@@ -66,34 +66,34 @@ The slash command also accepts a small option prefix before the target:
 /review-target --no-scout --reviewer "security boundaries" --reviewer "packaging UX" @extensions/pi-simple-subagents
 ```
 
-or let the model call `review_target` for the full schema (`target`, `focus`, `reviewers`, `includeScout`). This creates a run directory, runs an optional scout plus fresh reviewers with distinct angles, and writes a synthesized `final-summary.md`. It does not run a worker and must not modify project/source files.
+or let the model call `review_target` for the full schema (`target`, `focus`, `reviewers`, `includeScout`). This creates a run directory, runs an optional scout plus fresh reviewers with distinct angles, and writes a synthesized `final-summary.md`. It does not run a worker; in YOLO mode the extension does not enforce source-write restrictions.
 
-## Important workflow rules
+## Important workflow guidance
 
-- Scout/reviewer/orchestrator may write artifacts only inside the run directory.
-- Worker is the only role allowed to edit project/source files.
-- In implementation orchestration, reviewer cannot run before worker implementation. The separate `review_target` workflow is explicitly review-only and can run reviewers without a worker.
-- Final validation/tests/end-user checks are blocked until the orchestrator explicitly marks the latest worker implementation/fix as cleanly reviewed with `mark_review_clean` after synthesizing reviewer output. Workers may still run narrowly scoped implementation checks when needed for safe coding, but those do not replace the final validation phase.
-- If final validation changes the project snapshot, the clean-review mark is invalidated and another reviewer pass is required before finalizing.
-- Parallel workers are controlled by config and disabled by default.
+Pi is YOLO by default, and this extension follows that model. The workflow suggests roles and artifacts, but it does not impose hard file, time, snapshot, validation, review-round, or role-write guardrails.
+
+- Scout, reviewer, orchestrator, and worker can use the normal Pi tool surface.
+- Any role may run scripts, tests, benchmarks, downloads, browser/user-flow checks, or diagnostics when useful.
+- Worker is still the intended role for implementation/fixes, but this is guidance rather than an enforced sandbox.
+- `mark_review_clean` records the orchestrator's synthesized review state; it does not gate validation in YOLO mode.
+- Parallel workers are allowed by default. Prefer serial work when coordination risk is high.
+- Run artifacts remain the audit trail: plans, delegations, logs, outputs, review summaries, validation notes, and final summaries.
 
 ## Tool policy
 
-Pi is intentionally YOLO by default, and this extension now follows that model: role defaults do not pass a restrictive `--tools` allowlist. Scout, reviewer, orchestrator, and worker can use the normal Pi tool surface, including focused scripts or test commands when that improves evidence. You can still set `roles.<role>.tools` in config if you want a local opt-in restriction; when omitted, Pi's default tools are used.
+Pi is intentionally YOLO by default, and this extension now follows that model without file-level or time-level guardrails:
 
-The boundary is write authority, not tool visibility:
+- Role runs do not pass a restrictive `--tools` allowlist, even if old config files contain `roles.<role>.tools`.
+- Child runs are not killed by an extension timeout; there is no timeout config.
+- Plan/target references are not size-limited by default, may point outside the project by default, and binary-looking files are not blocked by default.
+- Scout/reviewer/orchestrator source edits are not blocked by extension hooks.
+- Scout/reviewer child runs are not fenced with source snapshots and are not auto-restored on mutation.
+- Orchestration runs do not archive/restore authorized source snapshots.
+- Review rounds, validation timing, and parallel workers are orchestration choices, not hard gates.
 
-- `worker` is the only role allowed to persist project/source changes.
-- `scout`, `reviewer`, and `orchestrator` may write handoff artifacts inside the run directory.
-- Direct source-writing tools (`write`, `edit`, `ast_grep_scan.applyFixes=true`, `ast_grep_rewrite.apply=true`) are blocked for non-worker roles outside the artifact directory.
-- Scout/reviewer child runs are fenced with a pre-run snapshot; if a shell/script/test command changes the project/source snapshot, the extension attempts to restore the pre-run snapshot and the run fails with a policy-violation artifact.
-- Orchestration runs track an authorized source snapshot archive. Only successful worker implementation/fix runs, plus validation runs that mutate source after a clean review, refresh that archive.
-- If the orchestrator leaves extra project/source changes that were not authorized by such a worker/validation run, the orchestration fails with a policy-violation artifact and attempts to restore the last authorized snapshot.
-- Ignored generated outputs such as caches, build folders, and coverage are normally excluded by gitignore or the filesystem fallback. Security-relevant control config at `.pi/pi-simple-subagents/config.json` is explicitly included in snapshots/fences even though `.pi` is otherwise ignored.
+Legacy config fields are accepted but ignored for compatibility; the product stance is YOLO rather than safety-by-config.
 
-Worker child agents inherit installed Pi extensions by default, so efficient implementation tools from packages such as `context-mode` and `pi-simple-ast-grep` can be used when they are installed. Read-only roles default to `inheritExtensionsForReadOnly: false` to avoid inherited extension/tool-name collisions; opt in only if you trust all inherited extensions.
-
-This policy protects the workflow boundary (which role may write project files); it is not a confidentiality boundary or OS/container sandbox. Run this extension only on trusted projects or inside an external sandbox when agents may execute untrusted code, access secrets, or run generated scripts.
+This policy is not a confidentiality boundary or OS/container sandbox. Run this extension only on trusted projects or inside an external sandbox when agents may execute untrusted code, access secrets, or run generated scripts.
 
 ## Compaction policy
 
@@ -114,7 +114,7 @@ Artifacts remain the source of truth after compaction.
 - `reviewer` gets a fresh session for every review round: `sessions/reviewer-<timestamp>.jsonl`.
 - `scout` gets a fresh session for each scout call: `sessions/scout-<timestamp>.jsonl`.
 
-Reviewer context should be passed through curated artifacts (`input-plan.md`, `orchestration.md`, `scout.md`, worker reports, accepted fixes) plus direct inspection of the relevant current files. Orchestration gate state is also persisted in `orchestration-state.json` so resume/restart scenarios do not lose review/validation gating.
+Reviewer context should be passed through curated artifacts (`input-plan.md`, `orchestration.md`, `scout.md`, worker reports, accepted fixes) plus direct inspection of the relevant current files. Lightweight orchestration state is persisted in `orchestration-state.json` for resume/restart continuity.
 
 ## Config
 
@@ -132,7 +132,7 @@ Global defaults can live at:
 
 Project config overrides global config.
 
-Example:
+Example with explicit YOLO defaults (all sections are optional; omit anything you do not want to override):
 
 ```json
 {
@@ -142,33 +142,19 @@ Example:
     "worker": { "model": "openai-codex/gpt-5.3-codex", "thinking": "high" },
     "reviewer": { "model": "openai-codex/gpt-5.5", "thinking": "high" }
   },
-  "workflow": {
-    "maxReviewRounds": 5,
-    "allowParallelWorkers": false,
-    "parallelWorkersRequireWorktrees": true,
-    "runTestsOnlyAfterReviewLoop": true
-  },
   "children": {
     "inheritExtensions": true,
     "inheritExtensionsForReadOnly": false,
-    "inheritSkills": false,
-    "roleTimeoutMs": 1800000
-  },
-  "references": {
-    "maxFileBytes": 524288,
-    "allowOutsideCwd": false,
-    "allowBinary": false
+    "inheritSkills": false
   },
   "artifacts": {
-    "baseDir": ".pi/agent-runs",
-    "allowOutsideCwd": false
+    "baseDir": ".pi/agent-runs"
   }
 }
 ```
-
 ## Source layout
 
-The extension entrypoint stays in `extensions/pi-simple-subagents/index.ts` and only wires Pi tools, commands, and runtime guards. Workflow internals are split into focused modules: `config.ts`, `roles.ts`, `artifacts.ts`, `references.ts`, `child-runner.ts`, `workflows.ts`, `snapshots.ts`, `state.ts`, `guards.ts`, `schemas.ts`, `prompts.ts`, and `text.ts`.
+The extension entrypoint stays in `extensions/pi-simple-subagents/index.ts` and wires Pi tools and commands. Workflow internals are split into focused modules: `config.ts`, `roles.ts`, `artifacts.ts`, `references.ts`, `child-runner.ts`, `workflows.ts`, `state.ts`, `schemas.ts`, `prompts.ts`, and `text.ts`.
 
 ## Run artifacts
 
@@ -189,4 +175,4 @@ Each orchestration/review run creates:
   final-summary.md
 ```
 
-Tool responses are truncated to keep Pi context bounded. Full child transcripts, stderr logs, referenced input files, and final outputs can be stored under the run directory. By default, `artifacts.baseDir` must resolve inside the current project and must not pass through symlinked directory components; set `artifacts.allowOutsideCwd=true` only when you explicitly want an external artifact root. Keep the artifact directory ignored/private when targets may contain sensitive data.
+Full child transcripts, stderr logs, referenced input files, and final outputs can be stored under the run directory. Tool-return previews may still be concise for chat readability, but the child run itself is not limited by that preview. `artifacts.baseDir` may be inside or outside the current project; keep the artifact directory ignored/private when targets may contain sensitive data.

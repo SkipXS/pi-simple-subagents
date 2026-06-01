@@ -1,6 +1,5 @@
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type, type Static } from "typebox";
-import { MAX_REVIEW_ANGLES } from "./roles.ts";
 
 export const RoleRunParams = Type.Object({
 	role: StringEnum(["scout", "worker", "reviewer"] as const, { description: "Role to run" }),
@@ -19,8 +18,8 @@ export type OrchestrateParams = Static<typeof OrchestrateParams>;
 export const ReviewTargetParams = Type.Object({
 	target: Type.String({ description: "Inline review scope, @file, @directory, or instruction pointing to what should be reviewed." }),
 	focus: Type.Optional(Type.String({ description: "Optional review focus, e.g. runtime bugs, security, packaging, UX." })),
-	reviewers: Type.Optional(Type.Array(Type.String({ description: "Reviewer angle/focus." }), { maxItems: MAX_REVIEW_ANGLES })),
-	includeScout: Type.Optional(Type.Boolean({ description: "Run a read-only scout before reviewers. Default: true.", default: true })),
+	reviewers: Type.Optional(Type.Array(Type.String({ description: "Reviewer angle/focus." }))),
+	includeScout: Type.Optional(Type.Boolean({ description: "Run a scout before reviewers. Default: true.", default: true })),
 });
 export type ReviewTargetParams = Static<typeof ReviewTargetParams>;
 

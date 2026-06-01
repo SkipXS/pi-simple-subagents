@@ -3,48 +3,67 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { loadConfig } from "../extensions/pi-simple-subagents/config.ts";
+import { readReference } from "../extensions/pi-simple-subagents/references.ts";
 import { writeArtifact } from "../extensions/pi-simple-subagents/artifacts.ts";
-import { createProjectWriteFence, restoreProjectSnapshotArchive, writeProjectSnapshotArchive } from "../extensions/pi-simple-subagents/snapshots.ts";
 import { readOrchestrationState } from "../extensions/pi-simple-subagents/state.ts";
 
 function tempProject(): string {
 	return fs.mkdtempSync(path.join(os.tmpdir(), "pi-simple-subagents-test-"));
 }
 
-test("read-only write fence includes and restores protected project config under .pi", () => {
+test("default config is YOLO without boundary config knobs", () => {
+	const cwd = tempProject();
+	const config = loadConfig(cwd);
+
+	assert.equal("workflow" in config, false);
+	assert.equal("references" in config, false);
+	assert.equal("roleTimeoutMs" in config.children, false);
+	assert.equal("allowOutsideCwd" in config.artifacts, false);
+	for (const role of Object.values(config.roles)) assert.equal("tools" in role, false);
+});
+
+test("legacy boundary config keys are ignored", () => {
 	const cwd = tempProject();
 	const configPath = path.join(cwd, ".pi", "pi-simple-subagents", "config.json");
 	fs.mkdirSync(path.dirname(configPath), { recursive: true });
-	fs.writeFileSync(path.join(cwd, "tracked.txt"), "source", "utf8");
-	fs.writeFileSync(configPath, "{\"workflow\":{}}", "utf8");
+	fs.writeFileSync(configPath, JSON.stringify({
+		roles: { worker: { tools: ["read"] } },
+		workflow: {
+			maxReviewRounds: "legacy value",
+			allowParallelWorkers: false,
+			parallelWorkersRequireWorktrees: true,
+			runTestsOnlyAfterReviewLoop: true,
+		},
+		children: { roleTimeoutMs: "legacy value" },
+		references: { maxFileBytes: 1, allowOutsideCwd: false, allowBinary: false },
+		artifacts: { allowOutsideCwd: false },
+	}), "utf8");
 
-	const fence = createProjectWriteFence(cwd);
-	fs.writeFileSync(configPath, "{\"workflow\":{\"maxReviewRounds\":1}}", "utf8");
-	const result = fence.restoreIfChanged();
+	const config = loadConfig(cwd);
 
-	assert.equal(result.changed, true);
-	assert.equal(result.restored, true);
-	assert.equal(fs.readFileSync(configPath, "utf8"), "{\"workflow\":{}}");
+	assert.equal("workflow" in config, false);
+	assert.equal("references" in config, false);
+	assert.equal("roleTimeoutMs" in config.children, false);
+	assert.equal("allowOutsideCwd" in config.artifacts, false);
+	assert.equal("tools" in config.roles.worker, false);
 });
 
-test("authorized snapshot archive restores unauthorized source mutations", () => {
+test("references are not blocked by size, outside-cwd, or binary-looking content", () => {
 	const cwd = tempProject();
-	const runDir = path.join(cwd, ".pi", "agent-runs", "run");
-	fs.mkdirSync(runDir, { recursive: true });
-	const sourcePath = path.join(cwd, "source.txt");
-	fs.writeFileSync(sourcePath, "authorized", "utf8");
-	const archiveDir = path.join(runDir, "source-snapshot-authorized.archive");
+	const outside = fs.mkdtempSync(path.join(os.tmpdir(), "pi-simple-subagents-outside-"));
+	const largePath = path.join(outside, "large.txt");
+	fs.writeFileSync(largePath, "x".repeat(600 * 1024), "utf8");
+	const binaryPath = path.join(outside, "binary.bin");
+	fs.writeFileSync(binaryPath, Buffer.from([0, 1, 2, 3, 255]));
+	const config = loadConfig(cwd);
 
-	const before = writeProjectSnapshotArchive(cwd, archiveDir, [runDir]);
-	fs.writeFileSync(sourcePath, "unauthorized", "utf8");
-	fs.writeFileSync(path.join(cwd, "extra.txt"), "extra", "utf8");
-	const result = restoreProjectSnapshotArchive(cwd, archiveDir, [runDir]);
+	const large = readReference(cwd, `@${largePath}`, "plan", config);
+	const binary = readReference(cwd, `@${binaryPath}`, "plan", config);
 
-	assert.equal(result.before.hash, before.hash);
-	assert.equal(result.changed, true);
-	assert.equal(result.restored, true);
-	assert.equal(fs.readFileSync(sourcePath, "utf8"), "authorized");
-	assert.equal(fs.existsSync(path.join(cwd, "extra.txt")), false);
+	assert.equal(large.source, largePath);
+	assert.equal(large.text.length, 600 * 1024);
+	assert.equal(binary.source, binaryPath);
 });
 
 test("corrupt orchestration state is quarantined and ignored", () => {

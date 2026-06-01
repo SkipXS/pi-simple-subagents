@@ -11,10 +11,6 @@ export type Purpose = "context" | "implementation" | "review" | "fix" | "validat
 export const MAX_TOOL_OUTPUT_BYTES = 24 * 1024;
 export const MAX_STDERR_BYTES = 16 * 1024;
 export const MAX_PROGRESS_LINE_BYTES = 500;
-export const MAX_REVIEW_ANGLES = 4;
-export const DEFAULT_REFERENCE_FILE_BYTES = 512 * 1024;
-export const DEFAULT_CHILD_RUN_TIMEOUT_MS = 30 * 60 * 1000;
-export const TEXT_PROBE_BYTES = 8192;
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
 export const DEFAULT_REVIEW_ANGLES = [
 	"correctness, regressions, and runtime failures",

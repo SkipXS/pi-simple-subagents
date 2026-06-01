@@ -1,17 +1,14 @@
 import * as fs from "node:fs";
-import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { copyArtifactFile, resolveArtifactPath, writeArtifact } from "./artifacts.ts";
 import { childEnvCounts, childResultText, throwChildRunError, spawnPiRole } from "./child-runner.ts";
 import { loadConfig } from "./config.ts";
-import { blocksNonWorkerProjectMutation } from "./guards.ts";
 import {
 	ROLE_ENV,
 	REVIEW_RUNS_ENV,
 	RUN_DIR_ENV,
 	WORKER_RUNS_ENV,
 	parseRoleEnv,
-	validateRolePurpose,
 } from "./roles.ts";
 import {
 	ArtifactParams,
@@ -27,7 +24,6 @@ import {
 	type ReviewTargetParams as ReviewTargetParamsType,
 	type RoleRunParams as RoleRunParamsType,
 } from "./schemas.ts";
-import { createProjectSnapshot, writeProjectSnapshotArchive, type ProjectSnapshot } from "./snapshots.ts";
 import { readOrchestrationState, writeOrchestrationState } from "./state.ts";
 import { parseReviewTargetCommand, runOrchestration, runReviewTarget } from "./workflows.ts";
 
@@ -39,15 +35,9 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 	let reviewRuns = persistedState?.reviewRuns ?? (Number(process.env[REVIEW_RUNS_ENV] ?? "0") || 0);
 	let reviewRunsSinceLatestWorker = persistedState?.reviewRunsSinceLatestWorker ?? 0;
 	let latestWorkerRunReviewedClean = persistedState?.latestWorkerRunReviewedClean ?? false;
-	let workerActive = false;
 	const persistState = () => {
 		if (!runDir) return undefined;
 		return writeOrchestrationState(runDir, { workerRuns, reviewRuns, reviewRunsSinceLatestWorker, latestWorkerRunReviewedClean });
-	};
-	const persistAuthorizedSourceSnapshot = (cwd: string) => {
-		if (!runDir) return undefined;
-		const snapshot = writeProjectSnapshotArchive(cwd, resolveArtifactPath(runDir, "source-snapshot-authorized.archive"), [runDir]);
-		return writeArtifact(runDir, "source-snapshot-authorized.json", JSON.stringify(snapshot, null, 2));
 	};
 
 	if (!role) {
@@ -71,8 +61,8 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 		pi.registerTool({
 			name: "review_target",
 			label: "Review Target",
-			description: "Run a read-only scout plus fresh reviewer fanout for an existing target, then synthesize improvements. Does not run worker or modify project/source files.",
-			promptSnippet: "Review an existing file, directory, diff, or extension with read-only reviewer fanout",
+			description: "Run a scout plus fresh reviewer fanout for an existing target, then synthesize improvements. YOLO mode does not enforce source-write restrictions.",
+			promptSnippet: "Review an existing file, directory, diff, or extension with reviewer fanout",
 			promptGuidelines: ["Use review_target when the user asks to inspect, audit, or suggest improvements without implementing changes."],
 			parameters: ReviewTargetParams,
 			async execute(_id, params: ReviewTargetParamsType, signal, onUpdate, ctx) {
@@ -89,108 +79,69 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 		pi.registerTool({
 			name: "run_role_agent",
 			label: "Run Role Agent",
-			description: "Run scout, worker, or reviewer for one concrete handoff task in the current orchestration run. Final validation/tests must not be run before implementation and clean review.",
+			description: "Run scout, worker, or reviewer for one concrete handoff task in the current orchestration run. YOLO by design: no file, time, validation, or snapshot guardrails are imposed.",
 			promptSnippet: "Delegate a concrete task to scout, worker, or reviewer within the current orchestration run",
 			promptGuidelines: [
-				"Use run_role_agent from orchestrator only after deciding the next workflow step.",
-				"Use purpose=validation for final tests or end-user checks, and only after implementation plus review/fix loop.",
+				"Use run_role_agent from orchestrator after deciding the next workflow step.",
+				"Use purpose=validation for final tests or end-user checks when useful; Pi YOLO policy applies.",
 			],
-			executionMode: "sequential",
 			parameters: RoleRunParams,
 			async execute(_id, params: RoleRunParamsType, signal, onUpdate, ctx) {
 				const config = loadConfig(ctx.cwd);
-				validateRolePurpose(params.role, params.purpose);
-				if (params.purpose === "validation" && workerRuns === 0) {
-					throw new Error("Final validation/tests/end-user checks are blocked until after successful worker implementation.");
-				}
-				if (params.purpose === "validation" && config.workflow.runTestsOnlyAfterReviewLoop && !latestWorkerRunReviewedClean) {
-					throw new Error("Final validation/tests/end-user checks are blocked until the orchestrator synthesizes a clean review with mark_review_clean.");
-				}
-				if (params.role === "reviewer" && workerRuns === 0) {
-					throw new Error("Reviewer is blocked until after successful worker implementation.");
-				}
-				if (params.role === "reviewer" && params.purpose === "review" && reviewRuns >= config.workflow.maxReviewRounds) {
-					throw new Error(`Review-round cap reached (${config.workflow.maxReviewRounds}). Stop and summarize remaining findings instead of launching another reviewer.`);
-				}
-				if (params.role === "worker" && params.purpose === "review") {
-					throw new Error("Worker cannot be used for review purpose.");
-				}
-				if (params.role === "worker" && workerActive && (!config.workflow.allowParallelWorkers || config.workflow.parallelWorkersRequireWorktrees)) {
-					throw new Error(config.workflow.allowParallelWorkers && config.workflow.parallelWorkersRequireWorktrees
-						? "Parallel workers require worktree isolation, which this v1 extension does not implement yet; wait for the active worker to finish."
-						: "Parallel workers are disabled by config; wait for the active worker to finish.");
-				}
 				const label = `${params.role}${params.round ? `-round-${params.round}` : ""}`;
 				const outputArtifactPath = params.outputFile ? resolveArtifactPath(runDir, params.outputFile) : undefined;
-				const task = `${params.task}\n\nRun directory: ${runDir}\nExpected output artifact: ${params.outputFile ?? `${label}.md`}\nPurpose: ${params.purpose}`;
-				writeArtifact(runDir, `delegations/${label}-${Date.now()}.md`, task);
-				const validationBefore = params.role === "worker" && params.purpose === "validation" ? createProjectSnapshot(ctx.cwd, [runDir]) : undefined;
-				if (params.role === "worker") workerActive = true;
-				try {
-					const result = await spawnPiRole({
-						cwd: ctx.cwd,
-						role: params.role,
-						task,
-						runDir,
-						config,
-						signal,
-						envExtra: childEnvCounts(workerRuns, reviewRuns),
-						onUpdate: (text) => onUpdate?.({ content: [{ type: "text", text }], details: {} }),
-					});
-					const succeeded = result.exitCode === 0;
-					let validationChangedTree: { before: ProjectSnapshot; after: ProjectSnapshot; artifact: string } | undefined;
-					if (validationBefore) {
-						const validationAfter = createProjectSnapshot(ctx.cwd, [runDir]);
-						if (validationBefore.hash !== validationAfter.hash) {
-							persistAuthorizedSourceSnapshot(ctx.cwd);
-							workerRuns++;
-							reviewRunsSinceLatestWorker = 0;
-							latestWorkerRunReviewedClean = false;
-							const artifact = writeArtifact(runDir, `validation-mutated-source-${Date.now()}.md`, `# Validation Mutated Source Tree\n\nValidation ran after a clean review, but the project snapshot changed. Treat this as a new worker change and run another reviewer before marking review clean again. This gate is invalidated even when validation itself fails.\n\nBefore: ${JSON.stringify(validationBefore)}\n\nAfter: ${JSON.stringify(validationAfter)}\n`);
-							validationChangedTree = { before: validationBefore, after: validationAfter, artifact };
-						}
-					}
-					const validationNotice = validationChangedTree ? `\n\n[Policy] Validation changed the project snapshot. Clean-review gate was invalidated; run another reviewer before finalizing. Artifact: ${validationChangedTree.artifact}` : "";
-					if (result.exitCode !== 0) {
-						persistState();
-						throw new Error(`${childResultText(`${params.role} failed`, result)}${validationNotice}`);
-					}
-					if (params.outputFile && outputArtifactPath && !fs.existsSync(outputArtifactPath)) {
-						copyArtifactFile(runDir, result.outputPath, outputArtifactPath);
-					}
+				const task = `${params.task}
 
-					if (succeeded && params.role === "worker" && (params.purpose === "implementation" || params.purpose === "fix")) {
-						persistAuthorizedSourceSnapshot(ctx.cwd);
-						workerRuns++;
-						reviewRunsSinceLatestWorker = 0;
-						latestWorkerRunReviewedClean = false;
-					}
-					if (succeeded && params.role === "reviewer" && params.purpose === "review") {
-						reviewRuns++;
-						reviewRunsSinceLatestWorker++;
-					}
+Run directory: ${runDir}
+Expected output artifact: ${params.outputFile ?? `${label}.md`}
+Purpose: ${params.purpose}`;
+				writeArtifact(runDir, `delegations/${label}-${Date.now()}.md`, task);
+				const result = await spawnPiRole({
+					cwd: ctx.cwd,
+					role: params.role,
+					task,
+					runDir,
+					config,
+					signal,
+					envExtra: childEnvCounts(workerRuns, reviewRuns),
+					onUpdate: (text) => onUpdate?.({ content: [{ type: "text", text }], details: {} }),
+				});
+				const succeeded = result.exitCode === 0;
+				if (result.exitCode !== 0) {
 					persistState();
-					return {
-						content: [{ type: "text", text: `${childResultText(`${params.role} finished`, { ...result, outputPath: outputArtifactPath ?? result.outputPath })}${validationNotice}` }],
-						details: { ...result, purpose: params.purpose, round: params.round, latestWorkerRunReviewedClean, workerRuns, reviewRuns, reviewRunsSinceLatestWorker, validationChangedTree },
-					};
-				} finally {
-					if (params.role === "worker") workerActive = false;
+					throw new Error(childResultText(`${params.role} failed`, result));
 				}
+				if (params.outputFile && outputArtifactPath && !fs.existsSync(outputArtifactPath)) {
+					copyArtifactFile(runDir, result.outputPath, outputArtifactPath);
+				}
+
+				if (succeeded && params.role === "worker" && (params.purpose === "implementation" || params.purpose === "fix" || params.purpose === "validation")) {
+					workerRuns++;
+					reviewRunsSinceLatestWorker = 0;
+					latestWorkerRunReviewedClean = false;
+				}
+				if (succeeded && params.role === "reviewer" && params.purpose === "review") {
+					reviewRuns++;
+					reviewRunsSinceLatestWorker++;
+				}
+				persistState();
+				return {
+					content: [{ type: "text", text: childResultText(`${params.role} finished`, { ...result, outputPath: outputArtifactPath ?? result.outputPath }) }],
+					details: { ...result, purpose: params.purpose, round: params.round, latestWorkerRunReviewedClean, workerRuns, reviewRuns, reviewRunsSinceLatestWorker },
+				};
+
 			},
 		});
 
 		pi.registerTool({
 			name: "mark_review_clean",
 			label: "Mark Review Clean",
-			description: "Mark the latest successful worker changes as having a clean synthesized review. Required before validation when review-gated validation is enabled.",
-			promptSnippet: "Mark the latest worker changes as cleanly reviewed after synthesizing reviewer output",
-			promptGuidelines: ["Use mark_review_clean only after reviewer artifacts show no blockers and no fixes worth doing now."],
+			description: "Record that the latest changes have a clean synthesized review. Informational only; it does not gate validation in YOLO mode.",
+			promptSnippet: "Record the latest changes as cleanly reviewed after synthesizing reviewer output",
+			promptGuidelines: ["Use mark_review_clean after reviewer artifacts show no blockers and no fixes worth doing now."],
 			executionMode: "sequential",
 			parameters: MarkReviewCleanParams,
 			async execute(_id, params: MarkReviewCleanParamsType) {
-				if (workerRuns === 0) throw new Error("Cannot mark review clean before worker implementation.");
-				if (reviewRunsSinceLatestWorker === 0) throw new Error("Cannot mark review clean before at least one reviewer run after the latest successful worker implementation/fix.");
 				latestWorkerRunReviewedClean = true;
 				const pathName = writeArtifact(runDir, `review-clean-${params.round ?? reviewRuns}.md`, `# Clean Review Mark\n\nRound: ${params.round ?? reviewRuns}\n\n${params.summary}\n`);
 				const statePath = persistState();
@@ -235,7 +186,7 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 		pi.registerTool({
 			name: "write_run_artifact",
 			label: "Write Run Artifact",
-			description: "Write a handoff artifact inside the current orchestration run directory. Does not allow escaping the run directory.",
+			description: "Write a handoff artifact relative to the current orchestration run directory.",
 			promptSnippet: "Write a handoff artifact inside the current orchestration run directory",
 			promptGuidelines: ["Use write_run_artifact for scout, worker, reviewer, and orchestrator handoff files instead of writing project files."],
 			parameters: ArtifactParams,
@@ -276,14 +227,14 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 		});
 
 		pi.registerCommand("review-target", {
-			description: "Run read-only scout/reviewer fanout for a target and synthesize improvements",
+			description: "Run scout/reviewer fanout for a target and synthesize improvements",
 			handler: async (args, ctx) => {
 				const target = args.trim();
 				if (!target) {
 					ctx.ui.notify("Usage: /review-target @path-or-dir [focus/instructions]", "warning");
 					return;
 				}
-				ctx.ui.notify("Starting read-only review workflow...", "info");
+				ctx.ui.notify("Starting review workflow...", "info");
 				try {
 					const result = await runReviewTarget(ctx.cwd, parseReviewTargetCommand(target), ctx.signal, (text) => ctx.ui.setStatus("review-target", text));
 					pi.sendMessage({
@@ -302,14 +253,4 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 			},
 		});
 	}
-
-	pi.on("tool_call", (event, ctx) => {
-		const currentRole = parseRoleEnv(process.env[ROLE_ENV]);
-		const currentRunDir = process.env[RUN_DIR_ENV];
-		if (!currentRole || currentRole === "worker") return;
-		const mutationReason = blocksNonWorkerProjectMutation(event, ctx.cwd, currentRunDir);
-		if (mutationReason) {
-			return { block: true, reason: `${currentRole} is read-only for project/source files; ${mutationReason}.` };
-		}
-	});
 }

@@ -17,25 +17,12 @@
       "thinking": "high"
     }
   },
-  "workflow": {
-    "maxReviewRounds": 5,
-    "allowParallelWorkers": false,
-    "parallelWorkersRequireWorktrees": true,
-    "runTestsOnlyAfterReviewLoop": true
-  },
   "children": {
     "inheritExtensions": true,
     "inheritExtensionsForReadOnly": false,
-    "inheritSkills": false,
-    "roleTimeoutMs": 1800000
-  },
-  "references": {
-    "maxFileBytes": 524288,
-    "allowOutsideCwd": false,
-    "allowBinary": false
+    "inheritSkills": false
   },
   "artifacts": {
-    "baseDir": ".pi/agent-runs",
-    "allowOutsideCwd": false
+    "baseDir": ".pi/agent-runs"
   }
 }
