@@ -29,7 +29,13 @@
   },
   "children": {
     "inheritExtensions": true,
-    "inheritSkills": false
+    "inheritSkills": false,
+    "roleTimeoutMs": 1800000
+  },
+  "references": {
+    "maxFileBytes": 524288,
+    "allowOutsideCwd": false,
+    "allowBinary": false
   },
   "artifacts": {
     "baseDir": ".pi/agent-runs"

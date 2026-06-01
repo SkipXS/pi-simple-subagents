@@ -12,7 +12,9 @@ Small, opinionated Pi extension for plan-driven orchestration with four roles:
 Local development install:
 
 ```bash
-pi install /d/Projects/pi-simple-subagents
+pi install /absolute/path/to/pi-simple-subagents
+# or, from the repository parent:
+pi install ./pi-simple-subagents
 ```
 
 After publishing to GitHub:
@@ -25,7 +27,7 @@ Project config example:
 
 ```bash
 mkdir -p .pi/pi-simple-subagents
-cp /d/Projects/pi-simple-subagents/examples/config.json .pi/pi-simple-subagents/config.json
+cp /absolute/path/to/pi-simple-subagents/examples/config.json .pi/pi-simple-subagents/config.json
 ```
 
 Reload Pi after install/config changes:
@@ -76,6 +78,8 @@ Default role allowlists:
 - `scout`: `read`, `write_run_artifact`, `ast_grep_search`, `ctx_search`
 - `worker`: `read`, `bash`, `edit`, `write`, `write_run_artifact`, `compact_session`, `ast_grep_search`, `ast_grep_scan`, `ast_grep_rewrite`, `ctx_execute`, `ctx_execute_file`, `ctx_search`, `ctx_batch_execute`
 - `reviewer`: `read`, `write_run_artifact`, `ast_grep_search`, `ast_grep_scan`, `ctx_search`
+
+Runtime read-only role policy also allows explicitly configured safe navigation tools: `ast_grep_scan`, `grep`, `find`, and `ls`. Mutating modes such as `ast_grep_scan.applyFixes=true`, `ast_grep_rewrite.apply=true`, shell tools, and arbitrary-code execution tools remain blocked for non-worker roles.
 
 Unknown tools are ignored by Pi when the backing extension is not installed.
 
@@ -136,7 +140,13 @@ Example:
   },
   "children": {
     "inheritExtensions": true,
-    "inheritSkills": false
+    "inheritSkills": false,
+    "roleTimeoutMs": 1800000
+  },
+  "references": {
+    "maxFileBytes": 524288,
+    "allowOutsideCwd": false,
+    "allowBinary": false
   },
   "artifacts": {
     "baseDir": ".pi/agent-runs"
@@ -162,4 +172,4 @@ Each orchestration/review run creates:
   final-summary.md
 ```
 
-Tool responses are truncated to keep Pi context bounded. Full child transcripts, stderr logs, and final outputs are stored under `logs/` and `outputs/`.
+Tool responses are truncated to keep Pi context bounded. Full child transcripts, stderr logs, referenced input files, and final outputs can be stored under the run directory. Keep `artifacts.baseDir` in an ignored/private location when targets may contain sensitive data.

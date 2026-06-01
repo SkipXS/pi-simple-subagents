@@ -17,10 +17,16 @@
       "./extensions/pi-simple-subagents"
     ]
   },
-  "dependencies": {
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
     "@earendil-works/pi-ai": "^0.78.0",
     "@earendil-works/pi-coding-agent": "^0.78.0",
-    "typebox": "^1.1.39"
+    "typebox": "^1.1.39",
+    "typescript": "^5.9.3"
   },
   "files": [
     "extensions/",

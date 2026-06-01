@@ -4,3 +4,4 @@ build/
 .DS_Store
 .env
 .pi/agent-runs/
+.pi/extensions/.pi-ast-grep-search-results.json
