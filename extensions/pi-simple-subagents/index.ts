@@ -1,4 +1,5 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import { createRequire } from "node:module";
 import * as os from "node:os";
@@ -72,6 +73,7 @@ interface Config {
 	};
 	children: {
 		inheritExtensions: boolean;
+		inheritExtensionsForReadOnly: boolean;
 		inheritSkills: boolean;
 		roleTimeoutMs: number;
 	};
@@ -80,7 +82,10 @@ interface Config {
 		allowOutsideCwd: boolean;
 		allowBinary: boolean;
 	};
-	artifacts: { baseDir: string };
+	artifacts: {
+		baseDir: string;
+		allowOutsideCwd: boolean;
+	};
 }
 
 const DEFAULT_CONFIG: Config = {
@@ -114,6 +119,7 @@ const DEFAULT_CONFIG: Config = {
 	},
 	children: {
 		inheritExtensions: true,
+		inheritExtensionsForReadOnly: false,
 		inheritSkills: false,
 		roleTimeoutMs: DEFAULT_CHILD_RUN_TIMEOUT_MS,
 	},
@@ -122,7 +128,7 @@ const DEFAULT_CONFIG: Config = {
 		allowOutsideCwd: false,
 		allowBinary: false,
 	},
-	artifacts: { baseDir: ".pi/agent-runs" },
+	artifacts: { baseDir: ".pi/agent-runs", allowOutsideCwd: false },
 };
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -238,6 +244,7 @@ function mergeConfig(base: Config, override: unknown, source = "unknown"): Confi
 	if (overrideObject.children !== undefined) {
 		const children = expectObject(overrideObject.children, source, "children");
 		if (children.inheritExtensions !== undefined) next.children.inheritExtensions = expectBoolean(children.inheritExtensions, source, "children.inheritExtensions");
+		if (children.inheritExtensionsForReadOnly !== undefined) next.children.inheritExtensionsForReadOnly = expectBoolean(children.inheritExtensionsForReadOnly, source, "children.inheritExtensionsForReadOnly");
 		if (children.inheritSkills !== undefined) next.children.inheritSkills = expectBoolean(children.inheritSkills, source, "children.inheritSkills");
 		if (children.roleTimeoutMs !== undefined) next.children.roleTimeoutMs = expectNonNegativeInteger(children.roleTimeoutMs, source, "children.roleTimeoutMs");
 	}
@@ -252,6 +259,7 @@ function mergeConfig(base: Config, override: unknown, source = "unknown"): Confi
 	if (overrideObject.artifacts !== undefined) {
 		const artifacts = expectObject(overrideObject.artifacts, source, "artifacts");
 		if (artifacts.baseDir !== undefined) next.artifacts.baseDir = expectString(artifacts.baseDir, source, "artifacts.baseDir");
+		if (artifacts.allowOutsideCwd !== undefined) next.artifacts.allowOutsideCwd = expectBoolean(artifacts.allowOutsideCwd, source, "artifacts.allowOutsideCwd");
 	}
 
 	return next;
@@ -303,9 +311,37 @@ function runId(): string {
 	return `${stamp}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function ensureRealDirectoryNoSymlinks(dir: string): void {
+	const absolute = path.resolve(dir);
+	const root = path.parse(absolute).root;
+	let current = root;
+	for (const segment of path.relative(root, absolute).split(path.sep).filter(Boolean)) {
+		current = path.join(current, segment);
+		if (fs.existsSync(current)) {
+			const stat = fs.lstatSync(current);
+			if (stat.isSymbolicLink()) throw new Error(`Refusing to use symlinked artifact directory component: ${current}`);
+			if (!stat.isDirectory()) throw new Error(`Artifact directory component is not a directory: ${current}`);
+		} else {
+			fs.mkdirSync(current);
+		}
+	}
+}
+
 function resolveRunBaseDir(cwd: string, config: Config): string {
 	const base = config.artifacts.baseDir || ".pi/agent-runs";
-	return path.isAbsolute(base) ? base : path.resolve(cwd, base);
+	const resolved = path.isAbsolute(base) ? path.resolve(base) : path.resolve(cwd, base);
+	if (!config.artifacts.allowOutsideCwd && !isPathInside(path.resolve(cwd), resolved)) {
+		throw new Error(`Artifact baseDir must stay inside the current project directory by default: ${resolved}. Set artifacts.allowOutsideCwd=true to opt in.`);
+	}
+	ensureRealDirectoryNoSymlinks(resolved);
+	if (!config.artifacts.allowOutsideCwd) {
+		const realCwd = fs.realpathSync.native(cwd);
+		const realBase = fs.realpathSync.native(resolved);
+		if (!isPathInside(realCwd, realBase)) {
+			throw new Error(`Artifact baseDir resolves outside the current project directory through symlinks: ${resolved}.`);
+		}
+	}
+	return resolved;
 }
 
 function ensureDir(dir: string): void {
@@ -487,7 +523,7 @@ function throwChildRunError(prefix: string, result: ChildRunResult): never {
 
 function roleSystemPrompt(role: RoleName, runDir: string, config: Config): string {
 	const common = `Artifact directory: ${runDir}\nUse write_run_artifact for handoff files. Write handoff artifacts only inside that directory unless you are the worker explicitly changing project/source files. Be concise, evidence-backed, and report file paths clearly. Use compact_session when your session gets long; preserve the plan, changed files, decisions, open reviewer findings, validation state, and artifact paths.`;
-	if (role === "orchestrator") return `You are the orchestrator for a small Pi multi-agent workflow.\n\n${common}\n\nYou receive a short instruction plus a plan reference or copied plan. Your job is to coordinate scout, worker, and reviewer through the run_role_agent tool.\n\nSession policy:\n- Worker uses one persistent session file for this run. Reuse it for implementation and all fix rounds.\n- Reviewer is fresh for every review round. Give reviewer curated artifact context every time: input-plan.md, orchestration.md, scout.md if present, worker-report-round-N.md, accepted-fixes from prior rounds, and instructions to inspect the current git diff directly.\n- Scout is fresh. Orchestrator stays persistent for the run.\n\nHard rules:\n- Keep orchestration authority. Do not ask child agents to spawn other agents.\n- Use scout only when code context is missing or the plan needs grounding. Scout is read-only for project/source files.\n- Worker is the only role allowed to modify project/source files.\n- Reviewer is read-only for project/source files and reviews only after worker implementation or worker fixes.\n- Do not distribute tests, browser/user-flow checks, or end-user validation before implementation work has happened. Those belong after implementation plus review/fix loop.\n- Loop worker -> reviewer -> worker fixes -> reviewer until reviewer reports no blockers and no fixes worth doing now. Stop and ask the user if a product/scope/architecture decision is required.\n- Safety cap: max ${config.workflow.maxReviewRounds} review rounds. If still not clean, stop with a clear summary.\n- Parallel workers are ${config.workflow.allowParallelWorkers ? "allowed only for truly independent tasks with non-overlapping files; prefer serial work if unsure" : "disabled in this project config; use one worker at a time"}.\n- Synthesize reviewer feedback yourself. Send only accepted fixes worth doing now to worker. Defer optional polish.\n- When a reviewer round reports no blockers and no fixes worth doing now, call mark_review_clean with a concise synthesis before any validation/testing.\n- After mark_review_clean, run final validation/testing if appropriate.\n\nRequired artifacts:\n- orchestration.md: decisions, rounds, agent calls, deferred items.\n- accepted-fixes-round-N.md when reviewer finds fixes worth doing now.\n- validation.md after the clean review loop if validation/tests are run.\n- final-summary.md at the end.\n\nFinal response: changed files, review loop outcome, validation evidence, deferred items, artifact paths.`;
+	if (role === "orchestrator") return `You are the orchestrator for a small Pi multi-agent workflow.\n\n${common}\n\nYou receive a short instruction plus a plan reference or copied plan. Your job is to coordinate scout, worker, and reviewer through the run_role_agent tool.\n\nSession policy:\n- Worker uses one persistent session file for this run. Reuse it for implementation and all fix rounds.\n- Reviewer is fresh for every review round. Give reviewer curated artifact context every time: input-plan.md, orchestration.md, scout.md if present, worker-report-round-N.md, accepted-fixes from prior rounds, and instructions to inspect the current git diff directly.\n- Scout is fresh. Orchestrator stays persistent for the run.\n\nHard rules:\n- Keep orchestration authority. Do not ask child agents to spawn other agents.\n- Use scout only when code context is missing or the plan needs grounding. Scout is read-only for project/source files.\n- Worker is the only role allowed to modify project/source files.\n- Reviewer is read-only for project/source files and reviews only after worker implementation or worker fixes.\n- Do not distribute tests, browser/user-flow checks, or end-user validation before implementation work has happened. Those belong after implementation plus review/fix loop.\n- Loop worker -> reviewer -> worker fixes -> reviewer until reviewer reports no blockers and no fixes worth doing now. Stop and ask the user if a product/scope/architecture decision is required.\n- Safety cap: max ${config.workflow.maxReviewRounds} review rounds. If still not clean, stop with a clear summary.\n- Parallel workers are ${config.workflow.allowParallelWorkers ? "allowed only for truly independent tasks with non-overlapping files; prefer serial work if unsure" : "disabled in this project config; use one worker at a time"}.\n- Synthesize reviewer feedback yourself. Send only accepted fixes worth doing now to worker. Defer optional polish.\n- When a reviewer round reports no blockers and no fixes worth doing now, call mark_review_clean with a concise synthesis before any validation/testing.\n- After mark_review_clean, run final validation/testing if appropriate. If validation mutates the project snapshot, the clean-review gate is invalidated and you must run another reviewer before finalizing.\n\nRequired artifacts:\n- orchestration.md: decisions, rounds, agent calls, deferred items.\n- accepted-fixes-round-N.md when reviewer finds fixes worth doing now.\n- validation.md after the clean review loop if validation/tests are run.\n- final-summary.md at the end.\n\nFinal response: changed files, review loop outcome, validation evidence, deferred items, artifact paths.`;
 	if (role === "scout") return `You are scout.\n\n${common}\n\nRead-only project reconnaissance. Inspect files with read and structural/search tools. Do not edit project/source files and do not run shell/arbitrary-code execution tools. Write a scout report artifact.\n\nReport format:\n# Scout Report\n## Relevant files\n## Existing behavior\n## Risks / unknowns\n## Recommended worker context`;
 	if (role === "reviewer") return `You are reviewer.\n\n${common}\n\nReview the implemented worker report/artifacts after implementation. You are read-only for project/source files. Do not edit source and do not run shell/arbitrary-code execution tools. Do not run broad end-user validation unless the orchestrator explicitly says the review/fix loop is complete and this is validation. Prefer inspecting relevant files and focused evidence.\n\nReport format:\n# Review Report\n## Blockers\n## Fixes worth doing now\n## Optional / deferred\n## Validation gaps\n## Verdict\nUse clear severity and file references.`;
 	return `You are worker.\n\n${common}\n\nYou are the only role allowed to modify project/source files. Implement only the concrete task from the orchestrator. Do not widen scope. If a product, architecture, or scope decision is missing, stop and report it. You may run narrowly scoped implementation checks when needed, but final validation belongs after a clean review mark. After changes, write a worker report artifact.\n\nReport format:\n# Worker Report\n## Changed files\n## What was implemented\n## Implementation checks run\n## Open issues / decisions needed\n## Residual risks`;
@@ -520,13 +556,13 @@ function resolvePiCliPath(): string | undefined {
 }
 
 function getPiInvocation(args: string[]): { command: string; args: string[] } {
+	const cliPath = resolvePiCliPath();
+	if (cliPath) return { command: process.execPath, args: [cliPath, ...args] };
 	const currentScript = process.argv[1];
 	const isBunVirtualScript = currentScript?.startsWith("/$bunfs/root/");
 	if (currentScript && !isBunVirtualScript && fs.existsSync(currentScript)) {
 		return { command: process.execPath, args: [currentScript, ...args] };
 	}
-	const cliPath = resolvePiCliPath();
-	if (cliPath) return { command: process.execPath, args: [cliPath, ...args] };
 	const execName = path.basename(process.execPath).toLowerCase();
 	const isGenericRuntime = /^(node|bun)(\.exe)?$/.test(execName);
 	if (!isGenericRuntime) return { command: process.execPath, args };
@@ -555,7 +591,8 @@ async function spawnPiRole(input: {
 		"--mode", "json",
 		"--session", sessionFile,
 	];
-	if (!input.config.children.inheritExtensions) {
+	const inheritExtensions = input.role === "worker" ? input.config.children.inheritExtensions : input.config.children.inheritExtensionsForReadOnly;
+	if (!inheritExtensions) {
 		args.push("--no-extensions", "--extension", EXTENSION_PATH);
 	}
 	if (!input.config.children.inheritSkills) {
@@ -574,7 +611,7 @@ async function spawnPiRole(input: {
 		[RUN_DIR_ENV]: input.runDir,
 		...(input.envExtra ?? {}),
 	};
-	if (input.config.children.inheritExtensions) {
+	if (inheritExtensions) {
 		delete env.CONTEXT_MODE_BRIDGE_DEPTH;
 	}
 	return await new Promise<ChildRunResult>((resolve) => {
@@ -791,6 +828,7 @@ async function runReviewTarget(cwd: string, params: ReviewTargetParams, signal?:
 		if (signal.aborted) abortReviewers();
 		else signal.addEventListener("abort", abortReviewers, { once: true });
 	}
+	let firstReviewFailure: unknown;
 	const settledReviews = await Promise.allSettled(reviewers.map(async (angle, index) => {
 		onUpdate?.(`review-target: reviewer ${index + 1}/${reviewers.length} running`);
 		const safeName = angle.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 48) || `review-${index + 1}`;
@@ -809,26 +847,30 @@ async function runReviewTarget(cwd: string, params: ReviewTargetParams, signal?:
 				systemPrompt: reviewTargetSystemPrompt("reviewer", dir),
 			});
 		} catch (error) {
+			firstReviewFailure ??= error;
 			reviewerAbort.abort();
 			throw error;
 		}
 		if (result.exitCode !== 0) {
+			const error = new Error(childResultText(`review-target reviewer ${index + 1} failed`, result));
+			firstReviewFailure ??= error;
 			reviewerAbort.abort();
-			throwChildRunError(`review-target reviewer ${index + 1} failed`, result);
+			throw error;
 		}
 		if (!fs.existsSync(expectedPath)) copyArtifactFile(dir, result.outputPath, expectedPath);
-		return result;
+		return { result, expectedPath, angle };
 	}));
 	if (signal) signal.removeEventListener("abort", abortReviewers);
 	const firstFailedReview = settledReviews.find((entry) => entry.status === "rejected") as PromiseRejectedResult | undefined;
-	if (firstFailedReview) throw firstFailedReview.reason;
-	const reviews = settledReviews.map((entry) => (entry as PromiseFulfilledResult<ChildRunResult>).value);
+	if (firstFailedReview) throw firstReviewFailure ?? firstFailedReview.reason;
+	const reviewRecords = settledReviews.map((entry) => (entry as PromiseFulfilledResult<{ result: ChildRunResult; expectedPath: string; angle: string }>).value);
+	const reviews = reviewRecords.map((entry) => entry.result);
 
 	onUpdate?.("review-target: synthesis running");
 	const synthesis = await spawnPiRole({
 		cwd,
 		role: "reviewer",
-		task: `Synthesize this review-only run.\nTarget source: ${target.source}\nFocus: ${focus}\nRun directory: ${dir}\nRead input-target.md, ${scout ? "scout-review-context.md, " : ""}the review artifacts and output logs below, then write final-summary.md.\n\nReview outputs:\n${reviews.map((r, i) => `- Reviewer ${i + 1}: ${r.outputPath}`).join("\n")}`,
+		task: `Synthesize this review-only run.\nTarget source: ${target.source}\nFocus: ${focus}\nRun directory: ${dir}\nRead input-target.md, ${scout ? "scout-review-context.md, " : ""}the review artifacts and output logs below, then write final-summary.md.\n\nReview artifacts and outputs:\n${reviewRecords.map((r, i) => `- Reviewer ${i + 1} (${r.angle}): artifact ${r.expectedPath}; output log ${r.result.outputPath}`).join("\n")}`,
 		runDir: dir,
 		config,
 		signal,
@@ -852,6 +894,84 @@ function isInside(parent: string, child: string): boolean {
 	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
+interface ProjectSnapshot {
+	kind: "git" | "filesystem";
+	hash: string;
+	fileCount: number;
+}
+
+function bufferFromSpawnStdout(value: string | Buffer): Buffer {
+	return Buffer.isBuffer(value) ? value : Buffer.from(value);
+}
+
+function runGit(cwd: string, args: string[]): Buffer | undefined {
+	const result = spawnSync("git", ["-C", cwd, ...args], { encoding: "buffer", maxBuffer: 64 * 1024 * 1024, windowsHide: true });
+	if (result.status !== 0 || result.error) return undefined;
+	return bufferFromSpawnStdout(result.stdout as string | Buffer);
+}
+
+function hashPathEntry(hash: ReturnType<typeof createHash>, cwd: string, relativePath: string): boolean {
+	const absolutePath = path.resolve(cwd, relativePath);
+	if (!isInside(path.resolve(cwd), absolutePath) || !fs.existsSync(absolutePath)) return false;
+	const stat = fs.lstatSync(absolutePath);
+	hash.update(relativePath);
+	hash.update("\0");
+	if (stat.isSymbolicLink()) {
+		hash.update("symlink\0");
+		hash.update(fs.readlinkSync(absolutePath));
+		return true;
+	}
+	if (!stat.isFile()) return false;
+	hash.update(`${stat.mode}\0${stat.size}\0`);
+	hash.update(fs.readFileSync(absolutePath));
+	hash.update("\0");
+	return true;
+}
+
+function createGitProjectSnapshot(cwd: string, excludedRoots: string[] = []): ProjectSnapshot | undefined {
+	const inside = runGit(cwd, ["rev-parse", "--is-inside-work-tree"])?.toString("utf8").trim();
+	if (inside !== "true") return undefined;
+	const output = runGit(cwd, ["ls-files", "-z", "--cached", "--others", "--exclude-standard"]);
+	if (!output) return undefined;
+	const excluded = excludedRoots.map((root) => path.resolve(root));
+	const files = output.toString("utf8").split("\0").filter(Boolean).filter((file) => {
+		const absolutePath = path.resolve(cwd, file);
+		return !excluded.some((root) => isInside(root, absolutePath));
+	}).sort();
+	const hash = createHash("sha256");
+	hash.update("git\0");
+	let fileCount = 0;
+	for (const file of files) if (hashPathEntry(hash, cwd, file)) fileCount++;
+	return { kind: "git", hash: hash.digest("hex"), fileCount };
+}
+
+function createFilesystemProjectSnapshot(cwd: string, excludedRoots: string[] = []): ProjectSnapshot {
+	const excludedNames = new Set([".git", ".pi", "node_modules", "dist", "build", "coverage", ".next", ".turbo", ".cache"]);
+	const excluded = excludedRoots.map((root) => path.resolve(root));
+	const files: string[] = [];
+	const walk = (dir: string) => {
+		if (excluded.some((root) => isInside(root, path.resolve(dir)))) return;
+		for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+			if (excludedNames.has(entry.name)) continue;
+			const absolutePath = path.join(dir, entry.name);
+			const relativePath = path.relative(cwd, absolutePath);
+			if (entry.isDirectory()) walk(absolutePath);
+			else if (entry.isFile() || entry.isSymbolicLink()) files.push(relativePath);
+		}
+	};
+	walk(cwd);
+	files.sort();
+	const hash = createHash("sha256");
+	hash.update("filesystem\0");
+	let fileCount = 0;
+	for (const file of files) if (hashPathEntry(hash, cwd, file)) fileCount++;
+	return { kind: "filesystem", hash: hash.digest("hex"), fileCount };
+}
+
+function createProjectSnapshot(cwd: string, excludedRoots: string[] = []): ProjectSnapshot {
+	return createGitProjectSnapshot(cwd, excludedRoots) ?? createFilesystemProjectSnapshot(cwd, excludedRoots);
+}
+
 function blocksReadOnlyToolMutation(event: { toolName: string; input: unknown }): string | undefined {
 	if (["bash", "ctx_execute", "ctx_execute_file", "ctx_batch_execute"].includes(event.toolName)) {
 		return `${event.toolName} is blocked for read-only roles because it can execute arbitrary commands or code`;
@@ -865,14 +985,44 @@ function blocksReadOnlyToolMutation(event: { toolName: string; input: unknown })
 	return undefined;
 }
 
+interface OrchestrationState {
+	workerRuns: number;
+	reviewRuns: number;
+	reviewRunsSinceLatestWorker: number;
+	latestWorkerRunReviewedClean: boolean;
+	updatedAt: string;
+}
+
+function readOrchestrationState(runDir: string): OrchestrationState | undefined {
+	const statePath = resolveArtifactPath(runDir, "orchestration-state.json");
+	if (!fs.existsSync(statePath)) return undefined;
+	const parsed = JSON.parse(fs.readFileSync(statePath, "utf8")) as Partial<OrchestrationState>;
+	return {
+		workerRuns: Number(parsed.workerRuns ?? 0) || 0,
+		reviewRuns: Number(parsed.reviewRuns ?? 0) || 0,
+		reviewRunsSinceLatestWorker: Number(parsed.reviewRunsSinceLatestWorker ?? 0) || 0,
+		latestWorkerRunReviewedClean: parsed.latestWorkerRunReviewedClean === true,
+		updatedAt: typeof parsed.updatedAt === "string" ? parsed.updatedAt : new Date(0).toISOString(),
+	};
+}
+
+function writeOrchestrationState(runDir: string, state: Omit<OrchestrationState, "updatedAt">): string {
+	return writeArtifact(runDir, "orchestration-state.json", JSON.stringify({ ...state, updatedAt: new Date().toISOString() }, null, 2));
+}
+
 export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 	const role = parseRoleEnv(process.env[ROLE_ENV]);
 	const runDir = process.env[RUN_DIR_ENV];
-	let workerRuns = Number(process.env[WORKER_RUNS_ENV] ?? "0") || 0;
-	let reviewRuns = Number(process.env[REVIEW_RUNS_ENV] ?? "0") || 0;
-	let reviewRunsSinceLatestWorker = 0;
-	let latestWorkerRunReviewedClean = false;
+	const persistedState = runDir ? readOrchestrationState(runDir) : undefined;
+	let workerRuns = persistedState?.workerRuns ?? (Number(process.env[WORKER_RUNS_ENV] ?? "0") || 0);
+	let reviewRuns = persistedState?.reviewRuns ?? (Number(process.env[REVIEW_RUNS_ENV] ?? "0") || 0);
+	let reviewRunsSinceLatestWorker = persistedState?.reviewRunsSinceLatestWorker ?? 0;
+	let latestWorkerRunReviewedClean = persistedState?.latestWorkerRunReviewedClean ?? false;
 	let workerActive = false;
+	const persistState = () => {
+		if (!runDir) return undefined;
+		return writeOrchestrationState(runDir, { workerRuns, reviewRuns, reviewRunsSinceLatestWorker, latestWorkerRunReviewedClean });
+	};
 
 	if (!role) {
 		pi.registerTool({
@@ -947,6 +1097,7 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 				const outputArtifactPath = params.outputFile ? resolveArtifactPath(runDir, params.outputFile) : undefined;
 				const task = `${params.task}\n\nRun directory: ${runDir}\nExpected output artifact: ${params.outputFile ?? `${label}.md`}\nPurpose: ${params.purpose}`;
 				writeArtifact(runDir, `delegations/${label}-${Date.now()}.md`, task);
+				const validationBefore = params.role === "worker" && params.purpose === "validation" ? createProjectSnapshot(ctx.cwd, [runDir]) : undefined;
 				if (params.role === "worker") workerActive = true;
 				try {
 					const result = await spawnPiRole({
@@ -964,6 +1115,21 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 					});
 					const succeeded = result.exitCode === 0;
 					if (result.exitCode !== 0) throwChildRunError(`${params.role} failed`, result);
+					if (params.outputFile && outputArtifactPath && !fs.existsSync(outputArtifactPath)) {
+						copyArtifactFile(runDir, result.outputPath, outputArtifactPath);
+					}
+
+					let validationChangedTree: { before: ProjectSnapshot; after: ProjectSnapshot; artifact: string } | undefined;
+					if (succeeded && validationBefore) {
+						const validationAfter = createProjectSnapshot(ctx.cwd, [runDir]);
+						if (validationBefore.hash !== validationAfter.hash) {
+							workerRuns++;
+							reviewRunsSinceLatestWorker = 0;
+							latestWorkerRunReviewedClean = false;
+							const artifact = writeArtifact(runDir, `validation-mutated-source-${Date.now()}.md`, `# Validation Mutated Source Tree\n\nValidation ran after a clean review, but the project snapshot changed. Treat this as a new worker change and run another reviewer before marking review clean again.\n\nBefore: ${JSON.stringify(validationBefore)}\n\nAfter: ${JSON.stringify(validationAfter)}\n`);
+							validationChangedTree = { before: validationBefore, after: validationAfter, artifact };
+						}
+					}
 					if (succeeded && params.role === "worker" && (params.purpose === "implementation" || params.purpose === "fix")) {
 						workerRuns++;
 						reviewRunsSinceLatestWorker = 0;
@@ -973,12 +1139,11 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 						reviewRuns++;
 						reviewRunsSinceLatestWorker++;
 					}
-					if (params.outputFile && outputArtifactPath && !fs.existsSync(outputArtifactPath)) {
-						copyArtifactFile(runDir, result.outputPath, outputArtifactPath);
-					}
+					persistState();
+					const validationNotice = validationChangedTree ? `\n\n[Policy] Validation changed the project snapshot. Clean-review gate was invalidated; run another reviewer before finalizing. Artifact: ${validationChangedTree.artifact}` : "";
 					return {
-						content: [{ type: "text", text: childResultText(`${params.role} finished`, { ...result, outputPath: outputArtifactPath ?? result.outputPath }) }],
-						details: { ...result, purpose: params.purpose, round: params.round, latestWorkerRunReviewedClean, workerRuns, reviewRuns, reviewRunsSinceLatestWorker },
+						content: [{ type: "text", text: `${childResultText(`${params.role} finished`, { ...result, outputPath: outputArtifactPath ?? result.outputPath })}${validationNotice}` }],
+						details: { ...result, purpose: params.purpose, round: params.round, latestWorkerRunReviewedClean, workerRuns, reviewRuns, reviewRunsSinceLatestWorker, validationChangedTree },
 					};
 				} finally {
 					if (params.role === "worker") workerActive = false;
@@ -998,7 +1163,8 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 				if (reviewRunsSinceLatestWorker === 0) throw new Error("Cannot mark review clean before at least one reviewer run after the latest successful worker implementation/fix.");
 				latestWorkerRunReviewedClean = true;
 				const pathName = writeArtifact(runDir, `review-clean-${params.round ?? reviewRuns}.md`, `# Clean Review Mark\n\nRound: ${params.round ?? reviewRuns}\n\n${params.summary}\n`);
-				return { content: [{ type: "text", text: `Marked latest worker changes as cleanly reviewed. Artifact: ${pathName}` }], details: { latestWorkerRunReviewedClean, path: pathName, workerRuns, reviewRuns, reviewRunsSinceLatestWorker } };
+				const statePath = persistState();
+				return { content: [{ type: "text", text: `Marked latest worker changes as cleanly reviewed. Artifact: ${pathName}` }], details: { latestWorkerRunReviewedClean, path: pathName, statePath, workerRuns, reviewRuns, reviewRunsSinceLatestWorker } };
 			},
 		});
 	}

@@ -29,6 +29,7 @@
   },
   "children": {
     "inheritExtensions": true,
+    "inheritExtensionsForReadOnly": false,
     "inheritSkills": false,
     "roleTimeoutMs": 1800000
   },
@@ -38,6 +39,7 @@
     "allowBinary": false
   },
   "artifacts": {
-    "baseDir": ".pi/agent-runs"
+    "baseDir": ".pi/agent-runs",
+    "allowOutsideCwd": false
   }
 }

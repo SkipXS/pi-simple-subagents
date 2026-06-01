@@ -68,11 +68,12 @@ or let the model call `review_target`. This creates a run directory, runs an opt
 - Worker is the only role allowed to edit project/source files.
 - In implementation orchestration, reviewer cannot run before worker implementation. The separate `review_target` workflow is explicitly review-only and can run reviewers without a worker.
 - Final validation/tests/end-user checks are blocked until the orchestrator explicitly marks the latest worker implementation/fix as cleanly reviewed with `mark_review_clean` after synthesizing reviewer output. Workers may still run narrowly scoped implementation checks when needed for safe coding, but those do not replace the final validation phase.
+- If final validation changes the project snapshot, the clean-review mark is invalidated and another reviewer pass is required before finalizing.
 - Parallel workers are controlled by config and disabled by default.
 
 ## Tool policy
 
-Child agents inherit installed Pi extensions by default, so efficient navigation tools from packages such as `context-mode` and `pi-simple-ast-grep` can be used when they are installed.
+Worker child agents inherit installed Pi extensions by default, so efficient implementation tools from packages such as `context-mode` and `pi-simple-ast-grep` can be used when they are installed. Read-only roles default to `inheritExtensionsForReadOnly: false` to avoid inherited extension/tool-name collisions; opt in only if you trust all inherited extensions.
 
 Default role allowlists:
 
@@ -83,7 +84,7 @@ Default role allowlists:
 
 Runtime read-only role policy also allows explicitly configured safe navigation tools: `ast_grep_scan`, `grep`, `find`, and `ls`. Mutating modes such as `ast_grep_scan.applyFixes=true`, `ast_grep_rewrite.apply=true`, shell tools, and arbitrary-code execution tools remain blocked for non-worker roles.
 
-Unknown tools are ignored by Pi when the backing extension is not installed.
+Unknown tools are ignored by Pi when the backing extension is not installed. With the safer default `children.inheritExtensionsForReadOnly=false`, read-only roles usually have only Pi built-ins plus this extension's artifact tools.
 
 For non-worker roles, tool policy is default-deny at config/load time and runtime. Shell/arbitrary execution tools (`bash`, `ctx_execute`, `ctx_execute_file`, `ctx_batch_execute`) and mutating ast-grep modes are blocked for read-only roles. They are reserved for `worker` because they can mutate files.
 
@@ -106,7 +107,7 @@ Artifacts remain the source of truth after compaction.
 - `reviewer` gets a fresh session for every review round: `sessions/reviewer-<timestamp>.jsonl`.
 - `scout` gets a fresh session for each scout call: `sessions/scout-<timestamp>.jsonl`.
 
-Reviewer context should be passed through curated artifacts (`input-plan.md`, `orchestration.md`, `scout.md`, worker reports, accepted fixes) plus direct inspection of the relevant current files.
+Reviewer context should be passed through curated artifacts (`input-plan.md`, `orchestration.md`, `scout.md`, worker reports, accepted fixes) plus direct inspection of the relevant current files. Orchestration gate state is also persisted in `orchestration-state.json` so resume/restart scenarios do not lose review/validation gating.
 
 ## Config
 
@@ -142,6 +143,7 @@ Example:
   },
   "children": {
     "inheritExtensions": true,
+    "inheritExtensionsForReadOnly": false,
     "inheritSkills": false,
     "roleTimeoutMs": 1800000
   },
@@ -151,7 +153,8 @@ Example:
     "allowBinary": false
   },
   "artifacts": {
-    "baseDir": ".pi/agent-runs"
+    "baseDir": ".pi/agent-runs",
+    "allowOutsideCwd": false
   }
 }
 ```
@@ -164,6 +167,7 @@ Each orchestration/review run creates:
 .pi/agent-runs/<run-id>/
   input-plan.md or input-target.md
   config-effective.json
+  orchestration-state.json
   orchestration.md or scout-review-context.md/review-*.md
   delegations/
   logs/
@@ -174,4 +178,4 @@ Each orchestration/review run creates:
   final-summary.md
 ```
 
-Tool responses are truncated to keep Pi context bounded. Full child transcripts, stderr logs, referenced input files, and final outputs can be stored under the run directory. Keep `artifacts.baseDir` in an ignored/private location when targets may contain sensitive data.
+Tool responses are truncated to keep Pi context bounded. Full child transcripts, stderr logs, referenced input files, and final outputs can be stored under the run directory. By default, `artifacts.baseDir` must resolve inside the current project and must not pass through symlinked directory components; set `artifacts.allowOutsideCwd=true` only when you explicitly want an external artifact root. Keep the artifact directory ignored/private when targets may contain sensitive data.
