@@ -9,6 +9,8 @@ Small, opinionated Pi extension for plan-driven orchestration with four roles:
 
 ## Installation
 
+Requires Pi `@earendil-works/pi-coding-agent` `>=0.78.0 <1`. Runtime dependencies used by the extension are declared in `dependencies`; the Pi host API is declared as a peer dependency.
+
 Local development install:
 
 ```bash
@@ -65,7 +67,7 @@ or let the model call `review_target`. This creates a run directory, runs an opt
 - Scout/reviewer/orchestrator may write artifacts only inside the run directory.
 - Worker is the only role allowed to edit project/source files.
 - In implementation orchestration, reviewer cannot run before worker implementation. The separate `review_target` workflow is explicitly review-only and can run reviewers without a worker.
-- Validation/tests/end-user checks are blocked until the orchestrator explicitly marks the latest worker implementation/fix as cleanly reviewed with `mark_review_clean` after synthesizing reviewer output.
+- Final validation/tests/end-user checks are blocked until the orchestrator explicitly marks the latest worker implementation/fix as cleanly reviewed with `mark_review_clean` after synthesizing reviewer output. Workers may still run narrowly scoped implementation checks when needed for safe coding, but those do not replace the final validation phase.
 - Parallel workers are controlled by config and disabled by default.
 
 ## Tool policy

@@ -34,6 +34,16 @@ const DEFAULT_REVIEW_ANGLES = [
 	"API design, UX, packaging, and maintainability",
 ] as const;
 
+function isRoleName(value: unknown): value is RoleName {
+	return typeof value === "string" && (ROLE_NAMES as readonly string[]).includes(value);
+}
+
+function parseRoleEnv(value: string | undefined): RoleName | undefined {
+	if (value === undefined || value === "") return undefined;
+	if (isRoleName(value)) return value;
+	throw new Error(`Invalid ${ROLE_ENV}: ${value}. Expected one of: ${ROLE_NAMES.join(", ")}`);
+}
+
 const ROLE_TOOL_ALLOWLIST: Record<Exclude<RoleName, "worker">, Set<string>> = {
 	orchestrator: new Set(["read", "write_run_artifact", "run_role_agent", "mark_review_clean", "compact_session", "ctx_search"]),
 	scout: new Set(["read", "write_run_artifact", "ast_grep_search", "ast_grep_scan", "ctx_search", "grep", "find", "ls"]),
@@ -310,11 +320,55 @@ function resolveArtifactPath(runDir: string, name: string): string {
 	return target;
 }
 
+function assertInsidePath(parent: string, child: string): void {
+	const relative = path.relative(parent, child);
+	if (relative.startsWith("..") || path.isAbsolute(relative)) throw new Error(`Path escapes parent directory: ${child}`);
+}
+
+function ensureSafeArtifactTarget(runDir: string, target: string): void {
+	const absoluteRunDir = path.resolve(runDir);
+	const absoluteTarget = path.resolve(target);
+	assertInsidePath(absoluteRunDir, absoluteTarget);
+	ensureDir(absoluteRunDir);
+	const runDirStat = fs.lstatSync(absoluteRunDir);
+	if (!runDirStat.isDirectory() || runDirStat.isSymbolicLink()) throw new Error(`Artifact run dir is not a real directory: ${absoluteRunDir}`);
+
+	const relative = path.relative(absoluteRunDir, path.dirname(absoluteTarget));
+	let current = absoluteRunDir;
+	for (const segment of relative.split(path.sep).filter(Boolean)) {
+		current = path.join(current, segment);
+		if (fs.existsSync(current)) {
+			const stat = fs.lstatSync(current);
+			if (stat.isSymbolicLink()) throw new Error(`Artifact path contains a symlink directory: ${current}`);
+			if (!stat.isDirectory()) throw new Error(`Artifact path component is not a directory: ${current}`);
+		} else {
+			fs.mkdirSync(current);
+		}
+	}
+
+	if (fs.existsSync(absoluteTarget) && fs.lstatSync(absoluteTarget).isSymbolicLink()) {
+		throw new Error(`Refusing to write artifact through symlink: ${absoluteTarget}`);
+	}
+	const realRunDir = fs.realpathSync.native(absoluteRunDir);
+	const realParent = fs.realpathSync.native(path.dirname(absoluteTarget));
+	assertInsidePath(realRunDir, realParent);
+}
+
 function writeArtifact(runDir: string, name: string, content: string): string {
 	const target = resolveArtifactPath(runDir, name);
-	ensureDir(path.dirname(target));
+	ensureSafeArtifactTarget(runDir, target);
 	fs.writeFileSync(target, content, "utf8");
 	return target;
+}
+
+function appendArtifactFile(runDir: string, target: string, content: string): void {
+	ensureSafeArtifactTarget(runDir, target);
+	fs.appendFileSync(target, content, "utf8");
+}
+
+function copyArtifactFile(runDir: string, source: string, target: string): void {
+	ensureSafeArtifactTarget(runDir, target);
+	fs.copyFileSync(source, target);
 }
 
 function uniqueSuffix(): string {
@@ -322,10 +376,10 @@ function uniqueSuffix(): string {
 }
 
 function resolveRoleSessionFile(runDir: string, role: RoleName): string {
-	const sessionsDir = path.join(runDir, "sessions");
-	ensureDir(sessionsDir);
-	if (role === "worker" || role === "orchestrator") return path.join(sessionsDir, `${role}.jsonl`);
-	return path.join(sessionsDir, `${role}-${uniqueSuffix()}.jsonl`);
+	const fileName = role === "worker" || role === "orchestrator" ? `sessions/${role}.jsonl` : `sessions/${role}-${uniqueSuffix()}.jsonl`;
+	const sessionFile = resolveArtifactPath(runDir, fileName);
+	ensureSafeArtifactTarget(runDir, sessionFile);
+	return sessionFile;
 }
 
 function isPathInside(parent: string, child: string): boolean {
@@ -356,7 +410,7 @@ function readReference(cwd: string, input: string, label: string, config: Config
 	const trimmed = input.trim();
 	const atMatch = (options?.leadingOnly ? /^@(?:"([^"]+)"|'([^']+)'|([^\s]+))/.exec(trimmed) : /(?:^|\s)@(?:"([^"]+)"|'([^']+)'|([^\s]+))/.exec(trimmed));
 	const pathLike = atMatch?.[1] ?? atMatch?.[2] ?? atMatch?.[3];
-	if (!pathLike) return { text: input, source: `inline ${label}` };
+	if (!atMatch || !pathLike) return { text: input, source: `inline ${label}` };
 
 	const absolutePath = path.resolve(cwd, pathLike);
 	if (!fs.existsSync(absolutePath)) throw new Error(`${label} reference not found: ${pathLike}`);
@@ -436,7 +490,7 @@ function roleSystemPrompt(role: RoleName, runDir: string, config: Config): strin
 	if (role === "orchestrator") return `You are the orchestrator for a small Pi multi-agent workflow.\n\n${common}\n\nYou receive a short instruction plus a plan reference or copied plan. Your job is to coordinate scout, worker, and reviewer through the run_role_agent tool.\n\nSession policy:\n- Worker uses one persistent session file for this run. Reuse it for implementation and all fix rounds.\n- Reviewer is fresh for every review round. Give reviewer curated artifact context every time: input-plan.md, orchestration.md, scout.md if present, worker-report-round-N.md, accepted-fixes from prior rounds, and instructions to inspect the current git diff directly.\n- Scout is fresh. Orchestrator stays persistent for the run.\n\nHard rules:\n- Keep orchestration authority. Do not ask child agents to spawn other agents.\n- Use scout only when code context is missing or the plan needs grounding. Scout is read-only for project/source files.\n- Worker is the only role allowed to modify project/source files.\n- Reviewer is read-only for project/source files and reviews only after worker implementation or worker fixes.\n- Do not distribute tests, browser/user-flow checks, or end-user validation before implementation work has happened. Those belong after implementation plus review/fix loop.\n- Loop worker -> reviewer -> worker fixes -> reviewer until reviewer reports no blockers and no fixes worth doing now. Stop and ask the user if a product/scope/architecture decision is required.\n- Safety cap: max ${config.workflow.maxReviewRounds} review rounds. If still not clean, stop with a clear summary.\n- Parallel workers are ${config.workflow.allowParallelWorkers ? "allowed only for truly independent tasks with non-overlapping files; prefer serial work if unsure" : "disabled in this project config; use one worker at a time"}.\n- Synthesize reviewer feedback yourself. Send only accepted fixes worth doing now to worker. Defer optional polish.\n- When a reviewer round reports no blockers and no fixes worth doing now, call mark_review_clean with a concise synthesis before any validation/testing.\n- After mark_review_clean, run final validation/testing if appropriate.\n\nRequired artifacts:\n- orchestration.md: decisions, rounds, agent calls, deferred items.\n- accepted-fixes-round-N.md when reviewer finds fixes worth doing now.\n- validation.md after the clean review loop if validation/tests are run.\n- final-summary.md at the end.\n\nFinal response: changed files, review loop outcome, validation evidence, deferred items, artifact paths.`;
 	if (role === "scout") return `You are scout.\n\n${common}\n\nRead-only project reconnaissance. Inspect files with read and structural/search tools. Do not edit project/source files and do not run shell/arbitrary-code execution tools. Write a scout report artifact.\n\nReport format:\n# Scout Report\n## Relevant files\n## Existing behavior\n## Risks / unknowns\n## Recommended worker context`;
 	if (role === "reviewer") return `You are reviewer.\n\n${common}\n\nReview the implemented worker report/artifacts after implementation. You are read-only for project/source files. Do not edit source and do not run shell/arbitrary-code execution tools. Do not run broad end-user validation unless the orchestrator explicitly says the review/fix loop is complete and this is validation. Prefer inspecting relevant files and focused evidence.\n\nReport format:\n# Review Report\n## Blockers\n## Fixes worth doing now\n## Optional / deferred\n## Validation gaps\n## Verdict\nUse clear severity and file references.`;
-	return `You are worker.\n\n${common}\n\nYou are the only role allowed to modify project/source files. Implement only the concrete task from the orchestrator. Do not widen scope. If a product, architecture, or scope decision is missing, stop and report it. After changes, write a worker report artifact.\n\nReport format:\n# Worker Report\n## Changed files\n## What was implemented\n## Validation run\n## Open issues / decisions needed\n## Residual risks`;
+	return `You are worker.\n\n${common}\n\nYou are the only role allowed to modify project/source files. Implement only the concrete task from the orchestrator. Do not widen scope. If a product, architecture, or scope decision is missing, stop and report it. You may run narrowly scoped implementation checks when needed, but final validation belongs after a clean review mark. After changes, write a worker report artifact.\n\nReport format:\n# Worker Report\n## Changed files\n## What was implemented\n## Implementation checks run\n## Open issues / decisions needed\n## Residual risks`;
 }
 
 interface ChildRunResult {
@@ -477,7 +531,7 @@ function getPiInvocation(args: string[]): { command: string; args: string[] } {
 	const isGenericRuntime = /^(node|bun)(\.exe)?$/.test(execName);
 	if (!isGenericRuntime) return { command: process.execPath, args };
 	if (process.platform === "win32") {
-		throw new Error("Unable to resolve the Pi CLI entrypoint without cmd.exe. Ensure @earendil-works/pi-coding-agent is installed as a dependency of this package.");
+		throw new Error("Unable to resolve the Pi CLI entrypoint from the running process or the @earendil-works/pi-coding-agent peer dependency. Ensure a compatible Pi CLI (>=0.78.0 <1) is installed and visible to this extension.");
 	}
 	return { command: "pi", args };
 }
@@ -525,11 +579,8 @@ async function spawnPiRole(input: {
 	}
 	return await new Promise<ChildRunResult>((resolve) => {
 		const stampBase = `${Date.now()}-${uniqueSuffix()}`;
-		const transcriptPath = resolveArtifactPath(input.runDir, `logs/${input.role}-${stampBase}.jsonl`);
-		const stderrPath = resolveArtifactPath(input.runDir, `logs/${input.role}-${stampBase}.stderr.log`);
-		ensureDir(path.dirname(transcriptPath));
-		fs.writeFileSync(transcriptPath, "", "utf8");
-		fs.writeFileSync(stderrPath, "", "utf8");
+		const transcriptPath = writeArtifact(input.runDir, `logs/${input.role}-${stampBase}.jsonl`, "");
+		const stderrPath = writeArtifact(input.runDir, `logs/${input.role}-${stampBase}.stderr.log`, "");
 
 		const invocation = getPiInvocation(args);
 		const child = spawn(invocation.command, invocation.args, { cwd: input.cwd, env, stdio: ["ignore", "pipe", "pipe"], shell: false });
@@ -541,13 +592,15 @@ async function spawnPiRole(input: {
 		let timedOut = false;
 		const processLine = (line: string) => {
 			if (!line.trim()) return;
-			fs.appendFileSync(transcriptPath, `${line}\n`, "utf8");
+			appendArtifactFile(input.runDir, transcriptPath, `${line}\n`);
 			try {
 				const event = JSON.parse(line);
 				if (event.type === "message_end" && event.message?.role === "assistant") {
-					for (const part of event.message.content ?? []) {
-						if (part.type === "text") finalOutput = part.text;
-					}
+					const textParts = (event.message.content ?? [])
+						.filter((part: { type?: string }) => part.type === "text")
+						.map((part: { text?: unknown }) => typeof part.text === "string" ? part.text : "")
+						.filter((text: string) => text.length > 0);
+					if (textParts.length > 0) finalOutput = textParts.join("\n\n");
 					if (finalOutput) {
 						const firstLine = finalOutput.split("\n")[0] ?? "";
 						input.onUpdate?.(`${input.role}: ${takeUtf8Head(firstLine, MAX_PROGRESS_LINE_BYTES)}`);
@@ -559,10 +612,11 @@ async function spawnPiRole(input: {
 			aborted = true;
 			const line = `${reason}\n`;
 			stderr = appendBoundedTail(stderr, stderr.endsWith("\n") || stderr.length === 0 ? line : `\n${line}`, MAX_STDERR_BYTES);
-			fs.appendFileSync(stderrPath, stderr.endsWith("\n") ? line : `\n${line}`, "utf8");
+			appendArtifactFile(input.runDir, stderrPath, stderr.endsWith("\n") ? line : `\n${line}`);
 			if (process.platform === "win32" && child.pid) {
 				const killer = spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], { stdio: "ignore", windowsHide: true });
 				killer.on("error", () => child.kill());
+				killer.on("close", (code) => { if (code !== 0) child.kill(); });
 				return;
 			}
 			child.kill("SIGTERM");
@@ -612,7 +666,7 @@ async function spawnPiRole(input: {
 		});
 		child.stderr.on("data", (chunk) => {
 			const text = chunk.toString();
-			fs.appendFileSync(stderrPath, text, "utf8");
+			appendArtifactFile(input.runDir, stderrPath, text);
 			stderr = appendBoundedTail(stderr, text, MAX_STDERR_BYTES);
 		});
 		child.on("close", (code, signal) => {
@@ -620,7 +674,7 @@ async function spawnPiRole(input: {
 		});
 		child.on("error", (error) => {
 			const message = error instanceof Error ? error.message : String(error);
-			fs.appendFileSync(stderrPath, message, "utf8");
+			appendArtifactFile(input.runDir, stderrPath, message);
 			stderr = appendBoundedTail(stderr, message, MAX_STDERR_BYTES);
 			finish(1);
 		});
@@ -633,7 +687,7 @@ async function spawnPiRole(input: {
 
 const RoleRunParams = Type.Object({
 	role: StringEnum(["scout", "worker", "reviewer"] as const, { description: "Role to run" }),
-	purpose: StringEnum(["context", "implementation", "review", "fix", "validation"] as const, { description: "Why this role is being run. Use validation for tests/end-user checks." }),
+	purpose: StringEnum(["context", "implementation", "review", "fix", "validation"] as const, { description: "Why this role is being run. Use validation for final tests/end-user checks." }),
 	task: Type.String({ description: "Concrete task for the role. Include artifact paths and constraints." }),
 	round: Type.Optional(Type.Integer({ minimum: 1 })),
 	outputFile: Type.Optional(Type.String({ description: "Expected handoff artifact filename inside the run dir, e.g. review-round-1.md" })),
@@ -728,7 +782,7 @@ async function runReviewTarget(cwd: string, params: ReviewTargetParams, signal?:
 		});
 		if (scout.exitCode !== 0) throwChildRunError("review-target scout failed", scout);
 		const scoutArtifact = resolveArtifactPath(dir, "scout-review-context.md");
-		if (!fs.existsSync(scoutArtifact)) fs.copyFileSync(scout.outputPath, scoutArtifact);
+		if (!fs.existsSync(scoutArtifact)) copyArtifactFile(dir, scout.outputPath, scoutArtifact);
 	}
 
 	const reviewerAbort = new AbortController();
@@ -762,7 +816,7 @@ async function runReviewTarget(cwd: string, params: ReviewTargetParams, signal?:
 			reviewerAbort.abort();
 			throwChildRunError(`review-target reviewer ${index + 1} failed`, result);
 		}
-		if (!fs.existsSync(expectedPath)) fs.copyFileSync(result.outputPath, expectedPath);
+		if (!fs.existsSync(expectedPath)) copyArtifactFile(dir, result.outputPath, expectedPath);
 		return result;
 	}));
 	if (signal) signal.removeEventListener("abort", abortReviewers);
@@ -783,7 +837,7 @@ async function runReviewTarget(cwd: string, params: ReviewTargetParams, signal?:
 	});
 	if (synthesis.exitCode !== 0) throwChildRunError("review-target synthesis failed", synthesis);
 	const finalSummaryPath = resolveArtifactPath(dir, "final-summary.md");
-	if (!fs.existsSync(finalSummaryPath)) fs.copyFileSync(synthesis.outputPath, finalSummaryPath);
+	if (!fs.existsSync(finalSummaryPath)) copyArtifactFile(dir, synthesis.outputPath, finalSummaryPath);
 	return { runDir: dir, targetSource: target.source, scout, reviews, synthesis, finalSummaryPath };
 }
 
@@ -812,7 +866,7 @@ function blocksReadOnlyToolMutation(event: { toolName: string; input: unknown })
 }
 
 export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
-	const role = process.env[ROLE_ENV] as RoleName | undefined;
+	const role = parseRoleEnv(process.env[ROLE_ENV]);
 	const runDir = process.env[RUN_DIR_ENV];
 	let workerRuns = Number(process.env[WORKER_RUNS_ENV] ?? "0") || 0;
 	let reviewRuns = Number(process.env[REVIEW_RUNS_ENV] ?? "0") || 0;
@@ -859,21 +913,21 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 		pi.registerTool({
 			name: "run_role_agent",
 			label: "Run Role Agent",
-			description: "Run scout, worker, or reviewer for one concrete handoff task in the current orchestration run. Validation/tests must not be run before implementation.",
+			description: "Run scout, worker, or reviewer for one concrete handoff task in the current orchestration run. Final validation/tests must not be run before implementation and clean review.",
 			promptSnippet: "Delegate a concrete task to scout, worker, or reviewer within the current orchestration run",
 			promptGuidelines: [
 				"Use run_role_agent from orchestrator only after deciding the next workflow step.",
-				"Use purpose=validation for tests or end-user checks, and only after implementation plus review/fix loop.",
+				"Use purpose=validation for final tests or end-user checks, and only after implementation plus review/fix loop.",
 			],
 			parameters: RoleRunParams,
 			async execute(_id, params: RoleRunParams, signal, onUpdate, ctx) {
 				const config = loadConfig(ctx.cwd);
 				validateRolePurpose(params.role, params.purpose);
 				if (params.purpose === "validation" && workerRuns === 0) {
-					throw new Error("Validation/tests/end-user checks are blocked until after successful worker implementation.");
+					throw new Error("Final validation/tests/end-user checks are blocked until after successful worker implementation.");
 				}
 				if (params.purpose === "validation" && config.workflow.runTestsOnlyAfterReviewLoop && !latestWorkerRunReviewedClean) {
-					throw new Error("Validation/tests/end-user checks are blocked until the orchestrator synthesizes a clean review with mark_review_clean.");
+					throw new Error("Final validation/tests/end-user checks are blocked until the orchestrator synthesizes a clean review with mark_review_clean.");
 				}
 				if (params.role === "reviewer" && workerRuns === 0) {
 					throw new Error("Reviewer is blocked until after successful worker implementation.");
@@ -920,7 +974,7 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 						reviewRunsSinceLatestWorker++;
 					}
 					if (params.outputFile && outputArtifactPath && !fs.existsSync(outputArtifactPath)) {
-						fs.copyFileSync(result.outputPath, outputArtifactPath);
+						copyArtifactFile(runDir, result.outputPath, outputArtifactPath);
 					}
 					return {
 						content: [{ type: "text", text: childResultText(`${params.role} finished`, { ...result, outputPath: outputArtifactPath ?? result.outputPath }) }],
@@ -1054,7 +1108,7 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 	}
 
 	pi.on("tool_call", (event, ctx) => {
-		const currentRole = process.env[ROLE_ENV] as RoleName | undefined;
+		const currentRole = parseRoleEnv(process.env[ROLE_ENV]);
 		const currentRunDir = process.env[RUN_DIR_ENV];
 		if (!currentRole || currentRole === "worker") return;
 		if ((event.toolName === "write" || event.toolName === "edit") && currentRunDir) {
@@ -1064,7 +1118,7 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 			}
 		}
 		const allowedTools = ROLE_TOOL_ALLOWLIST[currentRole];
-		if (allowedTools && !allowedTools.has(event.toolName)) {
+		if (!allowedTools.has(event.toolName)) {
 			return { block: true, reason: `${currentRole} may only use approved read-only/artifact tools. Blocked tool: ${event.toolName}.` };
 		}
 		const mutationReason = blocksReadOnlyToolMutation(event);
