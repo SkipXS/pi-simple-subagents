@@ -3,7 +3,7 @@
     "orchestrator": {
       "model": "openai-codex/gpt-5.5",
       "thinking": "high",
-      "tools": ["read", "write_run_artifact", "run_role_agent", "compact_session", "ctx_search"]
+      "tools": ["read", "write_run_artifact", "run_role_agent", "mark_review_clean", "compact_session", "ctx_search"]
     },
     "scout": {
       "model": "openai-codex/gpt-5.3-codex-spark",

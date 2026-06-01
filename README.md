@@ -36,6 +36,8 @@ Reload Pi after install/config changes:
 
 ## Usage
 
+Implementation orchestration:
+
 ```text
 /orchestrate @docs/plan.md
 ```
@@ -48,12 +50,20 @@ Use orchestrate_plan for @docs/plan.md
 
 The orchestrator receives a short prompt plus the plan content/reference, then coordinates scout/worker/reviewer. Worker and reviewer loop until there are no blockers or fixes worth doing now, up to the configured review-round cap.
 
+Read-only review fanout for an existing target:
+
+```text
+/review-target @extensions/pi-simple-subagents/index.ts runtime bugs, security, packaging, UX
+```
+
+or let the model call `review_target`. This creates a run directory, runs an optional scout plus fresh reviewers with distinct angles, and writes a synthesized `final-summary.md`. It does not run a worker and must not modify project/source files.
+
 ## Important workflow rules
 
 - Scout/reviewer/orchestrator may write artifacts only inside the run directory.
 - Worker is the only role allowed to edit project/source files.
-- Reviewer cannot run before worker implementation.
-- Validation/tests/end-user checks are blocked until the latest successful worker implementation/fix has a successful review, and are instructed to happen after the review/fix loop.
+- In implementation orchestration, reviewer cannot run before worker implementation. The separate `review_target` workflow is explicitly review-only and can run reviewers without a worker.
+- Validation/tests/end-user checks are blocked until the orchestrator explicitly marks the latest worker implementation/fix as cleanly reviewed with `mark_review_clean` after synthesizing reviewer output.
 - Parallel workers are controlled by config and disabled by default.
 
 ## Tool policy
@@ -62,14 +72,14 @@ Child agents inherit installed Pi extensions by default, so efficient navigation
 
 Default role allowlists:
 
-- `orchestrator`: `read`, `write_run_artifact`, `run_role_agent`, `compact_session`, `ctx_search`
+- `orchestrator`: `read`, `write_run_artifact`, `run_role_agent`, `mark_review_clean`, `compact_session`, `ctx_search`
 - `scout`: `read`, `write_run_artifact`, `ast_grep_search`, `ctx_search`
 - `worker`: `read`, `bash`, `edit`, `write`, `write_run_artifact`, `compact_session`, `ast_grep_search`, `ast_grep_scan`, `ast_grep_rewrite`, `ctx_execute`, `ctx_execute_file`, `ctx_search`, `ctx_batch_execute`
 - `reviewer`: `read`, `write_run_artifact`, `ast_grep_search`, `ast_grep_scan`, `ctx_search`
 
 Unknown tools are ignored by Pi when the backing extension is not installed.
 
-For non-worker roles, shell/arbitrary execution tools (`bash`, `ctx_execute`, `ctx_execute_file`, `ctx_batch_execute`) are runtime-blocked even if a local config accidentally adds them. They are reserved for `worker` because they can mutate files.
+For non-worker roles, tool policy is default-deny at config/load time and runtime. Shell/arbitrary execution tools (`bash`, `ctx_execute`, `ctx_execute_file`, `ctx_batch_execute`) and mutating ast-grep modes are blocked for read-only roles. They are reserved for `worker` because they can mutate files.
 
 ## Compaction policy
 
@@ -136,13 +146,13 @@ Example:
 
 ## Run artifacts
 
-Each orchestration creates:
+Each orchestration/review run creates:
 
 ```text
 .pi/agent-runs/<run-id>/
-  input-plan.md
+  input-plan.md or input-target.md
   config-effective.json
-  orchestration.md
+  orchestration.md or scout-review-context.md/review-*.md
   delegations/
   logs/
   outputs/
@@ -151,3 +161,5 @@ Each orchestration creates:
   tasks/
   final-summary.md
 ```
+
+Tool responses are truncated to keep Pi context bounded. Full child transcripts, stderr logs, and final outputs are stored under `logs/` and `outputs/`.

@@ -18,6 +18,28 @@ const ROLE_NAMES = ["orchestrator", "scout", "worker", "reviewer"] as const;
 type RoleName = typeof ROLE_NAMES[number];
 type Purpose = "context" | "implementation" | "review" | "fix" | "validation";
 
+const MAX_TOOL_OUTPUT_BYTES = 24 * 1024;
+const MAX_STDERR_BYTES = 16 * 1024;
+const MAX_PROGRESS_LINE_BYTES = 500;
+const MAX_REVIEW_ANGLES = 4;
+const DEFAULT_REVIEW_ANGLES = [
+	"correctness, regressions, and runtime failures",
+	"security, role boundaries, and tool-policy bypasses",
+	"API design, UX, packaging, and maintainability",
+] as const;
+
+const ROLE_TOOL_ALLOWLIST: Record<Exclude<RoleName, "worker">, Set<string>> = {
+	orchestrator: new Set(["read", "write_run_artifact", "run_role_agent", "mark_review_clean", "compact_session", "ctx_search"]),
+	scout: new Set(["read", "write_run_artifact", "ast_grep_search", "ast_grep_scan", "ctx_search", "grep", "find", "ls"]),
+	reviewer: new Set(["read", "write_run_artifact", "ast_grep_search", "ast_grep_scan", "ctx_search", "grep", "find", "ls"]),
+};
+
+const ROLE_PURPOSES: Record<Exclude<RoleName, "orchestrator">, Set<Purpose>> = {
+	scout: new Set(["context"]),
+	worker: new Set(["implementation", "fix", "validation"]),
+	reviewer: new Set(["review"]),
+};
+
 interface RoleConfig {
 	model: string;
 	thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | string;
@@ -44,7 +66,7 @@ const DEFAULT_CONFIG: Config = {
 		orchestrator: {
 			model: "openai-codex/gpt-5.5",
 			thinking: "high",
-			tools: ["read", "write_run_artifact", "run_role_agent", "compact_session", "ctx_search"],
+			tools: ["read", "write_run_artifact", "run_role_agent", "mark_review_clean", "compact_session", "ctx_search"],
 		},
 		scout: {
 			model: "openai-codex/gpt-5.3-codex-spark",
@@ -118,10 +140,25 @@ function expectPositiveInteger(value: unknown, source: string, pathName: string)
 }
 
 function expectStringArray(value: unknown, source: string, pathName: string): string[] {
-	if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || item.trim() === "")) {
-		throw configError(source, `${pathName} must be an array of non-empty strings`);
+	if (!Array.isArray(value) || value.length === 0 || value.some((item) => typeof item !== "string" || item.trim() === "")) {
+		throw configError(source, `${pathName} must be a non-empty array of non-empty strings`);
 	}
 	return [...value];
+}
+
+function validateRoleTools(role: RoleName, tools: string[] | undefined, source: string): void {
+	if (!tools || role === "worker") return;
+	const allowed = ROLE_TOOL_ALLOWLIST[role];
+	const unsupported = tools.filter((tool) => !allowed.has(tool));
+	if (unsupported.length > 0) {
+		throw configError(source, `roles.${role}.tools contains unsupported read-only tool(s): ${unsupported.join(", ")}`);
+	}
+}
+
+function validateRolePurpose(role: Exclude<RoleName, "orchestrator">, purpose: Purpose): void {
+	if (!ROLE_PURPOSES[role].has(purpose)) {
+		throw new Error(`Invalid role/purpose combination: ${role} cannot be used for ${purpose}.`);
+	}
 }
 
 function mergeConfig(base: Config, override: unknown, source = "unknown"): Config {
@@ -137,7 +174,10 @@ function mergeConfig(base: Config, override: unknown, source = "unknown"): Confi
 			const roleOverride = expectObject(roles[role], source, `roles.${role}`);
 			if (roleOverride.model !== undefined) next.roles[role].model = expectString(roleOverride.model, source, `roles.${role}.model`);
 			if (roleOverride.thinking !== undefined) next.roles[role].thinking = expectString(roleOverride.thinking, source, `roles.${role}.thinking`);
-			if (roleOverride.tools !== undefined) next.roles[role].tools = expectStringArray(roleOverride.tools, source, `roles.${role}.tools`);
+			if (roleOverride.tools !== undefined) {
+				next.roles[role].tools = expectStringArray(roleOverride.tools, source, `roles.${role}.tools`);
+				validateRoleTools(role, next.roles[role].tools, source);
+			}
 		}
 	}
 
@@ -173,13 +213,29 @@ function readJsonIfExists(filePath: string): unknown {
 	}
 }
 
+function ensureRequiredInternalTools(config: Config): Config {
+	const next = cloneConfig(config);
+	const required: Record<RoleName, string[]> = {
+		orchestrator: ["write_run_artifact", "run_role_agent", "mark_review_clean"],
+		scout: ["write_run_artifact"],
+		worker: ["write_run_artifact"],
+		reviewer: ["write_run_artifact"],
+	};
+	for (const role of ROLE_NAMES) {
+		const tools = next.roles[role].tools ?? [];
+		for (const tool of required[role]) if (!tools.includes(tool)) tools.push(tool);
+		next.roles[role].tools = tools;
+	}
+	return next;
+}
+
 function loadConfig(cwd: string): Config {
 	let config = cloneConfig(DEFAULT_CONFIG);
 	const globalPath = path.join(os.homedir(), ".pi", "agent", "pi-simple-subagents", "config.json");
 	const projectPath = path.join(cwd, ".pi", "pi-simple-subagents", "config.json");
 	config = mergeConfig(config, readJsonIfExists(globalPath), globalPath);
 	config = mergeConfig(config, readJsonIfExists(projectPath), projectPath);
-	return config;
+	return ensureRequiredInternalTools(config);
 }
 
 function applyThinking(model: string, thinking: string | undefined): string {
@@ -228,24 +284,80 @@ function resolveRoleSessionFile(runDir: string, role: RoleName): string {
 	return path.join(sessionsDir, `${role}-${uniqueSuffix()}.jsonl`);
 }
 
-function readPlanReference(cwd: string, input: string): { planText: string; planSource: string } {
+function readReference(cwd: string, input: string, label: string, options?: { allowDirectory?: boolean; leadingOnly?: boolean }): { text: string; source: string } {
 	const trimmed = input.trim();
-	const atMatch = trimmed.match(/^@([^\s]+)(?:\s+([\s\S]*))?$/);
-	const pathLike = atMatch?.[1];
-	if (pathLike) {
-		const planPath = path.resolve(cwd, pathLike);
-		if (fs.existsSync(planPath) && fs.statSync(planPath).isFile()) {
-			const rest = atMatch?.[2]?.trim();
-			const body = fs.readFileSync(planPath, "utf8");
-			return { planText: rest ? `${body}\n\nAdditional user instruction:\n${rest}` : body, planSource: planPath };
-		}
+	const atMatch = (options?.leadingOnly ? /^@(?:"([^"]+)"|'([^']+)'|([^\s]+))/.exec(trimmed) : /(?:^|\s)@(?:"([^"]+)"|'([^']+)'|([^\s]+))/.exec(trimmed));
+	const pathLike = atMatch?.[1] ?? atMatch?.[2] ?? atMatch?.[3];
+	if (!pathLike) return { text: input, source: `inline ${label}` };
+
+	const absolutePath = path.resolve(cwd, pathLike);
+	if (!fs.existsSync(absolutePath)) throw new Error(`${label} reference not found: ${pathLike}`);
+	const stat = fs.statSync(absolutePath);
+	if (stat.isDirectory()) {
+		if (!options?.allowDirectory) throw new Error(`${label} reference must be a file, got directory: ${pathLike}`);
+		const rest = `${trimmed.slice(0, atMatch.index)} ${trimmed.slice(atMatch.index + atMatch[0].length)}`.trim();
+		return { text: rest ? `Target directory: ${absolutePath}
+
+Additional user instruction:
+${rest}` : `Target directory: ${absolutePath}`, source: absolutePath };
 	}
-	return { planText: input, planSource: "inline prompt" };
+	if (!stat.isFile()) throw new Error(`${label} reference is not a regular file: ${pathLike}`);
+	const body = fs.readFileSync(absolutePath, "utf8");
+	const rest = `${trimmed.slice(0, atMatch.index)} ${trimmed.slice(atMatch.index + atMatch[0].length)}`.trim();
+	return { text: rest ? `${body}
+
+Additional user instruction:
+${rest}` : body, source: absolutePath };
+}
+
+function readPlanReference(cwd: string, input: string): { planText: string; planSource: string } {
+	const reference = readReference(cwd, input, "plan", { leadingOnly: true });
+	return { planText: reference.text, planSource: reference.source };
+}
+
+function takeUtf8Head(text: string, maxBytes: number): string {
+	if (Buffer.byteLength(text, "utf8") <= maxBytes) return text;
+	let end = Math.min(text.length, maxBytes);
+	while (end > 0 && Buffer.byteLength(text.slice(0, end), "utf8") > maxBytes) end--;
+	return text.slice(0, end);
+}
+
+function takeUtf8Tail(text: string, maxBytes: number): string {
+	if (Buffer.byteLength(text, "utf8") <= maxBytes) return text;
+	let start = Math.max(0, text.length - maxBytes);
+	while (start < text.length && Buffer.byteLength(text.slice(start), "utf8") > maxBytes) start++;
+	return text.slice(start);
+}
+
+function truncateForTool(text: string, maxBytes = MAX_TOOL_OUTPUT_BYTES): { text: string; truncated: boolean; totalBytes: number } {
+	const totalBytes = Buffer.byteLength(text, "utf8");
+	if (totalBytes <= maxBytes) return { text, truncated: false, totalBytes };
+	const kept = takeUtf8Head(text, maxBytes);
+	return {
+		text: `${kept}\n\n[Output truncated: ${totalBytes - Buffer.byteLength(kept, "utf8")} bytes omitted. See artifact/log paths for full output.]`,
+		truncated: true,
+		totalBytes,
+	};
+}
+
+function appendBoundedTail(current: string, chunk: string, maxBytes: number): string {
+	const combined = current + chunk;
+	if (Buffer.byteLength(combined, "utf8") <= maxBytes) return combined;
+	const tail = takeUtf8Tail(combined, maxBytes);
+	return `[stderr truncated: kept last ${Buffer.byteLength(tail, "utf8")} bytes]\n${tail}`;
+}
+
+function childResultText(prefix: string, result: ChildRunResult): string {
+	return `${prefix} with exit code ${result.exitCode}.\nSession: ${result.sessionFile}\nOutput: ${result.outputPath}\nTranscript: ${result.transcriptPath}${result.stderrPath ? `\nStderr: ${result.stderrPath}` : ""}\n\n${result.output}`;
+}
+
+function throwChildRunError(prefix: string, result: ChildRunResult): never {
+	throw new Error(childResultText(prefix, result));
 }
 
 function roleSystemPrompt(role: RoleName, runDir: string, config: Config): string {
 	const common = `Artifact directory: ${runDir}\nUse write_run_artifact for handoff files. Write handoff artifacts only inside that directory unless you are the worker explicitly changing project/source files. Be concise, evidence-backed, and report file paths clearly. Use compact_session when your session gets long; preserve the plan, changed files, decisions, open reviewer findings, validation state, and artifact paths.`;
-	if (role === "orchestrator") return `You are the orchestrator for a small Pi multi-agent workflow.\n\n${common}\n\nYou receive a short instruction plus a plan reference or copied plan. Your job is to coordinate scout, worker, and reviewer through the run_role_agent tool.\n\nSession policy:\n- Worker uses one persistent session file for this run. Reuse it for implementation and all fix rounds.\n- Reviewer is fresh for every review round. Give reviewer curated artifact context every time: input-plan.md, orchestration.md, scout.md if present, worker-report-round-N.md, accepted-fixes from prior rounds, and instructions to inspect the current git diff directly.\n- Scout is fresh. Orchestrator stays persistent for the run.\n\nHard rules:\n- Keep orchestration authority. Do not ask child agents to spawn other agents.\n- Use scout only when code context is missing or the plan needs grounding. Scout is read-only for project/source files.\n- Worker is the only role allowed to modify project/source files.\n- Reviewer is read-only for project/source files and reviews only after worker implementation or worker fixes.\n- Do not distribute tests, browser/user-flow checks, or end-user validation before implementation work has happened. Those belong after implementation plus review/fix loop.\n- Loop worker -> reviewer -> worker fixes -> reviewer until reviewer reports no blockers and no fixes worth doing now. Stop and ask the user if a product/scope/architecture decision is required.\n- Safety cap: max ${config.workflow.maxReviewRounds} review rounds. If still not clean, stop with a clear summary.\n- Parallel workers are ${config.workflow.allowParallelWorkers ? "allowed only for truly independent tasks with non-overlapping files; prefer serial work if unsure" : "disabled in this project config; use one worker at a time"}.\n- Synthesize reviewer feedback yourself. Send only accepted fixes worth doing now to worker. Defer optional polish.\n- After the review/fix loop is clean, run final validation/testing if appropriate.\n\nRequired artifacts:\n- orchestration.md: decisions, rounds, agent calls, deferred items.\n- accepted-fixes-round-N.md when reviewer finds fixes worth doing now.\n- validation.md after the clean review loop if validation/tests are run.\n- final-summary.md at the end.\n\nFinal response: changed files, review loop outcome, validation evidence, deferred items, artifact paths.`;
+	if (role === "orchestrator") return `You are the orchestrator for a small Pi multi-agent workflow.\n\n${common}\n\nYou receive a short instruction plus a plan reference or copied plan. Your job is to coordinate scout, worker, and reviewer through the run_role_agent tool.\n\nSession policy:\n- Worker uses one persistent session file for this run. Reuse it for implementation and all fix rounds.\n- Reviewer is fresh for every review round. Give reviewer curated artifact context every time: input-plan.md, orchestration.md, scout.md if present, worker-report-round-N.md, accepted-fixes from prior rounds, and instructions to inspect the current git diff directly.\n- Scout is fresh. Orchestrator stays persistent for the run.\n\nHard rules:\n- Keep orchestration authority. Do not ask child agents to spawn other agents.\n- Use scout only when code context is missing or the plan needs grounding. Scout is read-only for project/source files.\n- Worker is the only role allowed to modify project/source files.\n- Reviewer is read-only for project/source files and reviews only after worker implementation or worker fixes.\n- Do not distribute tests, browser/user-flow checks, or end-user validation before implementation work has happened. Those belong after implementation plus review/fix loop.\n- Loop worker -> reviewer -> worker fixes -> reviewer until reviewer reports no blockers and no fixes worth doing now. Stop and ask the user if a product/scope/architecture decision is required.\n- Safety cap: max ${config.workflow.maxReviewRounds} review rounds. If still not clean, stop with a clear summary.\n- Parallel workers are ${config.workflow.allowParallelWorkers ? "allowed only for truly independent tasks with non-overlapping files; prefer serial work if unsure" : "disabled in this project config; use one worker at a time"}.\n- Synthesize reviewer feedback yourself. Send only accepted fixes worth doing now to worker. Defer optional polish.\n- When a reviewer round reports no blockers and no fixes worth doing now, call mark_review_clean with a concise synthesis before any validation/testing.\n- After mark_review_clean, run final validation/testing if appropriate.\n\nRequired artifacts:\n- orchestration.md: decisions, rounds, agent calls, deferred items.\n- accepted-fixes-round-N.md when reviewer finds fixes worth doing now.\n- validation.md after the clean review loop if validation/tests are run.\n- final-summary.md at the end.\n\nFinal response: changed files, review loop outcome, validation evidence, deferred items, artifact paths.`;
 	if (role === "scout") return `You are scout.\n\n${common}\n\nRead-only project reconnaissance. Inspect files with read and structural/search tools. Do not edit project/source files and do not run shell/arbitrary-code execution tools. Write a scout report artifact.\n\nReport format:\n# Scout Report\n## Relevant files\n## Existing behavior\n## Risks / unknowns\n## Recommended worker context`;
 	if (role === "reviewer") return `You are reviewer.\n\n${common}\n\nReview the implemented worker report/artifacts after implementation. You are read-only for project/source files. Do not edit source and do not run shell/arbitrary-code execution tools. Do not run broad end-user validation unless the orchestrator explicitly says the review/fix loop is complete and this is validation. Prefer inspecting relevant files and focused evidence.\n\nReport format:\n# Review Report\n## Blockers\n## Fixes worth doing now\n## Optional / deferred\n## Validation gaps\n## Verdict\nUse clear severity and file references.`;
 	return `You are worker.\n\n${common}\n\nYou are the only role allowed to modify project/source files. Implement only the concrete task from the orchestrator. Do not widen scope. If a product, architecture, or scope decision is missing, stop and report it. After changes, write a worker report artifact.\n\nReport format:\n# Worker Report\n## Changed files\n## What was implemented\n## Validation run\n## Open issues / decisions needed\n## Residual risks`;
@@ -258,7 +370,12 @@ interface ChildRunResult {
 	stderr: string;
 	sessionFile: string;
 	transcriptPath: string;
+	stderrPath: string;
 	outputPath: string;
+	outputTruncated: boolean;
+	stderrTruncated: boolean;
+	outputBytes: number;
+	stderrBytes: number;
 }
 
 function getPiInvocation(args: string[]): { command: string; args: string[] } {
@@ -288,11 +405,12 @@ async function spawnPiRole(input: {
 	envExtra?: Record<string, string>;
 	signal?: AbortSignal;
 	onUpdate?: (text: string) => void;
+	systemPrompt?: string;
 }): Promise<ChildRunResult> {
 	const roleConfig = input.config.roles[input.role];
 	const sessionFile = resolveRoleSessionFile(input.runDir, input.role);
-	const promptPath = writeArtifact(input.runDir, `prompts/${input.role}-system.md`, roleSystemPrompt(input.role, input.runDir, input.config));
-	const taskPath = writeArtifact(input.runDir, `tasks/${input.role}-${Date.now()}.md`, input.task);
+	const promptPath = writeArtifact(input.runDir, `prompts/${input.role}-system-${uniqueSuffix()}.md`, input.systemPrompt ?? roleSystemPrompt(input.role, input.runDir, input.config));
+	const taskPath = writeArtifact(input.runDir, `tasks/${input.role}-${uniqueSuffix()}.md`, input.task);
 	const args = [
 		"--mode", "json",
 		"--session", sessionFile,
@@ -307,7 +425,7 @@ async function spawnPiRole(input: {
 		"--model", applyThinking(roleConfig.model, roleConfig.thinking),
 		"--system-prompt", promptPath,
 	);
-	if (roleConfig.tools?.length) args.push("--tools", roleConfig.tools.join(","));
+	if (roleConfig.tools) args.push("--tools", roleConfig.tools.join(","));
 	args.push("-p", `@${taskPath}`);
 
 	const env = {
@@ -320,30 +438,40 @@ async function spawnPiRole(input: {
 		delete env.CONTEXT_MODE_BRIDGE_DEPTH;
 	}
 	return await new Promise<ChildRunResult>((resolve) => {
+		const stampBase = `${Date.now()}-${uniqueSuffix()}`;
+		const transcriptPath = resolveArtifactPath(input.runDir, `logs/${input.role}-${stampBase}.jsonl`);
+		const stderrPath = resolveArtifactPath(input.runDir, `logs/${input.role}-${stampBase}.stderr.log`);
+		ensureDir(path.dirname(transcriptPath));
+		fs.writeFileSync(transcriptPath, "", "utf8");
+		fs.writeFileSync(stderrPath, "", "utf8");
+
 		const invocation = getPiInvocation(args);
 		const child = spawn(invocation.command, invocation.args, { cwd: input.cwd, env, stdio: ["ignore", "pipe", "pipe"], shell: false });
 		let buffer = "";
 		let stderr = "";
-		const transcript: string[] = [];
 		let finalOutput = "";
 		let settled = false;
 		let aborted = false;
 		const processLine = (line: string) => {
 			if (!line.trim()) return;
-			transcript.push(line);
+			fs.appendFileSync(transcriptPath, `${line}\n`, "utf8");
 			try {
 				const event = JSON.parse(line);
 				if (event.type === "message_end" && event.message?.role === "assistant") {
 					for (const part of event.message.content ?? []) {
 						if (part.type === "text") finalOutput = part.text;
 					}
-					if (finalOutput) input.onUpdate?.(`${input.role}: ${finalOutput.split("\n")[0]}`);
+					if (finalOutput) {
+						const firstLine = finalOutput.split("\n")[0] ?? "";
+						input.onUpdate?.(`${input.role}: ${takeUtf8Head(firstLine, MAX_PROGRESS_LINE_BYTES)}`);
+					}
 				}
 			} catch { /* ignore non-json */ }
 		};
 		const abortChild = () => {
 			aborted = true;
-			stderr += stderr.endsWith("\n") || stderr.length === 0 ? "Child run aborted.\n" : "\nChild run aborted.\n";
+			stderr = appendBoundedTail(stderr, stderr.endsWith("\n") || stderr.length === 0 ? "Child run aborted.\n" : "\nChild run aborted.\n", MAX_STDERR_BYTES);
+			fs.appendFileSync(stderrPath, stderr.endsWith("\n") ? "Child run aborted.\n" : "\nChild run aborted.\n", "utf8");
 			if (process.platform === "win32" && child.pid) {
 				const killer = spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], { stdio: "ignore", windowsHide: true });
 				killer.on("error", () => child.kill());
@@ -360,11 +488,24 @@ async function spawnPiRole(input: {
 			settled = true;
 			if (input.signal) input.signal.removeEventListener("abort", abortChild);
 			if (buffer.trim()) processLine(buffer);
-			const stamp = Date.now();
-			const output = finalOutput || stderr || "(no output)";
-			const transcriptPath = writeArtifact(input.runDir, `logs/${input.role}-${stamp}.jsonl`, transcript.join("\n"));
-			const outputPath = writeArtifact(input.runDir, `outputs/${input.role}-${stamp}.md`, output);
-			resolve({ role: input.role, exitCode, output, stderr, sessionFile, transcriptPath, outputPath });
+			const fullOutput = finalOutput || (stderr ? `No assistant output. Stderr log: ${stderrPath}\n\n${stderr}` : "(no output)");
+			const outputPath = writeArtifact(input.runDir, `outputs/${input.role}-${stampBase}.md`, fullOutput);
+			const truncatedOutput = truncateForTool(fullOutput, MAX_TOOL_OUTPUT_BYTES);
+			const truncatedStderr = truncateForTool(stderr, MAX_STDERR_BYTES);
+			resolve({
+				role: input.role,
+				exitCode,
+				output: truncatedOutput.text,
+				stderr: truncatedStderr.text,
+				sessionFile,
+				transcriptPath,
+				stderrPath,
+				outputPath,
+				outputTruncated: truncatedOutput.truncated,
+				stderrTruncated: truncatedStderr.truncated,
+				outputBytes: truncatedOutput.totalBytes,
+				stderrBytes: truncatedStderr.totalBytes,
+			});
 		};
 		child.stdout.on("data", (chunk) => {
 			buffer += chunk.toString();
@@ -372,12 +513,18 @@ async function spawnPiRole(input: {
 			buffer = lines.pop() ?? "";
 			for (const line of lines) processLine(line);
 		});
-		child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+		child.stderr.on("data", (chunk) => {
+			const text = chunk.toString();
+			fs.appendFileSync(stderrPath, text, "utf8");
+			stderr = appendBoundedTail(stderr, text, MAX_STDERR_BYTES);
+		});
 		child.on("close", (code, signal) => {
 			finish(aborted ? 130 : code ?? (signal ? 1 : 0));
 		});
 		child.on("error", (error) => {
-			stderr += error instanceof Error ? error.message : String(error);
+			const message = error instanceof Error ? error.message : String(error);
+			fs.appendFileSync(stderrPath, message, "utf8");
+			stderr = appendBoundedTail(stderr, message, MAX_STDERR_BYTES);
 			finish(1);
 		});
 		if (input.signal) {
@@ -401,6 +548,14 @@ const OrchestrateParams = Type.Object({
 });
 type OrchestrateParams = Static<typeof OrchestrateParams>;
 
+const ReviewTargetParams = Type.Object({
+	target: Type.String({ description: "Inline review scope, @file, @directory, or instruction pointing to what should be reviewed." }),
+	focus: Type.Optional(Type.String({ description: "Optional review focus, e.g. runtime bugs, security, packaging, UX." })),
+	reviewers: Type.Optional(Type.Array(Type.String({ description: "Reviewer angle/focus." }), { maxItems: MAX_REVIEW_ANGLES })),
+	includeScout: Type.Optional(Type.Boolean({ description: "Run a read-only scout before reviewers. Default: true.", default: true })),
+});
+type ReviewTargetParams = Static<typeof ReviewTargetParams>;
+
 const ArtifactParams = Type.Object({
 	path: Type.String({ description: "Artifact path relative to the current run directory, e.g. review-round-1.md" }),
 	content: Type.String({ description: "Markdown/text content to write" }),
@@ -411,6 +566,12 @@ const CompactSessionParams = Type.Object({
 	instructions: Type.Optional(Type.String({ description: "Optional focus instructions for the compaction summary." })),
 });
 type CompactSessionParams = Static<typeof CompactSessionParams>;
+
+const MarkReviewCleanParams = Type.Object({
+	round: Type.Optional(Type.Integer({ minimum: 1, description: "Review round that was synthesized as clean." })),
+	summary: Type.String({ description: "Concise synthesis explaining why there are no blockers or fixes worth doing now." }),
+});
+type MarkReviewCleanParams = Static<typeof MarkReviewCleanParams>;
 
 function formatRunTask(planText: string, planSource: string, runDir: string): string {
 	return `Run directory: ${runDir}\nPlan source: ${planSource}\n\nPlan / instruction:\n${planText}\n\nStart by writing orchestration.md. Then follow the orchestrator workflow. If the plan is unclear, stop and ask the user for clarification instead of guessing.`;
@@ -427,6 +588,74 @@ async function runOrchestration(cwd: string, rawPlan: string, signal?: AbortSign
 	const task = formatRunTask(planText, planSource, dir);
 	const result = await spawnPiRole({ cwd, role: "orchestrator", task, runDir: dir, config, signal, onUpdate });
 	return { result, runDir: dir, planSource };
+}
+
+function reviewTargetSystemPrompt(kind: "scout" | "reviewer" | "synthesis", runDir: string): string {
+	const common = `Artifact directory: ${runDir}\nThis is a review-only pi-simple-subagents workflow. Do not modify project/source files. You may write review artifacts only with write_run_artifact inside the artifact directory. Do not run shell/arbitrary-code execution tools. Inspect the target directly with read and structural/search tools. Return evidence-backed findings with file paths and line references when possible.`;
+	if (kind === "scout") return `You are scout for a review-only workflow.\n\n${common}\n\nMap the target, identify relevant files and risks, and write scout-review-context.md.\n\nReport format:\n# Scout Review Context\n## Target\n## Relevant files\n## Existing behavior / architecture\n## Risk areas for reviewers`;
+	if (kind === "synthesis") return `You synthesize multiple read-only review reports.\n\n${common}\n\nDo not invent findings. Deduplicate and prioritize only evidence-backed items. Write final-summary.md.\n\nReport format:\n# Review Synthesis\n## Blockers\n## Fixes worth doing now\n## Optional / deferred\n## Evidence reviewed\n## Recommended next steps`;
+	return `You are reviewer in a review-only workflow.\n\n${common}\n\nReview only; do not edit. Focus on your assigned angle. Write a concise artifact for your angle.\n\nReport format:\n# Review Report\n## Blockers\n## Fixes worth doing now\n## Optional / deferred\n## Evidence\n## Verdict`;
+}
+
+async function runReviewTarget(cwd: string, params: ReviewTargetParams, signal?: AbortSignal, onUpdate?: (text: string) => void): Promise<{ runDir: string; targetSource: string; scout?: ChildRunResult; reviews: ChildRunResult[]; synthesis: ChildRunResult; finalSummaryPath: string }> {
+	const config = loadConfig(cwd);
+	const baseDir = resolveRunBaseDir(cwd, config);
+	const dir = path.join(baseDir, runId());
+	ensureDir(dir);
+	const target = readReference(cwd, params.target, "review target", { allowDirectory: true });
+	const focus = params.focus?.trim() || "runtime bugs, security boundaries, API/UX, packaging, and maintainability";
+	const reviewers = (params.reviewers && params.reviewers.length > 0 ? params.reviewers : [...DEFAULT_REVIEW_ANGLES]).slice(0, MAX_REVIEW_ANGLES);
+	writeArtifact(dir, "input-target.md", `Source: ${target.source}\nFocus: ${focus}\n\n${target.text}\n`);
+	writeArtifact(dir, "config-effective.json", JSON.stringify(config, null, 2));
+
+	let scout: ChildRunResult | undefined;
+	if (params.includeScout ?? true) {
+		onUpdate?.("review-target: scout running");
+		scout = await spawnPiRole({
+			cwd,
+			role: "scout",
+			task: `Review target source: ${target.source}\nFocus: ${focus}\nRun directory: ${dir}\nRead input-target.md, inspect the target directly, and write scout-review-context.md.`,
+			runDir: dir,
+			config,
+			signal,
+			onUpdate,
+			systemPrompt: reviewTargetSystemPrompt("scout", dir),
+		});
+		if (scout.exitCode !== 0) throwChildRunError("review-target scout failed", scout);
+	}
+
+	const reviews = await Promise.all(reviewers.map(async (angle, index) => {
+		onUpdate?.(`review-target: reviewer ${index + 1}/${reviewers.length} running`);
+		const safeName = angle.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 48) || `review-${index + 1}`;
+		const result = await spawnPiRole({
+			cwd,
+			role: "reviewer",
+			task: `Review target source: ${target.source}\nFocus: ${focus}\nAssigned review angle: ${angle}\nRun directory: ${dir}\nRead input-target.md${scout ? " and scout-review-context.md" : ""}, inspect the target directly, and write review-${index + 1}-${safeName}.md. Do not modify project/source files.`,
+			runDir: dir,
+			config,
+			signal,
+			onUpdate,
+			systemPrompt: reviewTargetSystemPrompt("reviewer", dir),
+		});
+		if (result.exitCode !== 0) throwChildRunError(`review-target reviewer ${index + 1} failed`, result);
+		return result;
+	}));
+
+	onUpdate?.("review-target: synthesis running");
+	const synthesis = await spawnPiRole({
+		cwd,
+		role: "reviewer",
+		task: `Synthesize this review-only run.\nTarget source: ${target.source}\nFocus: ${focus}\nRun directory: ${dir}\nRead input-target.md, ${scout ? "scout-review-context.md, " : ""}the review artifacts and output logs below, then write final-summary.md.\n\nReview outputs:\n${reviews.map((r, i) => `- Reviewer ${i + 1}: ${r.outputPath}`).join("\n")}`,
+		runDir: dir,
+		config,
+		signal,
+		onUpdate,
+		systemPrompt: reviewTargetSystemPrompt("synthesis", dir),
+	});
+	if (synthesis.exitCode !== 0) throwChildRunError("review-target synthesis failed", synthesis);
+	const finalSummaryPath = resolveArtifactPath(dir, "final-summary.md");
+	if (!fs.existsSync(finalSummaryPath)) fs.copyFileSync(synthesis.outputPath, finalSummaryPath);
+	return { runDir: dir, targetSource: target.source, scout, reviews, synthesis, finalSummaryPath };
 }
 
 function resolveToolPath(input: unknown, cwd: string): string | undefined {
@@ -458,24 +687,43 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 	const runDir = process.env[RUN_DIR_ENV];
 	let workerRuns = Number(process.env[WORKER_RUNS_ENV] ?? "0") || 0;
 	let reviewRuns = Number(process.env[REVIEW_RUNS_ENV] ?? "0") || 0;
-	let latestWorkerRunReviewed = workerRuns > 0 && reviewRuns > 0;
+	let latestWorkerRunReviewedClean = false;
 	let workerActive = false;
 
-	pi.registerTool({
-		name: "orchestrate_plan",
-		label: "Orchestrate Plan",
-		description: "Start the simple orchestrator workflow for a plan or @plan-file. The orchestrator coordinates scout, worker, reviewer, loops fixes, and runs validation only after implementation/review.",
-		promptSnippet: "Run the configured orchestrator workflow for a plan or @plan-file",
-		promptGuidelines: ["Use orchestrate_plan when the user asks to implement a plan through the orchestrator workflow."],
-		parameters: OrchestrateParams,
-		async execute(_id, params: OrchestrateParams, signal, onUpdate, ctx) {
-			const { result, runDir, planSource } = await runOrchestration(ctx.cwd, params.plan, signal, (text) => onUpdate?.({ content: [{ type: "text", text }] }));
-			return {
-				content: [{ type: "text", text: `Orchestration finished with exit code ${result.exitCode}.\nRun dir: ${runDir}\nPlan source: ${planSource}\n\n${result.output}` }],
-				details: { runDir, planSource, result },
-			};
-		},
-	});
+	if (!role) {
+		pi.registerTool({
+			name: "orchestrate_plan",
+			label: "Orchestrate Plan",
+			description: "Start the simple orchestrator workflow for a plan or @plan-file. The orchestrator coordinates scout, worker, reviewer, loops fixes, and runs validation only after implementation/review.",
+			promptSnippet: "Run the configured orchestrator workflow for a plan or @plan-file",
+			promptGuidelines: ["Use orchestrate_plan when the user asks to implement a plan through the orchestrator workflow."],
+			parameters: OrchestrateParams,
+			async execute(_id, params: OrchestrateParams, signal, onUpdate, ctx) {
+				const { result, runDir, planSource } = await runOrchestration(ctx.cwd, params.plan, signal, (text) => onUpdate?.({ content: [{ type: "text", text }] }));
+				if (result.exitCode !== 0) throwChildRunError("Orchestration failed", result);
+				return {
+					content: [{ type: "text", text: `Orchestration finished.\nRun dir: ${runDir}\nPlan source: ${planSource}\nOutput: ${result.outputPath}\nTranscript: ${result.transcriptPath}\n\n${result.output}` }],
+					details: { runDir, planSource, result },
+				};
+			},
+		});
+
+		pi.registerTool({
+			name: "review_target",
+			label: "Review Target",
+			description: "Run a read-only scout plus fresh reviewer fanout for an existing target, then synthesize improvements. Does not run worker or modify project/source files.",
+			promptSnippet: "Review an existing file, directory, diff, or extension with read-only reviewer fanout",
+			promptGuidelines: ["Use review_target when the user asks to inspect, audit, or suggest improvements without implementing changes."],
+			parameters: ReviewTargetParams,
+			async execute(_id, params: ReviewTargetParams, signal, onUpdate, ctx) {
+				const result = await runReviewTarget(ctx.cwd, params, signal, (text) => onUpdate?.({ content: [{ type: "text", text }] }));
+				return {
+					content: [{ type: "text", text: `Review finished.\nRun dir: ${result.runDir}\nTarget source: ${result.targetSource}\nFinal summary: ${result.finalSummaryPath}\n\n${result.synthesis.output}` }],
+					details: result,
+				};
+			},
+		});
+	}
 
 	if (role === "orchestrator" && runDir) {
 		pi.registerTool({
@@ -490,11 +738,12 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 			parameters: RoleRunParams,
 			async execute(_id, params: RoleRunParams, signal, onUpdate, ctx) {
 				const config = loadConfig(ctx.cwd);
+				validateRolePurpose(params.role, params.purpose);
 				if (params.purpose === "validation" && workerRuns === 0) {
 					throw new Error("Validation/tests/end-user checks are blocked until after successful worker implementation.");
 				}
-				if (params.purpose === "validation" && config.workflow.runTestsOnlyAfterReviewLoop && !latestWorkerRunReviewed) {
-					throw new Error("Validation/tests/end-user checks are blocked until the latest successful worker changes have a successful post-implementation review.");
+				if (params.purpose === "validation" && config.workflow.runTestsOnlyAfterReviewLoop && !latestWorkerRunReviewedClean) {
+					throw new Error("Validation/tests/end-user checks are blocked until the orchestrator synthesizes a clean review with mark_review_clean.");
 				}
 				if (params.role === "reviewer" && workerRuns === 0) {
 					throw new Error("Reviewer is blocked until after successful worker implementation.");
@@ -530,24 +779,40 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 						onUpdate: (text) => onUpdate?.({ content: [{ type: "text", text }] }),
 					});
 					const succeeded = result.exitCode === 0;
+					if (result.exitCode !== 0) throwChildRunError(`${params.role} failed`, result);
 					if (succeeded && params.role === "worker" && (params.purpose === "implementation" || params.purpose === "fix")) {
 						workerRuns++;
-						latestWorkerRunReviewed = false;
+						latestWorkerRunReviewedClean = false;
 					}
 					if (succeeded && params.role === "reviewer" && params.purpose === "review") {
 						reviewRuns++;
-						latestWorkerRunReviewed = workerRuns > 0;
 					}
 					if (params.outputFile && outputArtifactPath && !fs.existsSync(outputArtifactPath)) {
-						writeArtifact(runDir, params.outputFile, result.output);
+						fs.copyFileSync(result.outputPath, outputArtifactPath);
 					}
 					return {
-						content: [{ type: "text", text: `${params.role} finished with exit code ${result.exitCode}.\nSession: ${result.sessionFile}\nOutput artifact: ${outputArtifactPath ?? result.outputPath}\nTranscript: ${result.transcriptPath}\n\n${result.output}` }],
-						details: { ...result, purpose: params.purpose, round: params.round, latestWorkerRunReviewed },
+						content: [{ type: "text", text: childResultText(`${params.role} finished`, { ...result, outputPath: outputArtifactPath ?? result.outputPath }) }],
+						details: { ...result, purpose: params.purpose, round: params.round, latestWorkerRunReviewedClean },
 					};
 				} finally {
 					if (params.role === "worker") workerActive = false;
 				}
+			},
+		});
+
+		pi.registerTool({
+			name: "mark_review_clean",
+			label: "Mark Review Clean",
+			description: "Mark the latest successful worker changes as having a clean synthesized review. Required before validation when review-gated validation is enabled.",
+			promptSnippet: "Mark the latest worker changes as cleanly reviewed after synthesizing reviewer output",
+			promptGuidelines: ["Use mark_review_clean only after reviewer artifacts show no blockers and no fixes worth doing now."],
+			parameters: MarkReviewCleanParams,
+			async execute(_id, params: MarkReviewCleanParams) {
+				if (workerRuns === 0) throw new Error("Cannot mark review clean before worker implementation.");
+				if (reviewRuns === 0) throw new Error("Cannot mark review clean before at least one reviewer run.");
+				latestWorkerRunReviewedClean = true;
+				const pathName = writeArtifact(runDir, `review-clean-${params.round ?? reviewRuns}.md`, `# Clean Review Mark\n\nRound: ${params.round ?? reviewRuns}\n\n${params.summary}\n`);
+				return { content: [{ type: "text", text: `Marked latest worker changes as cleanly reviewed. Artifact: ${pathName}` }], details: { latestWorkerRunReviewedClean, path: pathName } };
 			},
 		});
 	}
@@ -599,25 +864,62 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 		});
 	}
 
-	pi.registerCommand("orchestrate", {
-		description: "Run the simple orchestrator workflow for a plan or @plan-file",
-		handler: async (args, ctx) => {
-			const plan = args.trim();
-			if (!plan) {
-				ctx.ui.notify("Usage: /orchestrate @path/to/plan.md or /orchestrate <plan>", "warning");
-				return;
-			}
-			ctx.ui.notify("Starting orchestrator workflow...", "info");
-			const { result, runDir } = await runOrchestration(ctx.cwd, plan, ctx.signal, (text) => ctx.ui.setStatus("orchestrator", text));
-			ctx.ui.setStatus("orchestrator", undefined);
-			pi.sendMessage({
-				customType: "pi-simple-subagents-result",
-				display: true,
-				content: `Orchestration finished with exit code ${result.exitCode}.\n\nRun dir: ${runDir}\n\n${result.output}`,
-				details: { runDir, result },
-			});
-		},
-	});
+	if (!role) {
+		pi.registerCommand("orchestrate", {
+			description: "Run the simple orchestrator workflow for a plan or @plan-file",
+			handler: async (args, ctx) => {
+				const plan = args.trim();
+				if (!plan) {
+					ctx.ui.notify("Usage: /orchestrate @path/to/plan.md or /orchestrate <plan>", "warning");
+					return;
+				}
+				ctx.ui.notify("Starting orchestrator workflow...", "info");
+				try {
+					const { result, runDir } = await runOrchestration(ctx.cwd, plan, ctx.signal, (text) => ctx.ui.setStatus("orchestrator", text));
+					if (result.exitCode !== 0) throwChildRunError("Orchestration failed", result);
+					pi.sendMessage({
+						customType: "pi-simple-subagents-result",
+						display: true,
+						content: `Orchestration finished.\n\nRun dir: ${runDir}\nOutput: ${result.outputPath}\nTranscript: ${result.transcriptPath}\n\n${result.output}`,
+						details: { runDir, result },
+					});
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					ctx.ui.notify(`Orchestration failed: ${message.split("\n")[0]}`, "error");
+					throw error;
+				} finally {
+					ctx.ui.setStatus("orchestrator", undefined);
+				}
+			},
+		});
+
+		pi.registerCommand("review-target", {
+			description: "Run read-only scout/reviewer fanout for a target and synthesize improvements",
+			handler: async (args, ctx) => {
+				const target = args.trim();
+				if (!target) {
+					ctx.ui.notify("Usage: /review-target @path-or-dir [focus/instructions]", "warning");
+					return;
+				}
+				ctx.ui.notify("Starting read-only review workflow...", "info");
+				try {
+					const result = await runReviewTarget(ctx.cwd, { target }, ctx.signal, (text) => ctx.ui.setStatus("review-target", text));
+					pi.sendMessage({
+						customType: "pi-simple-subagents-review-result",
+						display: true,
+						content: `Review finished.\n\nRun dir: ${result.runDir}\nFinal summary: ${result.finalSummaryPath}\n\n${result.synthesis.output}`,
+						details: result,
+					});
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					ctx.ui.notify(`Review failed: ${message.split("\n")[0]}`, "error");
+					throw error;
+				} finally {
+					ctx.ui.setStatus("review-target", undefined);
+				}
+			},
+		});
+	}
 
 	pi.on("tool_call", (event, ctx) => {
 		const currentRole = process.env[ROLE_ENV] as RoleName | undefined;
@@ -628,6 +930,10 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 			if (target && !isInside(path.resolve(currentRunDir), target)) {
 				return { block: true, reason: `${currentRole} may write only inside artifact directory: ${currentRunDir}` };
 			}
+		}
+		const allowedTools = ROLE_TOOL_ALLOWLIST[currentRole];
+		if (allowedTools && !allowedTools.has(event.toolName)) {
+			return { block: true, reason: `${currentRole} may only use approved read-only/artifact tools. Blocked tool: ${event.toolName}.` };
 		}
 		const mutationReason = blocksReadOnlyToolMutation(event);
 		if (mutationReason) {
