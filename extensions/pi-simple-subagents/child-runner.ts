@@ -1,0 +1,251 @@
+import { spawn } from "node:child_process";
+import * as fs from "node:fs";
+import { createRequire } from "node:module";
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
+import { appendArtifactFile, resolveRoleSessionFile, uniqueSuffix, writeArtifact } from "./artifacts.ts";
+import { applyThinking, type Config } from "./config.ts";
+import { roleSystemPrompt } from "./prompts.ts";
+import {
+	MAX_PROGRESS_LINE_BYTES,
+	MAX_STDERR_BYTES,
+	MAX_TOOL_OUTPUT_BYTES,
+	ROLE_ENV,
+	REVIEW_RUNS_ENV,
+	RUN_DIR_ENV,
+	WORKER_RUNS_ENV,
+	type RoleName,
+} from "./roles.ts";
+import { appendBoundedTail, takeUtf8Head, truncateForTool } from "./text.ts";
+
+const EXTENSION_PATH = fileURLToPath(new URL("./index.ts", import.meta.url));
+const requireFromExtension = createRequire(import.meta.url);
+
+export interface ChildRunResult {
+	role: RoleName;
+	exitCode: number;
+	output: string;
+	stderr: string;
+	sessionFile: string;
+	transcriptPath: string;
+	stderrPath: string;
+	outputPath: string;
+	outputTruncated: boolean;
+	stderrTruncated: boolean;
+	outputBytes: number;
+	stderrBytes: number;
+	timedOut: boolean;
+	stopReason?: string;
+	errorMessage?: string;
+}
+
+function isFailedStopReason(stopReason: string | undefined): boolean {
+	return stopReason === "error" || stopReason === "aborted";
+}
+
+export function childResultText(prefix: string, result: ChildRunResult): string {
+	const stopDetails = [
+		result.stopReason ? `Stop reason: ${result.stopReason}` : undefined,
+		result.errorMessage ? `Error: ${result.errorMessage}` : undefined,
+	].filter(Boolean).join("\n");
+	return `${prefix} with exit code ${result.exitCode}.${stopDetails ? `\n${stopDetails}` : ""}\nSession: ${result.sessionFile}\nOutput: ${result.outputPath}\nTranscript: ${result.transcriptPath}${result.stderrPath ? `\nStderr: ${result.stderrPath}` : ""}\n\n${result.output}`;
+}
+
+export function throwChildRunError(prefix: string, result: ChildRunResult): never {
+	throw new Error(childResultText(prefix, result));
+}
+
+function resolvePiCliPath(): string | undefined {
+	try {
+		const packageEntry = requireFromExtension.resolve("@earendil-works/pi-coding-agent");
+		const candidate = path.join(path.dirname(path.dirname(packageEntry)), "dist", "cli.js");
+		return fs.existsSync(candidate) ? candidate : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function getPiInvocation(args: string[]): { command: string; args: string[] } {
+	const cliPath = resolvePiCliPath();
+	if (cliPath) return { command: process.execPath, args: [cliPath, ...args] };
+	const currentScript = process.argv[1];
+	const isBunVirtualScript = currentScript?.startsWith("/$bunfs/root/");
+	if (currentScript && !isBunVirtualScript && fs.existsSync(currentScript)) {
+		return { command: process.execPath, args: [currentScript, ...args] };
+	}
+	const execName = path.basename(process.execPath).toLowerCase();
+	const isGenericRuntime = /^(node|bun)(\.exe)?$/.test(execName);
+	if (!isGenericRuntime) return { command: process.execPath, args };
+	if (process.platform === "win32") {
+		throw new Error("Unable to resolve the Pi CLI entrypoint from the running process or the @earendil-works/pi-coding-agent peer dependency. Ensure a compatible Pi CLI (>=0.78.0 <1) is installed and visible to this extension.");
+	}
+	return { command: "pi", args };
+}
+
+export async function spawnPiRole(input: {
+	cwd: string;
+	role: RoleName;
+	task: string;
+	runDir: string;
+	config: Config;
+	envExtra?: Record<string, string>;
+	signal?: AbortSignal;
+	onUpdate?: (text: string) => void;
+	systemPrompt?: string;
+}): Promise<ChildRunResult> {
+	const roleConfig = input.config.roles[input.role];
+	const sessionFile = resolveRoleSessionFile(input.runDir, input.role);
+	const promptPath = writeArtifact(input.runDir, `prompts/${input.role}-system-${uniqueSuffix()}.md`, input.systemPrompt ?? roleSystemPrompt(input.role, input.runDir, input.config));
+	const taskPath = writeArtifact(input.runDir, `tasks/${input.role}-${uniqueSuffix()}.md`, input.task);
+	const args = [
+		"--mode", "json",
+		"--session", sessionFile,
+	];
+	const inheritExtensions = input.role === "worker" ? input.config.children.inheritExtensions : input.config.children.inheritExtensionsForReadOnly;
+	if (!inheritExtensions) {
+		args.push("--no-extensions", "--extension", EXTENSION_PATH);
+	}
+	if (!input.config.children.inheritSkills) {
+		args.push("--no-skills");
+	}
+	args.push(
+		"--model", applyThinking(roleConfig.model, roleConfig.thinking),
+		"--system-prompt", promptPath,
+	);
+	if (roleConfig.tools) args.push("--tools", roleConfig.tools.join(","));
+	args.push("-p", `@${taskPath}`);
+
+	const env: NodeJS.ProcessEnv = {
+		...process.env,
+		[ROLE_ENV]: input.role,
+		[RUN_DIR_ENV]: input.runDir,
+		...(input.envExtra ?? {}),
+	};
+	if (inheritExtensions) {
+		delete env.CONTEXT_MODE_BRIDGE_DEPTH;
+	}
+	return await new Promise<ChildRunResult>((resolve) => {
+		const stampBase = `${Date.now()}-${uniqueSuffix()}`;
+		const transcriptPath = writeArtifact(input.runDir, `logs/${input.role}-${stampBase}.jsonl`, "");
+		const stderrPath = writeArtifact(input.runDir, `logs/${input.role}-${stampBase}.stderr.log`, "");
+
+		const invocation = getPiInvocation(args);
+		const child = spawn(invocation.command, invocation.args, { cwd: input.cwd, env, stdio: ["ignore", "pipe", "pipe"], shell: false });
+		let buffer = "";
+		let stderr = "";
+		let finalOutput = "";
+		let assistantStopReason: string | undefined;
+		let assistantErrorMessage: string | undefined;
+		let settled = false;
+		let aborted = false;
+		let timedOut = false;
+		const processLine = (line: string) => {
+			if (!line.trim()) return;
+			appendArtifactFile(input.runDir, transcriptPath, `${line}\n`);
+			try {
+				const event = JSON.parse(line);
+				if (event.type === "message_end" && event.message?.role === "assistant") {
+					if (typeof event.message.stopReason === "string") assistantStopReason = event.message.stopReason;
+					if (typeof event.message.errorMessage === "string") assistantErrorMessage = event.message.errorMessage;
+					const textParts = (event.message.content ?? [])
+						.filter((part: { type?: string }) => part.type === "text")
+						.map((part: { text?: unknown }) => typeof part.text === "string" ? part.text : "")
+						.filter((text: string) => text.length > 0);
+					if (textParts.length > 0) finalOutput = textParts.join("\n\n");
+					if (finalOutput) {
+						const firstLine = finalOutput.split("\n")[0] ?? "";
+						input.onUpdate?.(`${input.role}: ${takeUtf8Head(firstLine, MAX_PROGRESS_LINE_BYTES)}`);
+					} else if (isFailedStopReason(assistantStopReason) && assistantErrorMessage) {
+						input.onUpdate?.(`${input.role}: ${takeUtf8Head(assistantErrorMessage, MAX_PROGRESS_LINE_BYTES)}`);
+					}
+				}
+			} catch { /* ignore non-json */ }
+		};
+		const abortChild = (reason = "Child run aborted.") => {
+			aborted = true;
+			const line = `${reason}\n`;
+			stderr = appendBoundedTail(stderr, stderr.endsWith("\n") || stderr.length === 0 ? line : `\n${line}`, MAX_STDERR_BYTES);
+			appendArtifactFile(input.runDir, stderrPath, stderr.endsWith("\n") ? line : `\n${line}`);
+			if (process.platform === "win32" && child.pid) {
+				const killer = spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], { stdio: "ignore", windowsHide: true });
+				killer.on("error", () => child.kill());
+				killer.on("close", (code) => { if (code !== 0) child.kill(); });
+				return;
+			}
+			child.kill("SIGTERM");
+			const killTimer = setTimeout(() => {
+				child.kill("SIGKILL");
+			}, 5000);
+			(killTimer as { unref?: () => void }).unref?.();
+		};
+		const onAbort = () => abortChild();
+		const timeoutMs = input.config.children.roleTimeoutMs;
+		const timeoutHandle = timeoutMs > 0 ? setTimeout(() => {
+			timedOut = true;
+			abortChild(`Child run timed out after ${timeoutMs}ms.`);
+		}, timeoutMs) : undefined;
+		(timeoutHandle as { unref?: () => void } | undefined)?.unref?.();
+		const finish = (exitCode: number) => {
+			if (settled) return;
+			settled = true;
+			if (input.signal) input.signal.removeEventListener("abort", onAbort);
+			if (timeoutHandle) clearTimeout(timeoutHandle);
+			if (buffer.trim()) processLine(buffer);
+			const effectiveExitCode = exitCode === 0 && isFailedStopReason(assistantStopReason) ? 1 : exitCode;
+			const fullOutput = finalOutput
+				|| (assistantErrorMessage ? `Assistant ${assistantStopReason ?? "failed"}: ${assistantErrorMessage}` : "")
+				|| (stderr ? `No assistant output. Stderr log: ${stderrPath}\n\n${stderr}` : "(no output)");
+			const outputPath = writeArtifact(input.runDir, `outputs/${input.role}-${stampBase}.md`, fullOutput);
+			const truncatedOutput = truncateForTool(fullOutput, MAX_TOOL_OUTPUT_BYTES);
+			const truncatedStderr = truncateForTool(stderr, MAX_STDERR_BYTES);
+			resolve({
+				role: input.role,
+				exitCode: effectiveExitCode,
+				output: truncatedOutput.text,
+				stderr: truncatedStderr.text,
+				sessionFile,
+				transcriptPath,
+				stderrPath,
+				outputPath,
+				outputTruncated: truncatedOutput.truncated,
+				stderrTruncated: truncatedStderr.truncated,
+				outputBytes: truncatedOutput.totalBytes,
+				stderrBytes: truncatedStderr.totalBytes,
+				timedOut,
+				stopReason: assistantStopReason,
+				errorMessage: assistantErrorMessage,
+			});
+		};
+		child.stdout.on("data", (chunk) => {
+			buffer += chunk.toString();
+			const lines = buffer.split("\n");
+			buffer = lines.pop() ?? "";
+			for (const line of lines) processLine(line);
+		});
+		child.stderr.on("data", (chunk) => {
+			const text = chunk.toString();
+			appendArtifactFile(input.runDir, stderrPath, text);
+			stderr = appendBoundedTail(stderr, text, MAX_STDERR_BYTES);
+		});
+		child.on("close", (code, signal) => {
+			finish(aborted ? 130 : code ?? (signal ? 1 : 0));
+		});
+		child.on("error", (error) => {
+			const message = error instanceof Error ? error.message : String(error);
+			appendArtifactFile(input.runDir, stderrPath, message);
+			stderr = appendBoundedTail(stderr, message, MAX_STDERR_BYTES);
+			finish(1);
+		});
+		if (input.signal) {
+			if (input.signal.aborted) onAbort();
+			else input.signal.addEventListener("abort", onAbort, { once: true });
+		}
+	});
+}
+
+export function childEnvCounts(workerRuns: number, reviewRuns: number): Record<string, string> {
+	return {
+		[WORKER_RUNS_ENV]: String(workerRuns),
+		[REVIEW_RUNS_ENV]: String(reviewRuns),
+	};
+}

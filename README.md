@@ -9,7 +9,7 @@ Small, opinionated Pi extension for plan-driven orchestration with four roles:
 
 ## Installation
 
-Requires Pi `@earendil-works/pi-coding-agent` `>=0.78.0 <1`. Runtime dependencies used by the extension are declared in `dependencies`; the Pi host API is declared as a peer dependency.
+Requires Pi `@earendil-works/pi-coding-agent` `>=0.78.0 <1`. The Pi host API is declared as a peer dependency; runtime libraries used directly by the extension are declared in `dependencies`.
 
 Local development install:
 
@@ -82,11 +82,11 @@ Default role allowlists:
 - `worker`: `read`, `bash`, `edit`, `write`, `write_run_artifact`, `compact_session`, `ast_grep_search`, `ast_grep_scan`, `ast_grep_rewrite`, `ctx_execute`, `ctx_execute_file`, `ctx_search`, `ctx_batch_execute`
 - `reviewer`: `read`, `write_run_artifact`, `ast_grep_search`, `ast_grep_scan`, `ctx_search`
 
-Runtime read-only role policy also allows explicitly configured safe navigation tools: `ast_grep_scan`, `grep`, `find`, and `ls`. Mutating modes such as `ast_grep_scan.applyFixes=true`, `ast_grep_rewrite.apply=true`, shell tools, and arbitrary-code execution tools remain blocked for non-worker roles.
+Runtime read-only role policy also allows explicitly configured safe navigation tools: `ast_grep_scan`, `grep`, `find`, and `ls`. Mutating modes such as `ast_grep_scan.applyFixes=true`, `ast_grep_rewrite.apply=true`, shell tools, and arbitrary-code execution tools remain blocked for non-worker roles. This read-only policy prevents project/source writes by non-worker roles; it is not a confidentiality boundary or OS/container sandbox.
 
 Unknown tools are ignored by Pi when the backing extension is not installed. With the safer default `children.inheritExtensionsForReadOnly=false`, read-only roles usually have only Pi built-ins plus this extension's artifact tools.
 
-For non-worker roles, tool policy is default-deny at config/load time and runtime. Shell/arbitrary execution tools (`bash`, `ctx_execute`, `ctx_execute_file`, `ctx_batch_execute`) and mutating ast-grep modes are blocked for read-only roles. They are reserved for `worker` because they can mutate files.
+For non-worker roles, tool policy is default-deny at config/load time and runtime. Shell/arbitrary execution tools (`bash`, `ctx_execute`, `ctx_execute_file`, `ctx_batch_execute`) and mutating ast-grep modes are blocked for read-only roles. They are reserved for `worker` because they can mutate files. Run this extension only on trusted projects or inside an external sandbox when workers may touch untrusted code, secrets, or generated scripts.
 
 ## Compaction policy
 
@@ -158,6 +158,10 @@ Example:
   }
 }
 ```
+
+## Source layout
+
+The extension entrypoint stays in `extensions/pi-simple-subagents/index.ts` and only wires Pi tools, commands, and runtime guards. Workflow internals are split into focused modules: `config.ts`, `roles.ts`, `artifacts.ts`, `references.ts`, `child-runner.ts`, `workflows.ts`, `snapshots.ts`, `state.ts`, `guards.ts`, `schemas.ts`, `prompts.ts`, and `text.ts`.
 
 ## Run artifacts
 
