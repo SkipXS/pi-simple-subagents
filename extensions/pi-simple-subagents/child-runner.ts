@@ -22,7 +22,7 @@ const EXTENSION_PATH = fileURLToPath(new URL("./index.ts", import.meta.url));
 const PI_CLI_PATH_ENV = "PI_SIMPLE_SUBAGENTS_PI_CLI";
 const MAX_TRANSCRIPT_ARTIFACT_BYTES = 4 * 1024 * 1024;
 const MAX_STDERR_ARTIFACT_BYTES = 1024 * 1024;
-const MAX_PENDING_STDOUT_LINE_BYTES = 1024 * 1024;
+const MAX_PENDING_STDOUT_LINE_BYTES = MAX_TRANSCRIPT_ARTIFACT_BYTES;
 
 export interface ChildStatusUpdate {
 	key: string;
@@ -237,6 +237,31 @@ export async function spawnPiRole(input: {
 	systemPrompt?: string;
 }): Promise<ChildRunResult> {
 	const roleConfig = input.config.roles[input.role];
+	if (input.signal?.aborted) {
+		const stampBase = `${Date.now()}-${uniqueSuffix()}`;
+		const sessionFile = resolveArtifactPath(input.runDir, input.role === "worker" || input.role === "orchestrator" ? `sessions/${input.role}.jsonl` : `sessions/${input.role}-${stampBase}.jsonl`);
+		const transcriptPath = resolveArtifactPath(input.runDir, `logs/${input.role}-${stampBase}.jsonl`);
+		const stderrPath = resolveArtifactPath(input.runDir, `logs/${input.role}-${stampBase}.stderr.log`);
+		const outputPath = resolveArtifactPath(input.runDir, `outputs/${input.role}-${stampBase}.md`);
+		const output = "Child run aborted before start.";
+		return {
+			role: input.role,
+			exitCode: 130,
+			output,
+			stderr: output,
+			sessionFile,
+			transcriptPath,
+			stderrPath,
+			outputPath,
+			outputTruncated: false,
+			stderrTruncated: false,
+			outputBytes: Buffer.byteLength(output, "utf8"),
+			stderrBytes: Buffer.byteLength(output, "utf8"),
+			timedOut: false,
+			stopReason: "aborted",
+			errorMessage: output,
+		};
+	}
 	const sessionFile = resolveRoleSessionFile(input.runDir, input.role);
 	const promptPath = writeArtifact(input.runDir, `prompts/${input.role}-system-${uniqueSuffix()}.md`, input.systemPrompt ?? roleSystemPrompt(input.role, input.runDir, input.config));
 	const taskPath = writeArtifact(input.runDir, `tasks/${input.role}-${uniqueSuffix()}.md`, input.task);
@@ -244,14 +269,8 @@ export async function spawnPiRole(input: {
 		"--mode", "json",
 		"--session", sessionFile,
 	];
-	const inheritExtensions = input.role === "worker" ? input.config.children.inheritExtensions : input.config.children.inheritExtensionsForReadOnly;
-	if (!inheritExtensions) {
-		args.push("--no-extensions", "--extension", EXTENSION_PATH);
-	} else if (shouldForwardCurrentExtension(input.config.children.forwardCurrentExtension)) {
+	if (shouldForwardCurrentExtension(input.config.children.forwardCurrentExtension)) {
 		args.push("--extension", EXTENSION_PATH);
-	}
-	if (!input.config.children.inheritSkills) {
-		args.push("--no-skills");
 	}
 	args.push(
 		"--model", applyThinking(roleConfig.model, roleConfig.thinking),
@@ -264,9 +283,7 @@ export async function spawnPiRole(input: {
 		[RUN_DIR_ENV]: input.runDir,
 		...(input.envExtra ?? {}),
 	};
-	if (inheritExtensions) {
-		delete env.CONTEXT_MODE_BRIDGE_DEPTH;
-	}
+	delete env.CONTEXT_MODE_BRIDGE_DEPTH;
 	return await new Promise<ChildRunResult>((resolve) => {
 		const stampBase = `${Date.now()}-${uniqueSuffix()}`;
 		const transcriptPath = writeArtifact(input.runDir, `logs/${input.role}-${stampBase}.jsonl`, "");
@@ -291,6 +308,7 @@ export async function spawnPiRole(input: {
 		let settled = false;
 		let aborted = false;
 		let timedOut = false;
+		let stdoutLineTooLarge = false;
 		let artifactErrorMessage: string | undefined;
 		const transcriptCap = { bytes: 0, capped: false };
 		const stderrCap = { bytes: 0, capped: false };
@@ -323,7 +341,7 @@ export async function spawnPiRole(input: {
 			}
 		};
 		const processLine = (line: string) => {
-			if (!line.trim()) return;
+			if (stdoutLineTooLarge || !line.trim()) return;
 			safeAppendCappedArtifactFile(transcriptPath, `${line}\n`, transcriptCap, MAX_TRANSCRIPT_ARTIFACT_BYTES, "transcript");
 			try {
 				const event = JSON.parse(line) as { type?: string; toolName?: string; args?: unknown; input?: unknown; partialResult?: unknown; result?: unknown; isError?: boolean; message?: { role?: string; content?: Array<{ type?: string; text?: unknown }>; stopReason?: unknown; errorMessage?: unknown; provider?: unknown; model?: unknown } };
@@ -416,9 +434,11 @@ export async function spawnPiRole(input: {
 				stderr = appendBoundedTail(stderr, stderrTail, MAX_STDERR_BYTES);
 			}
 			if (buffer.trim()) processLine(buffer);
-			const baseOutput = finalOutput
-				|| (assistantErrorMessage ? `Assistant ${assistantStopReason ?? "failed"}: ${assistantErrorMessage}` : "")
-				|| (stderr ? `No assistant output. Stderr log: ${stderrPath}\n\n${stderr}` : "(no output)");
+			const baseOutput = stdoutLineTooLarge && assistantErrorMessage
+				? `Assistant ${assistantStopReason ?? "failed"}: ${assistantErrorMessage}`
+				: finalOutput
+					|| (assistantErrorMessage ? `Assistant ${assistantStopReason ?? "failed"}: ${assistantErrorMessage}` : "")
+					|| (stderr ? `No assistant output. Stderr log: ${stderrPath}\n\n${stderr}` : "(no output)");
 			let fullOutput = artifactErrorMessage ? `${baseOutput}\n\nChild run infrastructure error:\n${artifactErrorMessage}` : baseOutput;
 			let outputPath = resolveArtifactPath(input.runDir, `outputs/${input.role}-${stampBase}.md`);
 			try {
@@ -427,7 +447,7 @@ export async function spawnPiRole(input: {
 				rememberArtifactError("output", error);
 				fullOutput = `${fullOutput}\n\nChild run infrastructure error:\n${artifactErrorMessage}`;
 			}
-			const effectiveExitCode = artifactErrorMessage ? 1 : exitCode === 0 && isFailedStopReason(assistantStopReason) ? 1 : exitCode;
+			const effectiveExitCode = artifactErrorMessage || stdoutLineTooLarge ? 1 : exitCode === 0 && isFailedStopReason(assistantStopReason) ? 1 : exitCode;
 			const truncatedOutput = truncateForTool(fullOutput, MAX_TOOL_OUTPUT_BYTES);
 			const truncatedStderr = truncateForTool(stderr, MAX_STDERR_BYTES);
 			resolve({
@@ -450,9 +470,20 @@ export async function spawnPiRole(input: {
 		};
 		child.stdout.on("data", (chunk: Buffer) => {
 			buffer += stdoutDecoder.write(chunk);
-			if (Buffer.byteLength(buffer, "utf8") > MAX_PENDING_STDOUT_LINE_BYTES) {
-				processLine(takeUtf8Head(buffer, MAX_PENDING_STDOUT_LINE_BYTES));
+			if (stdoutLineTooLarge) {
 				buffer = "";
+				return;
+			}
+			if (Buffer.byteLength(buffer, "utf8") > MAX_PENDING_STDOUT_LINE_BYTES) {
+				const message = `Child stdout JSONL line exceeded ${MAX_PENDING_STDOUT_LINE_BYTES} bytes before a newline; aborting child run to avoid silently dropping output.`;
+				assistantStopReason = "error";
+				assistantErrorMessage = message;
+				const preserved = takeUtf8Head(buffer, MAX_PENDING_STDOUT_LINE_BYTES);
+				safeAppendCappedArtifactFile(transcriptPath, `${preserved}\n[Stdout line exceeded ${MAX_PENDING_STDOUT_LINE_BYTES} bytes; remaining bytes omitted.]\n`, transcriptCap, MAX_TRANSCRIPT_ARTIFACT_BYTES, "transcript");
+				buffer = "";
+				stdoutLineTooLarge = true;
+				abortChild(message);
+				return;
 			}
 			const lines = buffer.split("\n");
 			buffer = lines.pop() ?? "";

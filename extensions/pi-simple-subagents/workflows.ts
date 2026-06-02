@@ -277,7 +277,7 @@ export async function runReviewTarget(cwd: string, params: ReviewTargetParams, s
 			onStatus: forwardChildStatus(onUpdate),
 			statusKey: "subagent:scout",
 			statusLabel: "scout",
-			systemPrompt: reviewTargetSystemPrompt("scout", dir),
+			systemPrompt: reviewTargetSystemPrompt("scout", dir, config),
 		});
 		if (scout.exitCode !== 0) throwChildRunError("review-target scout failed", scout);
 		const scoutArtifact = resolveArtifactPath(dir, "scout-review-context.md");
@@ -309,7 +309,7 @@ export async function runReviewTarget(cwd: string, params: ReviewTargetParams, s
 				onStatus: forwardChildStatus(onUpdate),
 				statusKey: `subagent:reviewer-${index + 1}`,
 				statusLabel: `reviewer-${index + 1}`,
-				systemPrompt: reviewTargetSystemPrompt("reviewer", dir),
+				systemPrompt: reviewTargetSystemPrompt("reviewer", dir, config),
 			});
 			if (result.exitCode !== 0) throw new Error(childResultText(`review-target reviewer ${index + 1} failed`, result));
 			if (!dep.existsSync(expectedPath)) dep.copyArtifactFile(dir, result.outputPath, expectedPath);
@@ -342,7 +342,7 @@ export async function runReviewTarget(cwd: string, params: ReviewTargetParams, s
 		onStatus: forwardChildStatus(onUpdate),
 		statusKey: "subagent:synthesis",
 		statusLabel: "synthesis",
-		systemPrompt: reviewTargetSystemPrompt("synthesis", dir),
+		systemPrompt: reviewTargetSystemPrompt("synthesis", dir, config),
 	});
 	if (synthesis.exitCode !== 0) throwChildRunError("review-target synthesis failed", synthesis);
 	const finalSummaryPath = resolveArtifactPath(dir, "final-summary.md");

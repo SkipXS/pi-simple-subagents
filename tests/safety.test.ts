@@ -18,6 +18,9 @@ test("default config keeps YOLO roles but adds child/reference guardrails", () =
 	const config = loadConfig(cwd);
 
 	assert.equal("workflow" in config, false);
+	assert.equal("inheritExtensions" in config.children, false);
+	assert.equal("inheritExtensionsForReadOnly" in config.children, false);
+	assert.equal("inheritSkills" in config.children, false);
 	assert.equal(config.children.forwardCurrentExtension, "auto");
 	assert.equal(config.children.timeoutMs, 30 * 60 * 1000);
 	assert.equal(config.references.maxFileBytes, 1024 * 1024);
@@ -27,32 +30,55 @@ test("default config keeps YOLO roles but adds child/reference guardrails", () =
 	for (const role of Object.values(config.roles)) assert.equal("tools" in role, false);
 });
 
-test("guardrail config keys are parsed while unrelated legacy workflow keys are ignored", () => {
+test("guardrail config keys are parsed and pre-1.0 legacy keys are not accepted", () => {
 	const cwd = tempProject();
 	const configPath = path.join(cwd, ".pi", "pi-simple-subagents", "config.json");
 	fs.mkdirSync(path.dirname(configPath), { recursive: true });
 	fs.writeFileSync(configPath, JSON.stringify({
-		roles: { worker: { tools: ["read"] } },
-		workflow: {
-			maxReviewRounds: "legacy value",
-			allowParallelWorkers: false,
-			parallelWorkersRequireWorktrees: true,
-			runTestsOnlyAfterReviewLoop: true,
-		},
-		children: { roleTimeoutMs: "legacy value" },
+		roles: { worker: { model: "openai-codex/gpt-5.5", thinking: "low" } },
+		children: { timeoutMs: 1 },
 		references: { maxFileBytes: 1, allowOutsideCwd: true, allowBinary: true },
-		artifacts: { allowOutsideCwd: false },
+		artifacts: { baseDir: ".pi/custom-runs" },
 	}), "utf8");
 
 	const config = loadConfig(cwd);
 
-	assert.equal("workflow" in config, false);
-	assert.equal("roleTimeoutMs" in config.children, false);
+	assert.equal(config.roles.worker.thinking, "low");
+	assert.equal(config.children.timeoutMs, 1);
 	assert.equal(config.references.maxFileBytes, 1);
 	assert.equal(config.references.allowOutsideCwd, true);
 	assert.equal(config.references.allowBinary, true);
-	assert.equal("allowOutsideCwd" in config.artifacts, false);
-	assert.equal("tools" in config.roles.worker, false);
+	assert.equal(config.artifacts.baseDir, ".pi/custom-runs");
+
+	fs.writeFileSync(configPath, JSON.stringify({ workflow: {} }), "utf8");
+	assert.throws(() => loadConfig(cwd), /root contains unknown key: workflow/);
+
+	fs.writeFileSync(configPath, JSON.stringify({ roles: { worker: { tools: ["read"] } } }), "utf8");
+	assert.throws(() => loadConfig(cwd), /roles\.worker contains unknown key: tools/);
+
+	fs.writeFileSync(configPath, JSON.stringify({ children: { inheritExtensions: false } }), "utf8");
+	assert.throws(() => loadConfig(cwd), /children contains unknown key: inheritExtensions/);
+
+	fs.writeFileSync(configPath, JSON.stringify({ children: { inheritExtensionsForReadOnly: false } }), "utf8");
+	assert.throws(() => loadConfig(cwd), /children contains unknown key: inheritExtensionsForReadOnly/);
+
+	fs.writeFileSync(configPath, JSON.stringify({ children: { inheritSkills: false } }), "utf8");
+	assert.throws(() => loadConfig(cwd), /children contains unknown key: inheritSkills/);
+});
+
+test("config rejects unknown keys so typos are visible", () => {
+	const cwd = tempProject();
+	const configPath = path.join(cwd, ".pi", "pi-simple-subagents", "config.json");
+	fs.mkdirSync(path.dirname(configPath), { recursive: true });
+
+	fs.writeFileSync(configPath, JSON.stringify({ children: { timeuotMs: 1 } }), "utf8");
+	assert.throws(() => loadConfig(cwd), /children contains unknown key: timeuotMs/);
+
+	fs.writeFileSync(configPath, JSON.stringify({ roles: { worker: { thinkng: "high" } } }), "utf8");
+	assert.throws(() => loadConfig(cwd), /roles\.worker contains unknown key: thinkng/);
+
+	fs.writeFileSync(configPath, JSON.stringify({ references: { allowBinary: true, maxFileBytez: 1 } }), "utf8");
+	assert.throws(() => loadConfig(cwd), /references contains unknown key: maxFileBytez/);
 });
 
 test("references enforce outside-cwd and binary guardrails by default", () => {

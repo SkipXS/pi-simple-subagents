@@ -19,9 +19,6 @@ export type ExtensionForwardMode = typeof EXTENSION_FORWARD_MODES[number];
 export interface Config {
 	roles: Record<RoleName, RoleConfig>;
 	children: {
-		inheritExtensions: boolean;
-		inheritExtensionsForReadOnly: boolean;
-		inheritSkills: boolean;
 		forwardCurrentExtension: ExtensionForwardMode;
 		/** Child process timeout in milliseconds. Use 0 to disable. */
 		timeoutMs: number;
@@ -59,9 +56,6 @@ export const DEFAULT_CONFIG: Config = {
 		},
 	},
 	children: {
-		inheritExtensions: true,
-		inheritExtensionsForReadOnly: false,
-		inheritSkills: false,
 		forwardCurrentExtension: "auto",
 		timeoutMs: 30 * 60 * 1000,
 	},
@@ -129,16 +123,25 @@ function expectExtensionForwardMode(value: unknown, source: string, pathName: st
 	return mode as ExtensionForwardMode;
 }
 
+function rejectUnknownKeys(object: Record<string, unknown>, source: string, pathName: string, allowed: readonly string[]): void {
+	const accepted = new Set(allowed);
+	const unknown = Object.keys(object).filter((key) => !accepted.has(key));
+	if (unknown.length > 0) throw configError(source, `${pathName} contains unknown key${unknown.length === 1 ? "" : "s"}: ${unknown.join(", ")}`);
+}
+
 function mergeConfig(base: Config, override: unknown, source = "unknown"): Config {
 	if (override === undefined) return cloneConfig(base);
 	const overrideObject = expectObject(override, source, "root");
+	rejectUnknownKeys(overrideObject, source, "root", ["roles", "children", "references", "artifacts"]);
 	const next = cloneConfig(base);
 
 	if (overrideObject.roles !== undefined) {
 		const roles = expectObject(overrideObject.roles, source, "roles");
+		rejectUnknownKeys(roles, source, "roles", ["orchestrator", "scout", "worker", "reviewer"]);
 		for (const role of ["orchestrator", "scout", "worker", "reviewer"] as const) {
 			if (roles[role] === undefined) continue;
 			const roleObject = expectObject(roles[role], source, `roles.${role}`);
+			rejectUnknownKeys(roleObject, source, `roles.${role}`, ["model", "thinking"]);
 			const roleConfig: RoleConfig = { ...next.roles[role] };
 			if (roleObject.model !== undefined) roleConfig.model = expectModel(roleObject.model, source, `roles.${role}.model`);
 			if (roleObject.thinking !== undefined) roleConfig.thinking = expectThinking(roleObject.thinking, source, `roles.${role}.thinking`);
@@ -148,9 +151,7 @@ function mergeConfig(base: Config, override: unknown, source = "unknown"): Confi
 
 	if (overrideObject.children !== undefined) {
 		const children = expectObject(overrideObject.children, source, "children");
-		if (children.inheritExtensions !== undefined) next.children.inheritExtensions = expectBoolean(children.inheritExtensions, source, "children.inheritExtensions");
-		if (children.inheritExtensionsForReadOnly !== undefined) next.children.inheritExtensionsForReadOnly = expectBoolean(children.inheritExtensionsForReadOnly, source, "children.inheritExtensionsForReadOnly");
-		if (children.inheritSkills !== undefined) next.children.inheritSkills = expectBoolean(children.inheritSkills, source, "children.inheritSkills");
+		rejectUnknownKeys(children, source, "children", ["forwardCurrentExtension", "timeoutMs", "piCliPath"]);
 		if (children.forwardCurrentExtension !== undefined) next.children.forwardCurrentExtension = expectExtensionForwardMode(children.forwardCurrentExtension, source, "children.forwardCurrentExtension");
 		if (children.timeoutMs !== undefined) next.children.timeoutMs = expectNonNegativeInteger(children.timeoutMs, source, "children.timeoutMs");
 		if (children.piCliPath !== undefined) next.children.piCliPath = expectString(children.piCliPath, source, "children.piCliPath");
@@ -158,6 +159,7 @@ function mergeConfig(base: Config, override: unknown, source = "unknown"): Confi
 
 	if (overrideObject.references !== undefined) {
 		const references = expectObject(overrideObject.references, source, "references");
+		rejectUnknownKeys(references, source, "references", ["maxFileBytes", "allowOutsideCwd", "allowBinary"]);
 		if (references.maxFileBytes !== undefined) next.references.maxFileBytes = expectNonNegativeInteger(references.maxFileBytes, source, "references.maxFileBytes");
 		if (references.allowOutsideCwd !== undefined) next.references.allowOutsideCwd = expectBoolean(references.allowOutsideCwd, source, "references.allowOutsideCwd");
 		if (references.allowBinary !== undefined) next.references.allowBinary = expectBoolean(references.allowBinary, source, "references.allowBinary");
@@ -165,6 +167,7 @@ function mergeConfig(base: Config, override: unknown, source = "unknown"): Confi
 
 	if (overrideObject.artifacts !== undefined) {
 		const artifacts = expectObject(overrideObject.artifacts, source, "artifacts");
+		rejectUnknownKeys(artifacts, source, "artifacts", ["baseDir"]);
 		if (artifacts.baseDir !== undefined) next.artifacts.baseDir = expectString(artifacts.baseDir, source, "artifacts.baseDir");
 	}
 

@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { copyArtifactFile, resolveArtifactPath, writeArtifact } from "./artifacts.ts";
-import { childEnvCounts, childResultText, throwChildRunError, spawnPiRole } from "./child-runner.ts";
+import { childEnvCounts, childResultText, throwChildRunError, spawnPiRole, type ChildStatusUpdate } from "./child-runner.ts";
 import { loadConfig } from "./config.ts";
 import {
 	ROLE_ENV,
@@ -32,6 +32,94 @@ import {
 import { readOrchestrationState, writeOrchestrationState } from "./state.ts";
 import { parseReviewTargetCommand, runOrchestration, runParallelWorkers, runReviewTarget, runWorkerAgent } from "./workflows.ts";
 
+type ToolProgressOnUpdate = ((update: { content: Array<{ type: "text"; text: string }>; details: { subagentProgress: SubagentProgressSnapshot } }) => void) | undefined;
+type WidgetSetter = (content: string[] | undefined) => void;
+
+interface SubagentProgressSnapshot {
+	statuses: Array<{ key: string; text: string }>;
+	current?: string;
+}
+
+const STATUS_SPINNER_PATTERN = /^([⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏])\s+(.+)$/u;
+
+function splitChildStatusText(text: string): { summary: string; current: string } {
+	const trimmed = text.trim();
+	const spinnerMatch = STATUS_SPINNER_PATTERN.exec(trimmed);
+	const spinner = spinnerMatch?.[1];
+	const body = spinnerMatch?.[2] ?? trimmed;
+	const separatorIndex = body.indexOf(":");
+	if (separatorIndex < 0) return { summary: trimmed, current: body };
+
+	const label = body.slice(0, separatorIndex).trim();
+	const rest = body.slice(separatorIndex + 1).trim();
+	const metricsMatch = /^(.*?)(\s{2,}.+)$/.exec(rest);
+	const action = (metricsMatch?.[1] ?? rest).trim();
+	const metrics = metricsMatch?.[2]?.trim();
+	const summary = `${spinner ? `${spinner} ` : ""}${label}:${metrics ? ` ${metrics}` : ""}`;
+	return { summary, current: action ? `${label}: ${action}` : label };
+}
+
+function statusLabelFromSummary(summary: string, fallback: string): string {
+	const withoutSpinner = summary.replace(STATUS_SPINNER_PATTERN, "$2");
+	return withoutSpinner.split(":", 1)[0]?.trim() || fallback;
+}
+
+function formatSubagentProgress(snapshot: SubagentProgressSnapshot): string {
+	const lines = snapshot.statuses.length > 0
+		? ["Subagents:", ...snapshot.statuses.map((status) => `- ${status.text}`)]
+		: ["Subagents:", "- starting"];
+	if (snapshot.current) lines.push("", `Current: ${snapshot.current}`);
+	return lines.join("\n");
+}
+
+function createSubagentProgress(options: { onToolUpdate?: ToolProgressOnUpdate; setWidget?: WidgetSetter }) {
+	const statuses = new Map<string, string>();
+	let current: string | undefined;
+	let lastRendered = "";
+
+	const snapshot = (): SubagentProgressSnapshot => ({
+		statuses: [...statuses.entries()].map(([key, text]) => ({ key, text })),
+		...(current ? { current } : {}),
+	});
+	const publish = () => {
+		const state = snapshot();
+		const rendered = formatSubagentProgress(state);
+		if (rendered === lastRendered) return;
+		lastRendered = rendered;
+		options.onToolUpdate?.({ content: [{ type: "text", text: rendered }], details: { subagentProgress: state } });
+		options.setWidget?.(rendered.split("\n"));
+	};
+
+	return {
+		text(text: string) {
+			const normalized = text.trim();
+			if (!normalized) return;
+			current = normalized;
+			publish();
+		},
+		status(status: ChildStatusUpdate) {
+			const existing = statuses.get(status.key);
+			if (status.text === undefined) {
+				if (!existing) return;
+				const label = statusLabelFromSummary(existing, status.key);
+				const finished = `${label}: finished`;
+				statuses.set(status.key, finished);
+				current = finished;
+				publish();
+				return;
+			}
+			const parsed = splitChildStatusText(status.text);
+			if (!parsed.summary || (parsed.summary === existing && parsed.current === current)) return;
+			statuses.set(status.key, parsed.summary);
+			current = parsed.current;
+			publish();
+		},
+		clear() {
+			options.setWidget?.(undefined);
+		},
+	};
+}
+
 export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 	const role = parseRoleEnv(process.env[ROLE_ENV]);
 	const runDir = process.env[RUN_DIR_ENV];
@@ -54,9 +142,10 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 			promptGuidelines: ["Use orchestrate_plan when the user asks to implement a plan through the orchestrator workflow."],
 			parameters: OrchestrateParams,
 			async execute(_id, params: OrchestrateParamsType, signal, onUpdate, ctx) {
+				const progress = createSubagentProgress({ onToolUpdate: onUpdate });
 				const { result, runDir, planSource } = await runOrchestration(ctx.cwd, params.plan, signal, (text, status) => {
-					if (text) onUpdate?.({ content: [{ type: "text", text }], details: { status } });
-					if (status) ctx.ui.setStatus(status.key, status.text);
+					if (text) progress.text(text);
+					if (status) progress.status(status);
 				});
 				if (result.exitCode !== 0) throwChildRunError("Orchestration failed", result);
 				return {
@@ -74,9 +163,10 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 			promptGuidelines: ["Use review_target when the user asks to inspect, audit, or suggest improvements without implementing changes."],
 			parameters: ReviewTargetParams,
 			async execute(_id, params: ReviewTargetParamsType, signal, onUpdate, ctx) {
+				const progress = createSubagentProgress({ onToolUpdate: onUpdate });
 				const result = await runReviewTarget(ctx.cwd, params, signal, (text, status) => {
-					if (text) onUpdate?.({ content: [{ type: "text", text }], details: { status } });
-					if (status) ctx.ui.setStatus(status.key, status.text);
+					if (text) progress.text(text);
+					if (status) progress.status(status);
 				});
 				return {
 					content: [{ type: "text", text: `Review finished.\nRun dir: ${result.runDir}\nTarget source: ${result.targetSource}\nFinal summary: ${result.finalSummaryPath}\n\n${result.synthesis.output}` }],
@@ -94,9 +184,10 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 			executionMode: "sequential",
 			parameters: WorkerAgentParams,
 			async execute(_id, params: WorkerAgentParamsType, signal, onUpdate, ctx) {
+				const progress = createSubagentProgress({ onToolUpdate: onUpdate });
 				const result = await runWorkerAgent(ctx.cwd, params, signal, (text, status) => {
-					if (text) onUpdate?.({ content: [{ type: "text", text }], details: { status } });
-					if (status) ctx.ui.setStatus(status.key, status.text);
+					if (text) progress.text(text);
+					if (status) progress.status(status);
 				});
 				return {
 					content: [{ type: "text", text: `Worker finished.\nRun dir: ${result.runDir}\nTask source: ${result.taskSource}\nOutput: ${result.outputArtifactPath}\nTranscript: ${result.result.transcriptPath}\n\n${result.result.output}` }],
@@ -113,9 +204,10 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 			promptGuidelines: ["Use run_parallel_workers only when worker tasks are independent enough to run concurrently without likely file-edit conflicts."],
 			parameters: ParallelWorkersParams,
 			async execute(_id, params: ParallelWorkersParamsType, signal, onUpdate, ctx) {
+				const progress = createSubagentProgress({ onToolUpdate: onUpdate });
 				const result = await runParallelWorkers(ctx.cwd, params, signal, (text, status) => {
-					if (text) onUpdate?.({ content: [{ type: "text", text }], details: { status } });
-					if (status) ctx.ui.setStatus(status.key, status.text);
+					if (text) progress.text(text);
+					if (status) progress.status(status);
 				});
 				const summary = result.workers.map((worker, index) => `${index + 1}. ${worker.name}: output ${worker.outputArtifactPath}; transcript ${worker.result.transcriptPath}`).join("\n");
 				return {
@@ -150,6 +242,7 @@ Run directory: ${runDir}
 Expected output artifact: ${params.outputFile ?? `${label}.md`}
 Purpose: ${params.purpose}`;
 				writeArtifact(runDir, `delegations/${label}-${Date.now()}.md`, task);
+				const progress = createSubagentProgress({ onToolUpdate: onUpdate });
 				const result = await spawnPiRole({
 					cwd: ctx.cwd,
 					role: params.role,
@@ -158,10 +251,8 @@ Purpose: ${params.purpose}`;
 					config,
 					signal,
 					envExtra: childEnvCounts(workerRuns, reviewRuns),
-					onUpdate: (text) => onUpdate?.({ content: [{ type: "text", text }], details: {} }),
-					onStatus: (status) => {
-						ctx.ui.setStatus(status.key, status.text);
-					},
+					onUpdate: (text) => progress.text(text),
+					onStatus: (status) => progress.status(status),
 					statusKey: `subagent:${params.role}${params.round ? `-${params.round}` : ""}`,
 					statusLabel: `${params.role}${params.round ? `-${params.round}` : ""}`,
 				});
@@ -215,7 +306,7 @@ Purpose: ${params.purpose}`;
 			label: "Compact Session",
 			description: "Request compaction for the current child session to prevent context rot while preserving orchestration state.",
 			promptSnippet: "Compact the current child session with orchestration-aware summary instructions",
-			promptGuidelines: ["Use compact_session when a worker or orchestrator session is getting long; artifacts remain the source of truth after compaction."],
+			promptGuidelines: ["Use compact_session when any child role session with a run directory is getting long; artifacts remain the source of truth after compaction."],
 			parameters: CompactSessionParams,
 			async execute(_id, params: CompactSessionParamsType, _signal, _onUpdate, ctx) {
 				const defaultInstructions = [
@@ -264,10 +355,11 @@ Purpose: ${params.purpose}`;
 				return;
 			}
 			ctx.ui.notify("Starting orchestrator workflow...", "info");
+			const progress = createSubagentProgress({ setWidget: (content) => ctx.ui.setWidget("pi-simple-subagents:orchestrate", content, { placement: "belowEditor" }) });
 			try {
 				const { result, runDir } = await runOrchestration(ctx.cwd, plan, ctx.signal, (text, status) => {
-					if (status) ctx.ui.setStatus(status.key, status.text);
-					else ctx.ui.setStatus("orchestrator", text);
+					if (text) progress.text(text);
+					if (status) progress.status(status);
 				});
 				if (result.exitCode !== 0) throwChildRunError("Orchestration failed", result);
 				pi.sendMessage({
@@ -281,7 +373,7 @@ Purpose: ${params.purpose}`;
 				ctx.ui.notify(`Orchestration failed: ${message.split("\n")[0]}`, "error");
 				throw error;
 			} finally {
-				ctx.ui.setStatus("orchestrator", undefined);
+				progress.clear();
 			}
 		};
 
@@ -292,10 +384,11 @@ Purpose: ${params.purpose}`;
 				return;
 			}
 			ctx.ui.notify("Starting worker...", "info");
+			const progress = createSubagentProgress({ setWidget: (content) => ctx.ui.setWidget("pi-simple-subagents:work", content, { placement: "belowEditor" }) });
 			try {
 				const result = await runWorkerAgent(ctx.cwd, { task }, ctx.signal, (text, status) => {
-					if (status) ctx.ui.setStatus(status.key, status.text);
-					else ctx.ui.setStatus("work", text);
+					if (text) progress.text(text);
+					if (status) progress.status(status);
 				});
 				pi.sendMessage({
 					customType: "pi-simple-subagents-worker-result",
@@ -308,7 +401,7 @@ Purpose: ${params.purpose}`;
 				ctx.ui.notify(`Worker failed: ${message.split("\n")[0]}`, "error");
 				throw error;
 			} finally {
-				ctx.ui.setStatus("work", undefined);
+				progress.clear();
 			}
 		};
 
@@ -319,10 +412,11 @@ Purpose: ${params.purpose}`;
 				return;
 			}
 			ctx.ui.notify("Starting review workflow...", "info");
+			const progress = createSubagentProgress({ setWidget: (content) => ctx.ui.setWidget("pi-simple-subagents:review", content, { placement: "belowEditor" }) });
 			try {
 				const result = await runReviewTarget(ctx.cwd, parseReviewTargetCommand(target), ctx.signal, (text, status) => {
-					if (status) ctx.ui.setStatus(status.key, status.text);
-					else ctx.ui.setStatus("review", text);
+					if (text) progress.text(text);
+					if (status) progress.status(status);
 				});
 				pi.sendMessage({
 					customType: "pi-simple-subagents-review-result",
@@ -335,7 +429,7 @@ Purpose: ${params.purpose}`;
 				ctx.ui.notify(`Review failed: ${message.split("\n")[0]}`, "error");
 				throw error;
 			} finally {
-				ctx.ui.setStatus("review", undefined);
+				progress.clear();
 			}
 		};
 
@@ -393,10 +487,11 @@ Purpose: ${params.purpose}`;
 					return;
 				}
 				ctx.ui.notify(`Starting ${tasks.length} workers in parallel...`, "info");
+				const progress = createSubagentProgress({ setWidget: (content) => ctx.ui.setWidget("pi-simple-subagents:work-parallel", content, { placement: "belowEditor" }) });
 				try {
 					const result = await runParallelWorkers(ctx.cwd, { tasks }, ctx.signal, (text, status) => {
-						if (status) ctx.ui.setStatus(status.key, status.text);
-						else ctx.ui.setStatus("work-parallel", text);
+						if (text) progress.text(text);
+						if (status) progress.status(status);
 					});
 					pi.sendMessage({
 						customType: "pi-simple-subagents-parallel-workers-result",
@@ -409,7 +504,7 @@ Purpose: ${params.purpose}`;
 					ctx.ui.notify(`Parallel workers failed: ${message.split("\n")[0]}`, "error");
 					throw error;
 				} finally {
-					ctx.ui.setStatus("work-parallel", undefined);
+					progress.clear();
 				}
 			},
 		});

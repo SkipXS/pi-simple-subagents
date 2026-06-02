@@ -18,9 +18,6 @@
     }
   },
   "children": {
-    "inheritExtensions": true,
-    "inheritExtensionsForReadOnly": false,
-    "inheritSkills": false,
     "forwardCurrentExtension": "auto",
     "timeoutMs": 1800000
   },

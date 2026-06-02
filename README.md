@@ -9,7 +9,7 @@ Small, opinionated Pi extension for plan-driven orchestration with four roles:
 
 ## Installation
 
-Requires Node.js `>=22.19.0` and Pi `@earendil-works/pi-coding-agent` `>=0.78.0 <1`. The Pi host API is declared as a peer dependency; runtime libraries used directly by the extension are declared in `dependencies`.
+Requires Node.js `>=22.19.0` and Pi `@earendil-works/pi-coding-agent` `>=0.78.0 <1`. The Pi host API is declared as a peer dependency with that range; runtime libraries used directly by the extension are declared in `dependencies`. Before widening the peer range, smoke-test the package with the candidate Pi version because the extension depends on Pi host APIs for tools, slash commands, UI updates, and session compaction.
 
 Local development install:
 
@@ -58,6 +58,14 @@ npm pack --dry-run
 
 `npm run check` runs typecheck plus tests. `prepack` and `prepublishOnly` run the same check automatically before packing or publishing. `npm pack --dry-run` publishes the extension source, examples, README, LICENSE, and package metadata. Tests and `tsconfig.json` are development-only files in this repository.
 
+Release/package smoke checklist:
+
+1. `npm run check`
+2. `npm pack --dry-run`
+3. Install or load the checkout in a Pi version satisfying the peer range (`>=0.78.0 <1`).
+4. Reload Pi, then smoke `/orchestrate`, `/work`, `/work-parallel`, `/review`, artifact writing, and (inside a child role session) `compact_session`.
+
+
 For local Pi testing, install or load the package from this checkout, then reload Pi after source/config changes:
 
 ```bash
@@ -95,8 +103,12 @@ or let the model call `run_worker_agent` for the full schema (`task`, optional `
 Parallel workers for independent tasks:
 
 ```text
+/work-parallel ["Update README usage examples","Add parser regression tests"]
 /work-parallel [{"name":"docs","task":"Update README usage examples"},{"name":"tests","task":"Add parser regression tests"}]
+/work-parallel {"tasks":[{"name":"docs","task":"Update README usage examples"},{"name":"tests","task":"Add parser regression tests"}]}
 ```
+
+The slash command accepts JSON only: either an array of task strings, an array of task objects, or an object with a `tasks` array. It requires 2-8 tasks. Object fields are `task` (required non-empty string), `name` (optional string), `purpose` (optional `implementation`, `fix`, or `validation`), and `outputFile` (optional string). Invalid JSON, wrong task count, unsupported shapes, or invalid fields are reported in the Pi UI and do not start workers.
 
 or let the model call `run_parallel_workers` with `tasks: [{ name?, task, purpose?, outputFile? }, ...]`. Each worker gets its own child run directory and `sessions/worker.jsonl`, so their transcripts do not collide. YOLO mode still does not prevent source edit conflicts; use this only when tasks are independent enough that workers are unlikely to edit the same files.
 
@@ -118,7 +130,7 @@ or let the model call `review_target` for the full schema (`target`, `focus`, `r
 
 ## Important workflow guidance
 
-Pi is YOLO by default, and this extension follows that model for source edits and tool use. The workflow suggests roles and artifacts, but it does not impose hard source-file, snapshot, validation, review-round, or role-write guardrails. It does include process/reference/artifact safety guardrails to reduce accidental runaway child runs, huge/binary context ingestion, and artifact path/link surprises.
+Pi is YOLO by default, and this extension follows that model for source edits and tool use. The workflow suggests roles and artifacts, but it does not impose hard source-file, snapshot, validation, review-round, or role-write guardrails. It does include a configurable child process timeout plus reference/artifact safety guardrails to reduce accidental runaway child runs, huge/binary context ingestion, and artifact path/link surprises.
 
 - Scout, reviewer, orchestrator, and worker can use the normal Pi tool surface.
 - Any role may run scripts, tests, benchmarks, downloads, browser/user-flow checks, or diagnostics when useful.
@@ -131,7 +143,7 @@ Pi is YOLO by default, and this extension follows that model for source edits an
 
 Pi is intentionally YOLO by default, and this extension follows that model for role tool access while adding a few operational guardrails:
 
-- Role runs do not pass a restrictive `--tools` allowlist, even if old config files contain `roles.<role>.tools`.
+- Role runs do not pass a restrictive `--tools` allowlist; every role gets the normal inherited Pi tool surface.
 - Child runs have a configurable extension timeout (`children.timeoutMs`, default 30 minutes; set `0` to disable). Timeout kills the child process tree where supported and marks `timedOut` in results.
 - Child runs normally discover Pi from the installed `@earendil-works/pi-coding-agent` package `bin`. If your install layout is unusual, set `PI_SIMPLE_SUBAGENTS_PI_CLI=/absolute/path/to/pi` (or `pi.cmd` on Windows) or configure `children.piCliPath`; the environment variable wins.
 - Child stdout/stderr/transcript artifacts are capped to avoid unbounded disk/context growth; chat previews remain separately truncated.
@@ -142,13 +154,13 @@ Pi is intentionally YOLO by default, and this extension follows that model for r
 - Orchestration runs do not archive/restore authorized source snapshots.
 - Review rounds and validation timing are orchestration choices, not hard gates. Child role-agent tool calls are serialized to protect persistent session files.
 
-Legacy workflow/tool allowlist config fields are accepted but ignored for compatibility; current guardrail fields are documented below.
+Unknown config keys are rejected during config loading so typos are visible instead of silently ignored. Before `1.0`, obsolete/legacy config fields are not carried forward; remove them instead of relying on compatibility shims.
 
 This policy is not a confidentiality boundary or OS/container sandbox. Run this extension only on trusted projects or inside an external sandbox when agents may execute untrusted code, access secrets, or run generated scripts. If child CLI discovery fails, set `PI_SIMPLE_SUBAGENTS_PI_CLI=/absolute/path/to/pi` or `children.piCliPath`.
 
 ## Compaction policy
 
-Pi auto-compaction still applies per child session. In addition, `orchestrator` and `worker` can call `compact_session` when their persistent sessions get long. The tool requests Pi compaction with instructions to preserve:
+Pi auto-compaction still applies per child session. In addition, every child role session that has a run directory (`orchestrator`, `scout`, `worker`, and `reviewer`) can call `compact_session` when its context gets long. It is most often useful for the persistent `orchestrator` and `worker` sessions. The tool requests Pi compaction with instructions to preserve:
 
 - original plan/current goal
 - changed files and implementation decisions
@@ -181,7 +193,7 @@ Global defaults can live at:
 ~/.pi/agent/pi-simple-subagents/config.json
 ```
 
-Project config overrides global config.
+Project config overrides global config. Unknown keys are treated as config errors to catch typos. Before `1.0`, legacy config fields are rejected rather than silently accepted; keep configs on the documented schema below.
 
 Example with explicit YOLO defaults (all sections are optional; omit anything you do not want to override):
 
@@ -194,9 +206,6 @@ Example with explicit YOLO defaults (all sections are optional; omit anything yo
     "reviewer": { "model": "openai-codex/gpt-5.5", "thinking": "high" }
   },
   "children": {
-    "inheritExtensions": true,
-    "inheritExtensionsForReadOnly": false,
-    "inheritSkills": false,
     "forwardCurrentExtension": "auto",
     "timeoutMs": 1800000,
     "piCliPath": "/optional/path/to/pi-or-pi.cmd"
@@ -218,10 +227,7 @@ Config reference:
 | --- | --- | --- |
 | `roles.<role>.model` | role-specific | Model for `orchestrator`, `scout`, `worker`, or `reviewer`. |
 | `roles.<role>.thinking` | role-specific | Thinking suffix: `off`, `minimal`, `low`, `medium`, `high`, or `xhigh`. |
-| `children.inheritExtensions` | `true` | Worker children inherit normal Pi extensions. If `false`, the child starts with `--no-extensions --extension <this-extension>`. |
-| `children.inheritExtensionsForReadOnly` | `false` | Scout/reviewer children inherit normal Pi extensions. If `false`, they start with only this extension loaded. |
-| `children.inheritSkills` | `false` | Child runs inherit Pi skills. |
-| `children.forwardCurrentExtension` | `"auto"` | `"auto"` forwards this extension to child runs when the parent Pi process was started with `-e/--extension`; `"always"` always adds `--extension <this-extension>` when extensions are inherited; `"never"` never does. This helps temporary extension loading expose `write_run_artifact` and `compact_session` to worker children. |
+| `children.forwardCurrentExtension` | `"auto"` | `"auto"` forwards this extension to child runs when the parent Pi process was started with `-e/--extension`; `"always"` always adds `--extension <this-extension>`; `"never"` never does. This helps temporary extension loading expose `write_run_artifact` and `compact_session` to child roles. |
 | `children.timeoutMs` | `1800000` | Child run timeout in milliseconds. Use `0` to disable. Timed-out runs return `timedOut: true` and exit code `124`. |
 | `children.piCliPath` | unset | Optional Pi CLI command/path override. `PI_SIMPLE_SUBAGENTS_PI_CLI` environment variable takes precedence. Useful for unusual global installs, Windows, and troubleshooting CLI discovery. |
 | `references.maxFileBytes` | `1048576` | Maximum bytes read from an `@file` reference. Larger files are truncated with a warning. Use `0` to disable truncation. |
@@ -307,11 +313,14 @@ Child transcripts, stderr logs, referenced input files, reference warnings, and 
 
 ## Subagent status display
 
-While child agents run in interactive Pi, the extension publishes one footer status per active subagent via `ctx.ui.setStatus()`. Each status includes an animated spinner, the current activity parsed from child JSON events, and compact usage/model information when available:
+While child agents run in interactive Pi, tool calls stream a stable multi-line progress block into the tool-call window. Slash commands (`/orchestrate`, `/work`, `/work-parallel`, `/review`) show the same progress as a below-editor widget instead of using the footer, so long activity lines do not make the footer jump. The subagent list keeps the spinner and compact usage/model information when available; the frequently changing activity is shown at the end:
 
 ```text
-⠋ worker: bash npm test  ↑1.0k ↓2.0k R3.0k W4.0k $0.123 3.7%/272k (auto) - gpt-5.5 • medium
-⠙ reviewer-1: read references.ts  ↑867 ↓103 R31k $0.023 11.8%/272k (auto) - gpt-5.5 • high
+Subagents:
+- ⠋ worker: ↑1.0k ↓2.0k R3.0k W4.0k $0.123 3.7%/272k (auto) - gpt-5.5 • medium
+- ⠙ reviewer-1: ↑867 ↓103 R31k $0.023 11.8%/272k (auto) - gpt-5.5 • high
+
+Current: reviewer-1: read references.ts
 ```
 
 The context percentage is estimated from the latest child response token total and known model-family context windows; child processes do not currently expose Pi's exact parent footer context calculation.

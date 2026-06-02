@@ -69,7 +69,11 @@ export function readReference(cwd: string, input: string, label: string, config:
 	if (!atMatch || !pathLike) return { text: input, source: `inline ${label}`, warnings: [] };
 
 	const requestedPath = path.resolve(cwd, pathLike);
-	if (!fs.existsSync(requestedPath)) throw new Error(`${label} reference not found: ${pathLike}`);
+	const isLeadingReference = atMatch.index === 0;
+	if (!fs.existsSync(requestedPath)) {
+		if (!options?.leadingOnly && !isLeadingReference) return { text: input, source: `inline ${label}`, warnings: [] };
+		throw new Error(`${label} reference not found: ${pathLike}`);
+	}
 	const realCwd = fs.realpathSync.native(cwd);
 	const absolutePath = fs.realpathSync.native(requestedPath);
 	const outsideCwd = !isPathInside(realCwd, absolutePath);
