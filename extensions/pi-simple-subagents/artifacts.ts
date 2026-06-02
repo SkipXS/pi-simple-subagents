@@ -32,29 +32,72 @@ export function resolveArtifactPath(runDir: string, name: string): string {
 	return target;
 }
 
+function assertNoExistingLink(target: string, mode: "replace" | "append"): void {
+	let stat: fs.Stats;
+	try {
+		stat = fs.lstatSync(target);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+		throw error;
+	}
+	if (stat.isSymbolicLink()) throw new Error(`Artifact target is a symbolic link: ${target}`);
+	if (!stat.isFile()) throw new Error(`Artifact target is not a regular file: ${target}`);
+	if (mode === "append" && stat.nlink > 1) throw new Error(`Artifact target has multiple hard links and cannot be appended safely: ${target}`);
+}
+
+function assertExistingParentsAreNotSymlinks(runDir: string, target: string): void {
+	const absoluteRunDir = path.resolve(runDir);
+	let current = absoluteRunDir;
+	const relativeParts = path.relative(absoluteRunDir, path.dirname(path.resolve(target))).split(path.sep).filter(Boolean);
+	for (const part of relativeParts) {
+		current = path.join(current, part);
+		if (!fs.existsSync(current)) return;
+		const stat = fs.lstatSync(current);
+		if (stat.isSymbolicLink()) throw new Error(`Artifact parent path is a symbolic link: ${current}`);
+		if (!stat.isDirectory()) throw new Error(`Artifact parent path is not a directory: ${current}`);
+	}
+}
+
 function ensureArtifactTarget(runDir: string, target: string): void {
 	const absoluteRunDir = path.resolve(runDir);
 	const absoluteTarget = path.resolve(target);
 	const relative = path.relative(absoluteRunDir, absoluteTarget);
 	if (relative.startsWith("..") || path.isAbsolute(relative)) throw new Error(`Artifact path escapes run dir: ${target}`);
+	assertExistingParentsAreNotSymlinks(absoluteRunDir, absoluteTarget);
 	fs.mkdirSync(path.dirname(absoluteTarget), { recursive: true });
+}
+
+function atomicReplaceFile(target: string, contentOrSource: string, mode: "content" | "copy"): void {
+	const dir = path.dirname(target);
+	const temp = path.join(dir, `.tmp-${path.basename(target)}-${uniqueSuffix()}`);
+	try {
+		if (mode === "content") fs.writeFileSync(temp, contentOrSource, { encoding: "utf8", flag: "wx" });
+		else fs.copyFileSync(contentOrSource, temp, fs.constants.COPYFILE_EXCL);
+		fs.renameSync(temp, target);
+	} catch (error) {
+		try { fs.rmSync(temp, { force: true }); } catch { /* ignore cleanup */ }
+		throw error;
+	}
 }
 
 export function writeArtifact(runDir: string, name: string, content: string): string {
 	const target = resolveArtifactPath(runDir, name);
 	ensureArtifactTarget(runDir, target);
-	fs.writeFileSync(target, content, "utf8");
+	assertNoExistingLink(target, "replace");
+	atomicReplaceFile(target, content, "content");
 	return target;
 }
 
 export function appendArtifactFile(runDir: string, target: string, content: string): void {
 	ensureArtifactTarget(runDir, target);
-	fs.appendFileSync(target, content, "utf8");
+	assertNoExistingLink(target, "append");
+	fs.appendFileSync(target, content, { encoding: "utf8", flag: "a" });
 }
 
 export function copyArtifactFile(runDir: string, source: string, target: string): void {
 	ensureArtifactTarget(runDir, target);
-	fs.copyFileSync(source, target);
+	assertNoExistingLink(target, "replace");
+	atomicReplaceFile(target, source, "copy");
 }
 
 export function uniqueSuffix(): string {

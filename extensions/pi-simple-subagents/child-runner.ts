@@ -21,6 +21,10 @@ import { appendBoundedTail, takeUtf8Head, truncateForTool } from "./text.ts";
 
 const EXTENSION_PATH = fileURLToPath(new URL("./index.ts", import.meta.url));
 const requireFromExtension = createRequire(import.meta.url);
+const PI_CLI_PATH_ENV = "PI_SIMPLE_SUBAGENTS_PI_CLI";
+const MAX_TRANSCRIPT_ARTIFACT_BYTES = 4 * 1024 * 1024;
+const MAX_STDERR_ARTIFACT_BYTES = 1024 * 1024;
+const MAX_PENDING_STDOUT_LINE_BYTES = 1024 * 1024;
 
 export interface ChildRunResult {
 	role: RoleName;
@@ -56,7 +60,9 @@ export function throwChildRunError(prefix: string, result: ChildRunResult): neve
 	throw new Error(childResultText(prefix, result));
 }
 
-function resolvePiCliPath(): string | undefined {
+function resolvePiCliPath(overridePath?: string): string | undefined {
+	const configured = process.env[PI_CLI_PATH_ENV]?.trim() || overridePath?.trim();
+	if (configured) return configured;
 	try {
 		const packageEntry = requireFromExtension.resolve("@earendil-works/pi-coding-agent");
 		const candidate = path.join(path.dirname(path.dirname(packageEntry)), "dist", "cli.js");
@@ -66,9 +72,17 @@ function resolvePiCliPath(): string | undefined {
 	}
 }
 
-function getPiInvocation(args: string[]): { command: string; args: string[] } {
-	const cliPath = resolvePiCliPath();
-	if (cliPath) return { command: process.execPath, args: [cliPath, ...args] };
+function isJavaScriptEntrypoint(filePath: string): boolean {
+	return /\.[cm]?js$/i.test(filePath);
+}
+
+export function getPiInvocation(args: string[], config?: Config): { command: string; args: string[] } {
+	const cliPath = resolvePiCliPath(config?.children.piCliPath);
+	if (cliPath) {
+		return isJavaScriptEntrypoint(cliPath) && fs.existsSync(cliPath)
+			? { command: process.execPath, args: [cliPath, ...args] }
+			: { command: cliPath, args };
+	}
 	const currentScript = process.argv[1];
 	const isBunVirtualScript = currentScript?.startsWith("/$bunfs/root/");
 	if (currentScript && !isBunVirtualScript && fs.existsSync(currentScript)) {
@@ -77,10 +91,7 @@ function getPiInvocation(args: string[]): { command: string; args: string[] } {
 	const execName = path.basename(process.execPath).toLowerCase();
 	const isGenericRuntime = /^(node|bun)(\.exe)?$/.test(execName);
 	if (!isGenericRuntime) return { command: process.execPath, args };
-	if (process.platform === "win32") {
-		throw new Error("Unable to resolve the Pi CLI entrypoint from the running process or the @earendil-works/pi-coding-agent peer dependency. Ensure a compatible Pi CLI (>=0.78.0 <1) is installed and visible to this extension.");
-	}
-	return { command: "pi", args };
+	return { command: process.platform === "win32" ? "pi.cmd" : "pi", args };
 }
 
 export function quoteAtReferencePath(filePath: string): string {
@@ -96,6 +107,23 @@ export function shouldForwardCurrentExtension(mode: ExtensionForwardMode, argv: 
 	if (mode === "always") return true;
 	if (mode === "never") return false;
 	return wasLoadedWithExtensionFlag(argv);
+}
+
+function appendCappedArtifactFile(runDir: string, target: string, content: string, state: { bytes: number; capped: boolean }, maxBytes: number): void {
+	if (content.length === 0 || state.capped) return;
+	const contentBytes = Buffer.byteLength(content, "utf8");
+	if (state.bytes + contentBytes <= maxBytes) {
+		appendArtifactFile(runDir, target, content);
+		state.bytes += contentBytes;
+		return;
+	}
+	const remaining = Math.max(0, maxBytes - state.bytes);
+	if (remaining > 0) {
+		appendArtifactFile(runDir, target, takeUtf8Head(content, remaining));
+		state.bytes = maxBytes;
+	}
+	appendArtifactFile(runDir, target, `\n[Artifact cap reached at ${maxBytes} bytes; further output omitted.]\n`);
+	state.capped = true;
 }
 
 export async function spawnPiRole(input: {
@@ -145,8 +173,8 @@ export async function spawnPiRole(input: {
 		const transcriptPath = writeArtifact(input.runDir, `logs/${input.role}-${stampBase}.jsonl`, "");
 		const stderrPath = writeArtifact(input.runDir, `logs/${input.role}-${stampBase}.stderr.log`, "");
 
-		const invocation = getPiInvocation(args);
-		const child = spawn(invocation.command, invocation.args, { cwd: input.cwd, env, stdio: ["ignore", "pipe", "pipe"], shell: false, detached: process.platform !== "win32" });
+		const invocation = getPiInvocation(args, input.config);
+		const child = spawn(invocation.command, invocation.args, { cwd: input.cwd, env, stdio: ["ignore", "pipe", "pipe"], shell: false, detached: process.platform !== "win32", windowsHide: true });
 		const stdoutDecoder = new StringDecoder("utf8");
 		const stderrDecoder = new StringDecoder("utf8");
 		let buffer = "";
@@ -157,9 +185,11 @@ export async function spawnPiRole(input: {
 		let settled = false;
 		let aborted = false;
 		let timedOut = false;
+		const transcriptCap = { bytes: 0, capped: false };
+		const stderrCap = { bytes: 0, capped: false };
 		const processLine = (line: string) => {
 			if (!line.trim()) return;
-			appendArtifactFile(input.runDir, transcriptPath, `${line}\n`);
+			appendCappedArtifactFile(input.runDir, transcriptPath, `${line}\n`, transcriptCap, MAX_TRANSCRIPT_ARTIFACT_BYTES);
 			try {
 				const event = JSON.parse(line);
 				if (event.type === "message_end" && event.message?.role === "assistant") {
@@ -190,11 +220,13 @@ export async function spawnPiRole(input: {
 			}
 			child.kill(signalName);
 		};
-		const abortChild = (reason = "Child run aborted.") => {
+		const abortChild = (reason = "Child run aborted.", options: { timeout?: boolean } = {}) => {
+			if (options.timeout) timedOut = true;
 			aborted = true;
 			const line = `${reason}\n`;
-			stderr = appendBoundedTail(stderr, stderr.endsWith("\n") || stderr.length === 0 ? line : `\n${line}`, MAX_STDERR_BYTES);
-			appendArtifactFile(input.runDir, stderrPath, stderr.endsWith("\n") ? line : `\n${line}`);
+			const artifactLine = stderr.endsWith("\n") || stderr.length === 0 ? line : `\n${line}`;
+			stderr = appendBoundedTail(stderr, artifactLine, MAX_STDERR_BYTES);
+			appendCappedArtifactFile(input.runDir, stderrPath, artifactLine, stderrCap, MAX_STDERR_ARTIFACT_BYTES);
 			if (process.platform === "win32" && child.pid) {
 				const killer = spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], { stdio: "ignore", windowsHide: true });
 				killer.on("error", () => child.kill());
@@ -208,14 +240,18 @@ export async function spawnPiRole(input: {
 			(killTimer as { unref?: () => void }).unref?.();
 		};
 		const onAbort = () => abortChild();
+		const timeoutMs = input.config.children.timeoutMs;
+		const timeoutTimer = timeoutMs > 0 ? setTimeout(() => abortChild(`Child run timed out after ${timeoutMs} ms.`, { timeout: true }), timeoutMs) : undefined;
+		(timeoutTimer as { unref?: () => void } | undefined)?.unref?.();
 		const finish = (exitCode: number) => {
 			if (settled) return;
 			settled = true;
+			if (timeoutTimer) clearTimeout(timeoutTimer);
 			if (input.signal) input.signal.removeEventListener("abort", onAbort);
 			buffer += stdoutDecoder.end();
 			const stderrTail = stderrDecoder.end();
 			if (stderrTail) {
-				appendArtifactFile(input.runDir, stderrPath, stderrTail);
+				appendCappedArtifactFile(input.runDir, stderrPath, stderrTail, stderrCap, MAX_STDERR_ARTIFACT_BYTES);
 				stderr = appendBoundedTail(stderr, stderrTail, MAX_STDERR_BYTES);
 			}
 			if (buffer.trim()) processLine(buffer);
@@ -247,6 +283,10 @@ export async function spawnPiRole(input: {
 		};
 		child.stdout.on("data", (chunk: Buffer) => {
 			buffer += stdoutDecoder.write(chunk);
+			if (Buffer.byteLength(buffer, "utf8") > MAX_PENDING_STDOUT_LINE_BYTES) {
+				processLine(takeUtf8Head(buffer, MAX_PENDING_STDOUT_LINE_BYTES));
+				buffer = "";
+			}
 			const lines = buffer.split("\n");
 			buffer = lines.pop() ?? "";
 			for (const line of lines) processLine(line);
@@ -254,15 +294,15 @@ export async function spawnPiRole(input: {
 		child.stderr.on("data", (chunk: Buffer) => {
 			const text = stderrDecoder.write(chunk);
 			if (!text) return;
-			appendArtifactFile(input.runDir, stderrPath, text);
+			appendCappedArtifactFile(input.runDir, stderrPath, text, stderrCap, MAX_STDERR_ARTIFACT_BYTES);
 			stderr = appendBoundedTail(stderr, text, MAX_STDERR_BYTES);
 		});
 		child.on("close", (code, signal) => {
-			finish(aborted ? 130 : code ?? (signal ? 1 : 0));
+			finish(timedOut ? 124 : aborted ? 130 : code ?? (signal ? 1 : 0));
 		});
 		child.on("error", (error) => {
 			const message = error instanceof Error ? error.message : String(error);
-			appendArtifactFile(input.runDir, stderrPath, message);
+			appendCappedArtifactFile(input.runDir, stderrPath, message, stderrCap, MAX_STDERR_ARTIFACT_BYTES);
 			stderr = appendBoundedTail(stderr, message, MAX_STDERR_BYTES);
 			finish(1);
 		});

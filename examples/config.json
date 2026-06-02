@@ -9,8 +9,8 @@
       "thinking": "low"
     },
     "worker": {
-      "model": "openai-codex/gpt-5.3-codex",
-      "thinking": "high"
+      "model": "openai-codex/gpt-5.5",
+      "thinking": "medium"
     },
     "reviewer": {
       "model": "openai-codex/gpt-5.5",
@@ -21,7 +21,13 @@
     "inheritExtensions": true,
     "inheritExtensionsForReadOnly": false,
     "inheritSkills": false,
-    "forwardCurrentExtension": "auto"
+    "forwardCurrentExtension": "auto",
+    "timeoutMs": 1800000
+  },
+  "references": {
+    "maxFileBytes": 1048576,
+    "allowOutsideCwd": false,
+    "allowBinary": false
   },
   "artifacts": {
     "baseDir": ".pi/agent-runs"

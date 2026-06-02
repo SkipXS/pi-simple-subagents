@@ -23,6 +23,16 @@ export interface Config {
 		inheritExtensionsForReadOnly: boolean;
 		inheritSkills: boolean;
 		forwardCurrentExtension: ExtensionForwardMode;
+		/** Child process timeout in milliseconds. Use 0 to disable. */
+		timeoutMs: number;
+		/** Optional Pi CLI path/command override. Environment PI_SIMPLE_SUBAGENTS_PI_CLI wins. */
+		piCliPath?: string;
+	};
+	references: {
+		/** Maximum bytes read from an @ file reference. Use 0 to disable the cap. */
+		maxFileBytes: number;
+		allowOutsideCwd: boolean;
+		allowBinary: boolean;
 	};
 	artifacts: {
 		baseDir: string;
@@ -40,8 +50,8 @@ export const DEFAULT_CONFIG: Config = {
 			thinking: "low",
 		},
 		worker: {
-			model: "openai-codex/gpt-5.3-codex",
-			thinking: "high",
+			model: "openai-codex/gpt-5.5",
+			thinking: "medium",
 		},
 		reviewer: {
 			model: "openai-codex/gpt-5.5",
@@ -53,6 +63,12 @@ export const DEFAULT_CONFIG: Config = {
 		inheritExtensionsForReadOnly: false,
 		inheritSkills: false,
 		forwardCurrentExtension: "auto",
+		timeoutMs: 30 * 60 * 1000,
+	},
+	references: {
+		maxFileBytes: 1024 * 1024,
+		allowOutsideCwd: false,
+		allowBinary: false,
 	},
 	artifacts: { baseDir: ".pi/agent-runs" },
 };
@@ -66,6 +82,7 @@ function cloneConfig(config: Config): Config {
 			reviewer: { ...config.roles.reviewer },
 		},
 		children: { ...config.children },
+		references: { ...config.references },
 		artifacts: { ...config.artifacts },
 	};
 }
@@ -86,6 +103,11 @@ function expectString(value: unknown, source: string, pathName: string): string 
 
 function expectBoolean(value: unknown, source: string, pathName: string): boolean {
 	if (typeof value !== "boolean") throw configError(source, `${pathName} must be a boolean`);
+	return value;
+}
+
+function expectNonNegativeInteger(value: unknown, source: string, pathName: string): number {
+	if (typeof value !== "number" || !Number.isInteger(value) || value < 0) throw configError(source, `${pathName} must be a non-negative integer`);
 	return value;
 }
 
@@ -130,6 +152,15 @@ function mergeConfig(base: Config, override: unknown, source = "unknown"): Confi
 		if (children.inheritExtensionsForReadOnly !== undefined) next.children.inheritExtensionsForReadOnly = expectBoolean(children.inheritExtensionsForReadOnly, source, "children.inheritExtensionsForReadOnly");
 		if (children.inheritSkills !== undefined) next.children.inheritSkills = expectBoolean(children.inheritSkills, source, "children.inheritSkills");
 		if (children.forwardCurrentExtension !== undefined) next.children.forwardCurrentExtension = expectExtensionForwardMode(children.forwardCurrentExtension, source, "children.forwardCurrentExtension");
+		if (children.timeoutMs !== undefined) next.children.timeoutMs = expectNonNegativeInteger(children.timeoutMs, source, "children.timeoutMs");
+		if (children.piCliPath !== undefined) next.children.piCliPath = expectString(children.piCliPath, source, "children.piCliPath");
+	}
+
+	if (overrideObject.references !== undefined) {
+		const references = expectObject(overrideObject.references, source, "references");
+		if (references.maxFileBytes !== undefined) next.references.maxFileBytes = expectNonNegativeInteger(references.maxFileBytes, source, "references.maxFileBytes");
+		if (references.allowOutsideCwd !== undefined) next.references.allowOutsideCwd = expectBoolean(references.allowOutsideCwd, source, "references.allowOutsideCwd");
+		if (references.allowBinary !== undefined) next.references.allowBinary = expectBoolean(references.allowBinary, source, "references.allowBinary");
 	}
 
 	if (overrideObject.artifacts !== undefined) {

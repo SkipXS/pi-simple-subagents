@@ -47,6 +47,8 @@ npm test
 npm pack --dry-run
 ```
 
+`npm pack --dry-run` publishes the extension source, examples, README, LICENSE, and package metadata. Tests and `tsconfig.json` are development-only files in this repository.
+
 For local Pi testing, install or load the package from this checkout, then reload Pi after source/config changes:
 
 ```bash
@@ -103,11 +105,11 @@ The slash command also accepts a small option prefix before the target:
 /review --no-scout --reviewer "security boundaries" --reviewer "packaging UX" @extensions/pi-simple-subagents
 ```
 
-or let the model call `review_target` for the full schema (`target`, `focus`, `reviewers`, `includeScout`). This creates a run directory, runs an optional scout plus fresh reviewers with distinct angles, and writes a synthesized `final-summary.md`. It does not run a worker; in YOLO mode the extension does not enforce source-write restrictions.
+or let the model call `review_target` for the full schema (`target`, `focus`, `reviewers`, `includeScout`). This creates a run directory, runs an optional scout, then starts fresh reviewers with distinct angles in parallel, preserves their configured order for synthesis, and writes a synthesized `final-summary.md`. It does not run a worker; in YOLO mode the extension does not enforce source-write restrictions.
 
 ## Important workflow guidance
 
-Pi is YOLO by default, and this extension follows that model. The workflow suggests roles and artifacts, but it does not impose hard file, time, snapshot, validation, review-round, or role-write guardrails.
+Pi is YOLO by default, and this extension follows that model for source edits and tool use. The workflow suggests roles and artifacts, but it does not impose hard source-file, snapshot, validation, review-round, or role-write guardrails. It does include process/reference/artifact safety guardrails to reduce accidental runaway child runs, huge/binary context ingestion, and artifact path/link surprises.
 
 - Scout, reviewer, orchestrator, and worker can use the normal Pi tool surface.
 - Any role may run scripts, tests, benchmarks, downloads, browser/user-flow checks, or diagnostics when useful.
@@ -118,19 +120,21 @@ Pi is YOLO by default, and this extension follows that model. The workflow sugge
 
 ## Tool policy
 
-Pi is intentionally YOLO by default, and this extension now follows that model without file-level or time-level guardrails:
+Pi is intentionally YOLO by default, and this extension follows that model for role tool access while adding a few operational guardrails:
 
 - Role runs do not pass a restrictive `--tools` allowlist, even if old config files contain `roles.<role>.tools`.
-- Child runs are not killed by an extension timeout; there is no timeout config.
-- Plan/target references are not size-limited by default, may point outside the project by default, and binary-looking files are not blocked by default. Large or binary-looking `@` file references emit warnings in input artifacts and child task prompts instead of being blocked.
+- Child runs have a configurable extension timeout (`children.timeoutMs`, default 30 minutes; set `0` to disable). Timeout kills the child process tree where supported and marks `timedOut` in results.
+- Child stdout/stderr/transcript artifacts are capped to avoid unbounded disk/context growth; chat previews remain separately truncated.
+- Plan/target/task `@` file references default to project-local, non-binary, and at most 1 MiB. Configure `references.allowOutsideCwd`, `references.allowBinary`, and `references.maxFileBytes` when you intentionally need broader access.
+- Artifact writes are constrained to the run directory and refuse/fence link-based append/write/copy surprises.
 - Scout/reviewer/orchestrator source edits are not blocked by extension hooks.
 - Scout/reviewer child runs are not fenced with source snapshots and are not auto-restored on mutation.
 - Orchestration runs do not archive/restore authorized source snapshots.
 - Review rounds and validation timing are orchestration choices, not hard gates. Child role-agent tool calls are serialized to protect persistent session files.
 
-Legacy config fields are accepted but ignored for compatibility; the product stance is YOLO rather than safety-by-config.
+Legacy workflow/tool allowlist config fields are accepted but ignored for compatibility; current guardrail fields are documented below.
 
-This policy is not a confidentiality boundary or OS/container sandbox. Run this extension only on trusted projects or inside an external sandbox when agents may execute untrusted code, access secrets, or run generated scripts.
+This policy is not a confidentiality boundary or OS/container sandbox. Run this extension only on trusted projects or inside an external sandbox when agents may execute untrusted code, access secrets, or run generated scripts. If child CLI discovery fails, set `PI_SIMPLE_SUBAGENTS_PI_CLI=/absolute/path/to/pi` or `children.piCliPath`.
 
 ## Compaction policy
 
@@ -176,14 +180,21 @@ Example with explicit YOLO defaults (all sections are optional; omit anything yo
   "roles": {
     "orchestrator": { "model": "openai-codex/gpt-5.5", "thinking": "high" },
     "scout": { "model": "openai-codex/gpt-5.3-codex-spark", "thinking": "low" },
-    "worker": { "model": "openai-codex/gpt-5.3-codex", "thinking": "high" },
+    "worker": { "model": "openai-codex/gpt-5.5", "thinking": "medium" },
     "reviewer": { "model": "openai-codex/gpt-5.5", "thinking": "high" }
   },
   "children": {
     "inheritExtensions": true,
     "inheritExtensionsForReadOnly": false,
     "inheritSkills": false,
-    "forwardCurrentExtension": "auto"
+    "forwardCurrentExtension": "auto",
+    "timeoutMs": 1800000,
+    "piCliPath": "/optional/path/to/pi-or-pi.cmd"
+  },
+  "references": {
+    "maxFileBytes": 1048576,
+    "allowOutsideCwd": false,
+    "allowBinary": false
   },
   "artifacts": {
     "baseDir": ".pi/agent-runs"
@@ -201,6 +212,11 @@ Config reference:
 | `children.inheritExtensionsForReadOnly` | `false` | Scout/reviewer children inherit normal Pi extensions. If `false`, they start with only this extension loaded. |
 | `children.inheritSkills` | `false` | Child runs inherit Pi skills. |
 | `children.forwardCurrentExtension` | `"auto"` | `"auto"` forwards this extension to child runs when the parent Pi process was started with `-e/--extension`; `"always"` always adds `--extension <this-extension>` when extensions are inherited; `"never"` never does. This helps temporary extension loading expose `write_run_artifact` and `compact_session` to worker children. |
+| `children.timeoutMs` | `1800000` | Child run timeout in milliseconds. Use `0` to disable. Timed-out runs return `timedOut: true` and exit code `124`. |
+| `children.piCliPath` | unset | Optional Pi CLI command/path override. `PI_SIMPLE_SUBAGENTS_PI_CLI` environment variable takes precedence. Useful for global installs, Windows, and troubleshooting CLI discovery. |
+| `references.maxFileBytes` | `1048576` | Maximum bytes read from an `@file` reference. Larger files are truncated with a warning. Use `0` to disable truncation. |
+| `references.allowOutsideCwd` | `false` | Allow `@` references outside the current project directory. Keep `false` to reduce accidental secret exposure. |
+| `references.allowBinary` | `false` | Allow binary-looking `@` files to be decoded as UTF-8. |
 | `artifacts.baseDir` | `.pi/agent-runs` | Directory for run artifacts. Relative paths resolve under the current project. |
 
 ## Source layout
@@ -277,4 +293,4 @@ Review-target runs create:
   tasks/
 ```
 
-Full child transcripts, stderr logs, referenced input files, reference warnings, and final outputs can be stored under the run directory. Tool-return previews may still be concise for chat readability, but the child run itself is not limited by that preview. `artifacts.baseDir` may be inside or outside the current project; keep the artifact directory ignored/private when targets may contain sensitive data.
+Child transcripts, stderr logs, referenced input files, reference warnings, and final outputs are stored under the run directory subject to artifact caps for runaway output. Tool-return previews may still be more concise for chat readability. `artifacts.baseDir` may be inside or outside the current project; keep the artifact directory ignored/private when targets may contain sensitive data.

@@ -348,8 +348,18 @@ Purpose: ${params.purpose}`;
 				try {
 					tasks = rawTasks.map((item, index) => {
 						if (typeof item === "string") return { name: `worker-${index + 1}`, task: item };
-						if (typeof item === "object" && item !== null && typeof (item as { task?: unknown }).task === "string") return item as ParallelWorkersParamsType["tasks"][number];
-						throw new Error(`Invalid task at index ${index}`);
+						if (typeof item !== "object" || item === null) throw new Error(`Invalid task at index ${index}: expected string or object`);
+						const raw = item as { name?: unknown; task?: unknown; purpose?: unknown; outputFile?: unknown };
+						if (typeof raw.task !== "string" || raw.task.trim() === "") throw new Error(`Invalid task at index ${index}: task must be a non-empty string`);
+						if (raw.name !== undefined && typeof raw.name !== "string") throw new Error(`Invalid task at index ${index}: name must be a string`);
+						if (raw.outputFile !== undefined && typeof raw.outputFile !== "string") throw new Error(`Invalid task at index ${index}: outputFile must be a string`);
+						if (raw.purpose !== undefined && !["implementation", "fix", "validation"].includes(String(raw.purpose))) throw new Error(`Invalid task at index ${index}: purpose must be implementation, fix, or validation`);
+						return {
+							...(raw.name !== undefined ? { name: raw.name } : {}),
+							task: raw.task,
+							...(raw.purpose !== undefined ? { purpose: raw.purpose as ParallelWorkersParamsType["tasks"][number]["purpose"] } : {}),
+							...(raw.outputFile !== undefined ? { outputFile: raw.outputFile } : {}),
+						};
 					});
 				} catch (error) {
 					const message = error instanceof Error ? error.message : String(error);
