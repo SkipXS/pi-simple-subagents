@@ -19,7 +19,15 @@ pi install /absolute/path/to/pi-simple-subagents
 pi install ./pi-simple-subagents
 ```
 
-After publishing to GitHub:
+After publishing to GitHub, prefer a pinned tag or commit for reproducible installs:
+
+```bash
+pi install git:https://github.com/SkipXS/pi-simple-subagents#v0.1.0
+# or a specific commit:
+pi install git:https://github.com/SkipXS/pi-simple-subagents#<commit-sha>
+```
+
+For quick testing, you can also install the moving default branch:
 
 ```bash
 pi install git:https://github.com/SkipXS/pi-simple-subagents
@@ -44,10 +52,11 @@ Reload Pi after install/config changes:
 npm install
 npm run typecheck
 npm test
+npm run check
 npm pack --dry-run
 ```
 
-`npm pack --dry-run` publishes the extension source, examples, README, LICENSE, and package metadata. Tests and `tsconfig.json` are development-only files in this repository.
+`npm run check` runs typecheck plus tests. `prepack` and `prepublishOnly` run the same check automatically before packing or publishing. `npm pack --dry-run` publishes the extension source, examples, README, LICENSE, and package metadata. Tests and `tsconfig.json` are development-only files in this repository.
 
 For local Pi testing, install or load the package from this checkout, then reload Pi after source/config changes:
 
@@ -105,7 +114,7 @@ The slash command also accepts a small option prefix before the target:
 /review --no-scout --reviewer "security boundaries" --reviewer "packaging UX" @extensions/pi-simple-subagents
 ```
 
-or let the model call `review_target` for the full schema (`target`, `focus`, `reviewers`, `includeScout`). This creates a run directory, runs an optional scout, then starts fresh reviewers with distinct angles in parallel, preserves their configured order for synthesis, and writes a synthesized `final-summary.md`. It does not run a worker; in YOLO mode the extension does not enforce source-write restrictions.
+or let the model call `review_target` for the full schema (`target`, `focus`, `reviewers`, `includeScout`). This creates a run directory, runs an optional scout, then starts fresh reviewers with distinct angles in parallel, preserves their configured order for synthesis, and writes a synthesized `final-summary.md`. Custom reviewer fanout is capped at 8 reviewers. It does not run a worker; in YOLO mode the extension does not enforce source-write restrictions.
 
 ## Important workflow guidance
 
@@ -124,6 +133,7 @@ Pi is intentionally YOLO by default, and this extension follows that model for r
 
 - Role runs do not pass a restrictive `--tools` allowlist, even if old config files contain `roles.<role>.tools`.
 - Child runs have a configurable extension timeout (`children.timeoutMs`, default 30 minutes; set `0` to disable). Timeout kills the child process tree where supported and marks `timedOut` in results.
+- Child runs normally discover Pi from the installed `@earendil-works/pi-coding-agent` package `bin`. If your install layout is unusual, set `PI_SIMPLE_SUBAGENTS_PI_CLI=/absolute/path/to/pi` (or `pi.cmd` on Windows) or configure `children.piCliPath`; the environment variable wins.
 - Child stdout/stderr/transcript artifacts are capped to avoid unbounded disk/context growth; chat previews remain separately truncated.
 - Plan/target/task `@` file references default to project-local, non-binary, and at most 1 MiB. Configure `references.allowOutsideCwd`, `references.allowBinary`, and `references.maxFileBytes` when you intentionally need broader access.
 - Artifact writes are constrained to the run directory and refuse/fence link-based append/write/copy surprises.
@@ -213,7 +223,7 @@ Config reference:
 | `children.inheritSkills` | `false` | Child runs inherit Pi skills. |
 | `children.forwardCurrentExtension` | `"auto"` | `"auto"` forwards this extension to child runs when the parent Pi process was started with `-e/--extension`; `"always"` always adds `--extension <this-extension>` when extensions are inherited; `"never"` never does. This helps temporary extension loading expose `write_run_artifact` and `compact_session` to worker children. |
 | `children.timeoutMs` | `1800000` | Child run timeout in milliseconds. Use `0` to disable. Timed-out runs return `timedOut: true` and exit code `124`. |
-| `children.piCliPath` | unset | Optional Pi CLI command/path override. `PI_SIMPLE_SUBAGENTS_PI_CLI` environment variable takes precedence. Useful for global installs, Windows, and troubleshooting CLI discovery. |
+| `children.piCliPath` | unset | Optional Pi CLI command/path override. `PI_SIMPLE_SUBAGENTS_PI_CLI` environment variable takes precedence. Useful for unusual global installs, Windows, and troubleshooting CLI discovery. |
 | `references.maxFileBytes` | `1048576` | Maximum bytes read from an `@file` reference. Larger files are truncated with a warning. Use `0` to disable truncation. |
 | `references.allowOutsideCwd` | `false` | Allow `@` references outside the current project directory. Keep `false` to reduce accidental secret exposure. |
 | `references.allowBinary` | `false` | Allow binary-looking `@` files to be decoded as UTF-8. |
@@ -294,3 +304,14 @@ Review-target runs create:
 ```
 
 Child transcripts, stderr logs, referenced input files, reference warnings, and final outputs are stored under the run directory subject to artifact caps for runaway output. Tool-return previews may still be more concise for chat readability. `artifacts.baseDir` may be inside or outside the current project; keep the artifact directory ignored/private when targets may contain sensitive data.
+
+## Subagent status display
+
+While child agents run in interactive Pi, the extension publishes one footer status per active subagent via `ctx.ui.setStatus()`. Each status includes an animated spinner, the current activity parsed from child JSON events, and compact usage/model information when available:
+
+```text
+⠋ worker: bash npm test  ↑1.0k ↓2.0k R3.0k W4.0k $0.123 3.7%/272k (auto) - gpt-5.5 • medium
+⠙ reviewer-1: read references.ts  ↑867 ↓103 R31k $0.023 11.8%/272k (auto) - gpt-5.5 • high
+```
+
+The context percentage is estimated from the latest child response token total and known model-family context windows; child processes do not currently expose Pi's exact parent footer context calculation.

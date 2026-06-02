@@ -30,7 +30,10 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types --test tests/*.test.ts"
+    "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "check": "npm run typecheck && npm test",
+    "prepack": "npm run check",
+    "prepublishOnly": "npm run check"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "^0.78.0",

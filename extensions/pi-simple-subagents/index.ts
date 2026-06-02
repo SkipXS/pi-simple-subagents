@@ -54,7 +54,10 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 			promptGuidelines: ["Use orchestrate_plan when the user asks to implement a plan through the orchestrator workflow."],
 			parameters: OrchestrateParams,
 			async execute(_id, params: OrchestrateParamsType, signal, onUpdate, ctx) {
-				const { result, runDir, planSource } = await runOrchestration(ctx.cwd, params.plan, signal, (text) => onUpdate?.({ content: [{ type: "text", text }], details: {} }));
+				const { result, runDir, planSource } = await runOrchestration(ctx.cwd, params.plan, signal, (text, status) => {
+					if (text) onUpdate?.({ content: [{ type: "text", text }], details: { status } });
+					if (status) ctx.ui.setStatus(status.key, status.text);
+				});
 				if (result.exitCode !== 0) throwChildRunError("Orchestration failed", result);
 				return {
 					content: [{ type: "text", text: `Orchestration finished.\nRun dir: ${runDir}\nPlan source: ${planSource}\nOutput: ${result.outputPath}\nTranscript: ${result.transcriptPath}\n\n${result.output}` }],
@@ -71,7 +74,10 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 			promptGuidelines: ["Use review_target when the user asks to inspect, audit, or suggest improvements without implementing changes."],
 			parameters: ReviewTargetParams,
 			async execute(_id, params: ReviewTargetParamsType, signal, onUpdate, ctx) {
-				const result = await runReviewTarget(ctx.cwd, params, signal, (text) => onUpdate?.({ content: [{ type: "text", text }], details: {} }));
+				const result = await runReviewTarget(ctx.cwd, params, signal, (text, status) => {
+					if (text) onUpdate?.({ content: [{ type: "text", text }], details: { status } });
+					if (status) ctx.ui.setStatus(status.key, status.text);
+				});
 				return {
 					content: [{ type: "text", text: `Review finished.\nRun dir: ${result.runDir}\nTarget source: ${result.targetSource}\nFinal summary: ${result.finalSummaryPath}\n\n${result.synthesis.output}` }],
 					details: result,
@@ -88,7 +94,10 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 			executionMode: "sequential",
 			parameters: WorkerAgentParams,
 			async execute(_id, params: WorkerAgentParamsType, signal, onUpdate, ctx) {
-				const result = await runWorkerAgent(ctx.cwd, params, signal, (text) => onUpdate?.({ content: [{ type: "text", text }], details: {} }));
+				const result = await runWorkerAgent(ctx.cwd, params, signal, (text, status) => {
+					if (text) onUpdate?.({ content: [{ type: "text", text }], details: { status } });
+					if (status) ctx.ui.setStatus(status.key, status.text);
+				});
 				return {
 					content: [{ type: "text", text: `Worker finished.\nRun dir: ${result.runDir}\nTask source: ${result.taskSource}\nOutput: ${result.outputArtifactPath}\nTranscript: ${result.result.transcriptPath}\n\n${result.result.output}` }],
 					details: result,
@@ -104,7 +113,10 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 			promptGuidelines: ["Use run_parallel_workers only when worker tasks are independent enough to run concurrently without likely file-edit conflicts."],
 			parameters: ParallelWorkersParams,
 			async execute(_id, params: ParallelWorkersParamsType, signal, onUpdate, ctx) {
-				const result = await runParallelWorkers(ctx.cwd, params, signal, (text) => onUpdate?.({ content: [{ type: "text", text }], details: {} }));
+				const result = await runParallelWorkers(ctx.cwd, params, signal, (text, status) => {
+					if (text) onUpdate?.({ content: [{ type: "text", text }], details: { status } });
+					if (status) ctx.ui.setStatus(status.key, status.text);
+				});
 				const summary = result.workers.map((worker, index) => `${index + 1}. ${worker.name}: output ${worker.outputArtifactPath}; transcript ${worker.result.transcriptPath}`).join("\n");
 				return {
 					content: [{ type: "text", text: `Parallel workers finished.\nRun dir: ${result.runDir}\nWorkers: ${result.workers.length}\n\n${summary}` }],
@@ -147,6 +159,11 @@ Purpose: ${params.purpose}`;
 					signal,
 					envExtra: childEnvCounts(workerRuns, reviewRuns),
 					onUpdate: (text) => onUpdate?.({ content: [{ type: "text", text }], details: {} }),
+					onStatus: (status) => {
+						ctx.ui.setStatus(status.key, status.text);
+					},
+					statusKey: `subagent:${params.role}${params.round ? `-${params.round}` : ""}`,
+					statusLabel: `${params.role}${params.round ? `-${params.round}` : ""}`,
 				});
 				const succeeded = result.exitCode === 0;
 				if (result.exitCode !== 0) {
@@ -248,7 +265,10 @@ Purpose: ${params.purpose}`;
 			}
 			ctx.ui.notify("Starting orchestrator workflow...", "info");
 			try {
-				const { result, runDir } = await runOrchestration(ctx.cwd, plan, ctx.signal, (text) => ctx.ui.setStatus("orchestrator", text));
+				const { result, runDir } = await runOrchestration(ctx.cwd, plan, ctx.signal, (text, status) => {
+					if (status) ctx.ui.setStatus(status.key, status.text);
+					else ctx.ui.setStatus("orchestrator", text);
+				});
 				if (result.exitCode !== 0) throwChildRunError("Orchestration failed", result);
 				pi.sendMessage({
 					customType: "pi-simple-subagents-result",
@@ -273,7 +293,10 @@ Purpose: ${params.purpose}`;
 			}
 			ctx.ui.notify("Starting worker...", "info");
 			try {
-				const result = await runWorkerAgent(ctx.cwd, { task }, ctx.signal, (text) => ctx.ui.setStatus("work", text));
+				const result = await runWorkerAgent(ctx.cwd, { task }, ctx.signal, (text, status) => {
+					if (status) ctx.ui.setStatus(status.key, status.text);
+					else ctx.ui.setStatus("work", text);
+				});
 				pi.sendMessage({
 					customType: "pi-simple-subagents-worker-result",
 					display: true,
@@ -297,7 +320,10 @@ Purpose: ${params.purpose}`;
 			}
 			ctx.ui.notify("Starting review workflow...", "info");
 			try {
-				const result = await runReviewTarget(ctx.cwd, parseReviewTargetCommand(target), ctx.signal, (text) => ctx.ui.setStatus("review", text));
+				const result = await runReviewTarget(ctx.cwd, parseReviewTargetCommand(target), ctx.signal, (text, status) => {
+					if (status) ctx.ui.setStatus(status.key, status.text);
+					else ctx.ui.setStatus("review", text);
+				});
 				pi.sendMessage({
 					customType: "pi-simple-subagents-review-result",
 					display: true,
@@ -368,7 +394,10 @@ Purpose: ${params.purpose}`;
 				}
 				ctx.ui.notify(`Starting ${tasks.length} workers in parallel...`, "info");
 				try {
-					const result = await runParallelWorkers(ctx.cwd, { tasks }, ctx.signal, (text) => ctx.ui.setStatus("work-parallel", text));
+					const result = await runParallelWorkers(ctx.cwd, { tasks }, ctx.signal, (text, status) => {
+						if (status) ctx.ui.setStatus(status.key, status.text);
+						else ctx.ui.setStatus("work-parallel", text);
+					});
 					pi.sendMessage({
 						customType: "pi-simple-subagents-parallel-workers-result",
 						display: true,

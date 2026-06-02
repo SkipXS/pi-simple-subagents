@@ -68,6 +68,30 @@ test("references enforce outside-cwd and binary guardrails by default", () => {
 	assert.throws(() => readReference(cwd, `@${binaryPath}`, "plan", config), /binary or non-text/);
 });
 
+test("references enforce outside-cwd guardrails through symlinks and junctions", (t) => {
+	const cwd = tempProject();
+	const outside = fs.mkdtempSync(path.join(os.tmpdir(), "pi-simple-subagents-outside-"));
+	const secretPath = path.join(outside, "secret.txt");
+	fs.writeFileSync(secretPath, "secret-ish", "utf8");
+	const linkPath = path.join(cwd, "outside-link");
+	try {
+		fs.symlinkSync(outside, linkPath, process.platform === "win32" ? "junction" : "dir");
+	} catch (error) {
+		t.skip(`symlink/junction creation unavailable: ${error instanceof Error ? error.message : String(error)}`);
+		return;
+	}
+	const config = loadConfig(cwd);
+
+	assert.throws(() => readReference(cwd, "@outside-link/secret.txt", "plan", config), /outside the current project/);
+	assert.throws(() => readReference(cwd, "@outside-link", "target", config, { allowDirectory: true }), /outside the current project/);
+
+	config.references.allowOutsideCwd = true;
+	const result = readReference(cwd, "@outside-link/secret.txt", "plan", config);
+	assert.equal(result.source, fs.realpathSync.native(secretPath));
+	assert.equal(result.text, "secret-ish");
+	assert.match(result.warnings.join("\n"), /outside/);
+});
+
 test("references can intentionally allow outside, binary, and truncate large files", () => {
 	const cwd = tempProject();
 	const outside = fs.mkdtempSync(path.join(os.tmpdir(), "pi-simple-subagents-outside-"));

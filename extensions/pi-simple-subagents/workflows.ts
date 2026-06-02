@@ -1,12 +1,14 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { copyArtifactFile, ensureDir, resolveArtifactPath, resolveRunBaseDir, runId, writeArtifact } from "./artifacts.ts";
-import { childResultText, spawnPiRole, throwChildRunError, type ChildRunResult } from "./child-runner.ts";
+import { childResultText, spawnPiRole, throwChildRunError, type ChildRunResult, type ChildStatusUpdate } from "./child-runner.ts";
 import { loadConfig } from "./config.ts";
 import { reviewTargetSystemPrompt } from "./prompts.ts";
 import { formatReferenceWarnings, readPlanReference, readReference } from "./references.ts";
 import { DEFAULT_REVIEW_ANGLES } from "./roles.ts";
 import type { ParallelWorkerTaskParams, ParallelWorkersParams, ReviewTargetParams, WorkerAgentParams } from "./schemas.ts";
+
+type WorkflowUpdate = (text: string, status?: ChildStatusUpdate) => void;
 
 export interface WorkflowDeps {
 	loadConfig?: typeof loadConfig;
@@ -16,6 +18,8 @@ export interface WorkflowDeps {
 	copyArtifactFile?: typeof copyArtifactFile;
 	existsSync?: typeof fs.existsSync;
 }
+
+const MAX_REVIEW_TARGET_REVIEWERS = 8;
 
 const defaultWorkflowDeps: Required<WorkflowDeps> = {
 	loadConfig,
@@ -82,6 +86,10 @@ function safePathLabel(value: string | undefined, fallback: string): string {
 	return (value ?? fallback).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 48) || fallback;
 }
 
+function forwardChildStatus(onUpdate: WorkflowUpdate | undefined): (status: ChildStatusUpdate) => void {
+	return (status) => onUpdate?.("", status);
+}
+
 export function parseReviewTargetCommand(input: string): ReviewTargetParams {
 	const trimmed = input.trim();
 	const tokens = tokenizeCommand(trimmed);
@@ -133,7 +141,7 @@ export function parseReviewTargetCommand(input: string): ReviewTargetParams {
 	return focus ? { target: match[1], focus } : { target: match[1] };
 }
 
-export async function runOrchestration(cwd: string, rawPlan: string, signal?: AbortSignal, onUpdate?: (text: string) => void, deps?: WorkflowDeps): Promise<{ result: ChildRunResult; runDir: string; planSource: string }> {
+export async function runOrchestration(cwd: string, rawPlan: string, signal?: AbortSignal, onUpdate?: WorkflowUpdate, deps?: WorkflowDeps): Promise<{ result: ChildRunResult; runDir: string; planSource: string }> {
 	const dep = workflowDeps(deps);
 	const config = dep.loadConfig(cwd);
 	const baseDir = resolveRunBaseDir(cwd, config);
@@ -146,7 +154,7 @@ ${planText}
 `);
 	writeArtifact(dir, "config-effective.json", JSON.stringify(config, null, 2));
 	const task = formatRunTask(planText, planSource, dir, warnings);
-	const result = await dep.spawnPiRole({ cwd, role: "orchestrator", task, runDir: dir, config, signal, onUpdate });
+	const result = await dep.spawnPiRole({ cwd, role: "orchestrator", task, runDir: dir, config, signal, onUpdate, onStatus: forwardChildStatus(onUpdate), statusKey: "subagent:orchestrator", statusLabel: "orchestrator" });
 	return { result, runDir: dir, planSource };
 }
 
@@ -161,7 +169,7 @@ interface WorkerRunRecord {
 	purpose: WorkerPurpose;
 }
 
-async function runWorkerInDir(cwd: string, dir: string, params: WorkerAgentParams | ParallelWorkerTaskParams, signal: AbortSignal | undefined, onUpdate: ((text: string) => void) | undefined, progressLabel = "worker", deps?: WorkflowDeps): Promise<WorkerRunRecord> {
+async function runWorkerInDir(cwd: string, dir: string, params: WorkerAgentParams | ParallelWorkerTaskParams, signal: AbortSignal | undefined, onUpdate: WorkflowUpdate | undefined, progressLabel = "worker", deps?: WorkflowDeps): Promise<WorkerRunRecord> {
 	const dep = workflowDeps(deps);
 	const config = dep.loadConfig(cwd);
 	ensureDir(dir);
@@ -174,12 +182,12 @@ async function runWorkerInDir(cwd: string, dir: string, params: WorkerAgentParam
 	writeArtifact(dir, "input-worker-task.md", `Source: ${workerTask.source}\nName: ${name}\nPurpose: ${purpose}\nExpected output artifact: ${outputFile}${referenceWarningText}\n\n${workerTask.text}\n`);
 	writeArtifact(dir, "config-effective.json", JSON.stringify(config, null, 2));
 	const task = `Worker task source: ${workerTask.source}\nName: ${name}\nPurpose: ${purpose}\nExpected output artifact: ${outputFile}${referenceWarningText}\nRun directory: ${dir}\nRead input-worker-task.md, perform the requested work, run useful checks, and write ${outputFile}. If running as part of a parallel worker batch, stay within the assigned task and avoid editing files likely owned by sibling workers. If a product, architecture, or scope decision is missing, stop and report it instead of guessing.`;
-	const result = await dep.spawnPiRole({ cwd, role: "worker", task, runDir: dir, config, signal, onUpdate: (text) => onUpdate?.(`${progressLabel}: ${text}`) });
+	const result = await dep.spawnPiRole({ cwd, role: "worker", task, runDir: dir, config, signal, onUpdate: (text) => onUpdate?.(`${progressLabel}: ${text}`), onStatus: forwardChildStatus(onUpdate), statusKey: `subagent:${safePathLabel(progressLabel, "worker")}`, statusLabel: progressLabel });
 	if (result.exitCode === 0 && !dep.existsSync(outputArtifactPath)) dep.copyArtifactFile(dir, result.outputPath, outputArtifactPath);
 	return { name, runDir: dir, taskSource: workerTask.source, result: { ...result, outputPath: result.exitCode === 0 ? outputArtifactPath : result.outputPath }, outputArtifactPath, purpose };
 }
 
-export async function runWorkerAgent(cwd: string, params: WorkerAgentParams, signal?: AbortSignal, onUpdate?: (text: string) => void, deps?: WorkflowDeps): Promise<WorkerRunRecord> {
+export async function runWorkerAgent(cwd: string, params: WorkerAgentParams, signal?: AbortSignal, onUpdate?: WorkflowUpdate, deps?: WorkflowDeps): Promise<WorkerRunRecord> {
 	const dep = workflowDeps(deps);
 	const config = dep.loadConfig(cwd);
 	const baseDir = resolveRunBaseDir(cwd, config);
@@ -189,7 +197,7 @@ export async function runWorkerAgent(cwd: string, params: WorkerAgentParams, sig
 	return record;
 }
 
-export async function runParallelWorkers(cwd: string, params: ParallelWorkersParams, signal?: AbortSignal, onUpdate?: (text: string) => void, deps?: WorkflowDeps): Promise<{ runDir: string; workers: WorkerRunRecord[]; failed: WorkerRunRecord[] }> {
+export async function runParallelWorkers(cwd: string, params: ParallelWorkersParams, signal?: AbortSignal, onUpdate?: WorkflowUpdate, deps?: WorkflowDeps): Promise<{ runDir: string; workers: WorkerRunRecord[]; failed: WorkerRunRecord[] }> {
 	if (params.tasks.length < 2 || params.tasks.length > 8) throw new Error("runParallelWorkers requires 2-8 tasks");
 	const dep = workflowDeps(deps);
 	const config = dep.loadConfig(cwd);
@@ -241,7 +249,7 @@ export async function runParallelWorkers(cwd: string, params: ParallelWorkersPar
 	}
 }
 
-export async function runReviewTarget(cwd: string, params: ReviewTargetParams, signal?: AbortSignal, onUpdate?: (text: string) => void, deps?: WorkflowDeps): Promise<{ runDir: string; targetSource: string; scout?: ChildRunResult; reviews: ChildRunResult[]; synthesis: ChildRunResult; finalSummaryPath: string }> {
+export async function runReviewTarget(cwd: string, params: ReviewTargetParams, signal?: AbortSignal, onUpdate?: WorkflowUpdate, deps?: WorkflowDeps): Promise<{ runDir: string; targetSource: string; scout?: ChildRunResult; reviews: ChildRunResult[]; synthesis: ChildRunResult; finalSummaryPath: string }> {
 	const dep = workflowDeps(deps);
 	const config = dep.loadConfig(cwd);
 	const baseDir = resolveRunBaseDir(cwd, config);
@@ -250,6 +258,7 @@ export async function runReviewTarget(cwd: string, params: ReviewTargetParams, s
 	const target = dep.readReference(cwd, params.target, "review target", config, { allowDirectory: true });
 	const focus = params.focus?.trim() || "runtime bugs, security boundaries, API/UX, packaging, and maintainability";
 	const referenceWarningText = formatReferenceWarnings(target.warnings);
+	if (params.reviewers && params.reviewers.length > MAX_REVIEW_TARGET_REVIEWERS) throw new Error(`review_target supports at most ${MAX_REVIEW_TARGET_REVIEWERS} reviewers`);
 	const reviewers = params.reviewers && params.reviewers.length > 0 ? params.reviewers : [...DEFAULT_REVIEW_ANGLES];
 	writeArtifact(dir, "input-target.md", `Source: ${target.source}\nFocus: ${focus}${referenceWarningText}\n\n${target.text}\n`);
 	writeArtifact(dir, "config-effective.json", JSON.stringify(config, null, 2));
@@ -265,6 +274,9 @@ export async function runReviewTarget(cwd: string, params: ReviewTargetParams, s
 			config,
 			signal,
 			onUpdate,
+			onStatus: forwardChildStatus(onUpdate),
+			statusKey: "subagent:scout",
+			statusLabel: "scout",
 			systemPrompt: reviewTargetSystemPrompt("scout", dir),
 		});
 		if (scout.exitCode !== 0) throwChildRunError("review-target scout failed", scout);
@@ -294,6 +306,9 @@ export async function runReviewTarget(cwd: string, params: ReviewTargetParams, s
 				config,
 				signal: localAbort.signal,
 				onUpdate,
+				onStatus: forwardChildStatus(onUpdate),
+				statusKey: `subagent:reviewer-${index + 1}`,
+				statusLabel: `reviewer-${index + 1}`,
 				systemPrompt: reviewTargetSystemPrompt("reviewer", dir),
 			});
 			if (result.exitCode !== 0) throw new Error(childResultText(`review-target reviewer ${index + 1} failed`, result));
@@ -324,6 +339,9 @@ export async function runReviewTarget(cwd: string, params: ReviewTargetParams, s
 		config,
 		signal,
 		onUpdate,
+		onStatus: forwardChildStatus(onUpdate),
+		statusKey: "subagent:synthesis",
+		statusLabel: "synthesis",
 		systemPrompt: reviewTargetSystemPrompt("synthesis", dir),
 	});
 	if (synthesis.exitCode !== 0) throwChildRunError("review-target synthesis failed", synthesis);

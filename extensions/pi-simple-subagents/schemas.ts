@@ -18,7 +18,7 @@ export type OrchestrateParams = Static<typeof OrchestrateParams>;
 export const ReviewTargetParams = Type.Object({
 	target: Type.String({ description: "Inline review scope, @file, @directory, or instruction pointing to what should be reviewed." }),
 	focus: Type.Optional(Type.String({ description: "Optional review focus, e.g. runtime bugs, security, packaging, UX." })),
-	reviewers: Type.Optional(Type.Array(Type.String({ description: "Reviewer angle/focus." }))),
+	reviewers: Type.Optional(Type.Array(Type.String({ description: "Reviewer angle/focus." }), { minItems: 1, maxItems: 8 })),
 	includeScout: Type.Optional(Type.Boolean({ description: "Run a scout before reviewers. Default: true.", default: true })),
 });
 export type ReviewTargetParams = Static<typeof ReviewTargetParams>;

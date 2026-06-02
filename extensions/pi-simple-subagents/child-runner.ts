@@ -1,10 +1,9 @@
 import { spawn } from "node:child_process";
 import * as fs from "node:fs";
-import { createRequire } from "node:module";
 import * as path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
-import { appendArtifactFile, resolveRoleSessionFile, uniqueSuffix, writeArtifact } from "./artifacts.ts";
+import { appendArtifactFile, resolveArtifactPath, resolveRoleSessionFile, uniqueSuffix, writeArtifact } from "./artifacts.ts";
 import { applyThinking, type Config, type ExtensionForwardMode } from "./config.ts";
 import { roleSystemPrompt } from "./prompts.ts";
 import {
@@ -20,11 +19,15 @@ import {
 import { appendBoundedTail, takeUtf8Head, truncateForTool } from "./text.ts";
 
 const EXTENSION_PATH = fileURLToPath(new URL("./index.ts", import.meta.url));
-const requireFromExtension = createRequire(import.meta.url);
 const PI_CLI_PATH_ENV = "PI_SIMPLE_SUBAGENTS_PI_CLI";
 const MAX_TRANSCRIPT_ARTIFACT_BYTES = 4 * 1024 * 1024;
 const MAX_STDERR_ARTIFACT_BYTES = 1024 * 1024;
 const MAX_PENDING_STDOUT_LINE_BYTES = 1024 * 1024;
+
+export interface ChildStatusUpdate {
+	key: string;
+	text: string | undefined;
+}
 
 export interface ChildRunResult {
 	role: RoleName;
@@ -48,6 +51,74 @@ function isFailedStopReason(stopReason: string | undefined): boolean {
 	return stopReason === "error" || stopReason === "aborted";
 }
 
+const STATUS_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+interface UsageTotals {
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+	cost: number;
+	latestTotalTokens: number;
+}
+
+function formatTokens(count: number): string {
+	if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(count >= 10_000_000 ? 0 : 1)}M`;
+	if (count >= 1_000) return `${(count / 1_000).toFixed(count >= 10_000 ? 0 : 1)}k`;
+	return String(count);
+}
+
+function inferContextWindow(model: string | undefined): number | undefined {
+	if (!model) return undefined;
+	const lower = model.toLowerCase();
+	if (/gpt-5|gpt-4\.1|o3|o4/.test(lower)) return 272_000;
+	if (/claude/.test(lower)) return 200_000;
+	if (/gemini/.test(lower)) return 1_000_000;
+	return undefined;
+}
+
+function compactArgs(value: unknown): string {
+	if (!value || typeof value !== "object") return "";
+	const record = value as Record<string, unknown>;
+	for (const key of ["command", "path", "target", "task", "plan", "url"] as const) {
+		const raw = record[key];
+		if (typeof raw === "string" && raw.trim()) return raw.trim().replace(/\s+/g, " ").slice(0, 64);
+	}
+	return "";
+}
+
+function messageUsage(message: unknown): { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens: number; cost: number } | undefined {
+	if (!message || typeof message !== "object") return undefined;
+	const usage = (message as { usage?: unknown }).usage;
+	if (!usage || typeof usage !== "object") return undefined;
+	const record = usage as Record<string, unknown>;
+	const cost = record.cost && typeof record.cost === "object" ? (record.cost as Record<string, unknown>).total : undefined;
+	return {
+		input: typeof record.input === "number" ? record.input : 0,
+		output: typeof record.output === "number" ? record.output : 0,
+		cacheRead: typeof record.cacheRead === "number" ? record.cacheRead : 0,
+		cacheWrite: typeof record.cacheWrite === "number" ? record.cacheWrite : 0,
+		totalTokens: typeof record.totalTokens === "number" ? record.totalTokens : 0,
+		cost: typeof cost === "number" ? cost : 0,
+	};
+}
+
+function statusMetrics(totals: UsageTotals, model: string | undefined, thinking: string | undefined): string {
+	const parts: string[] = [];
+	if (totals.input) parts.push(`↑${formatTokens(totals.input)}`);
+	if (totals.output) parts.push(`↓${formatTokens(totals.output)}`);
+	if (totals.cacheRead) parts.push(`R${formatTokens(totals.cacheRead)}`);
+	if (totals.cacheWrite) parts.push(`W${formatTokens(totals.cacheWrite)}`);
+	if (totals.cost) parts.push(`$${totals.cost.toFixed(3)}`);
+	const contextWindow = inferContextWindow(model);
+	if (contextWindow) {
+		const percent = totals.latestTotalTokens > 0 ? `${((totals.latestTotalTokens / contextWindow) * 100).toFixed(1)}%` : "?";
+		parts.push(`${percent}/${formatTokens(contextWindow)} (auto)`);
+	}
+	if (model) parts.push(`- ${model}${thinking && thinking !== "off" ? ` • ${thinking}` : thinking === "off" ? " • thinking off" : ""}`);
+	return parts.join(" ");
+}
+
 export function childResultText(prefix: string, result: ChildRunResult): string {
 	const stopDetails = [
 		result.stopReason ? `Stop reason: ${result.stopReason}` : undefined,
@@ -60,13 +131,38 @@ export function throwChildRunError(prefix: string, result: ChildRunResult): neve
 	throw new Error(childResultText(prefix, result));
 }
 
+function findPiCliFromPackageEntrypoint(packageEntrypoint: string): string | undefined {
+	let dir = path.dirname(packageEntrypoint);
+	while (true) {
+		const packageJsonPath = path.join(dir, "package.json");
+		if (fs.existsSync(packageJsonPath)) {
+			try {
+				const manifest = JSON.parse(fs.readFileSync(packageJsonPath, "utf8")) as { name?: unknown; bin?: unknown };
+				if (manifest.name === "@earendil-works/pi-coding-agent") {
+					const bin = typeof manifest.bin === "string" ? manifest.bin : isRecord(manifest.bin) && typeof manifest.bin.pi === "string" ? manifest.bin.pi : undefined;
+					const candidate = bin ? path.resolve(dir, bin) : path.join(dir, "dist", "cli.js");
+					return fs.existsSync(candidate) ? candidate : undefined;
+				}
+			} catch {
+				return undefined;
+			}
+		}
+		const parent = path.dirname(dir);
+		if (parent === dir) return undefined;
+		dir = parent;
+	}
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null;
+}
+
 function resolvePiCliPath(overridePath?: string): string | undefined {
 	const configured = process.env[PI_CLI_PATH_ENV]?.trim() || overridePath?.trim();
 	if (configured) return configured;
 	try {
-		const packageEntry = requireFromExtension.resolve("@earendil-works/pi-coding-agent");
-		const candidate = path.join(path.dirname(path.dirname(packageEntry)), "dist", "cli.js");
-		return fs.existsSync(candidate) ? candidate : undefined;
+		const packageEntrypoint = fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"));
+		return findPiCliFromPackageEntrypoint(packageEntrypoint);
 	} catch {
 		return undefined;
 	}
@@ -135,6 +231,9 @@ export async function spawnPiRole(input: {
 	envExtra?: Record<string, string>;
 	signal?: AbortSignal;
 	onUpdate?: (text: string) => void;
+	onStatus?: (status: ChildStatusUpdate) => void;
+	statusKey?: string;
+	statusLabel?: string;
 	systemPrompt?: string;
 }): Promise<ChildRunResult> {
 	const roleConfig = input.config.roles[input.role];
@@ -182,17 +281,73 @@ export async function spawnPiRole(input: {
 		let finalOutput = "";
 		let assistantStopReason: string | undefined;
 		let assistantErrorMessage: string | undefined;
+		let childModel = roleConfig.model.split("/").pop()?.replace(/:(off|minimal|low|medium|high|xhigh)$/, "") || roleConfig.model;
+		const usageTotals: UsageTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, latestTotalTokens: 0 };
+		const statusKey = input.statusKey ?? `subagent:${input.role}`;
+		const statusLabel = input.statusLabel ?? input.role;
+		let statusFrame = 0;
+		let statusAction = "starting";
+		let lastStatusText = "";
 		let settled = false;
 		let aborted = false;
 		let timedOut = false;
+		let artifactErrorMessage: string | undefined;
 		const transcriptCap = { bytes: 0, capped: false };
 		const stderrCap = { bytes: 0, capped: false };
+		const emitStatus = () => {
+			if (!input.onStatus) return;
+			const frame = STATUS_SPINNER_FRAMES[statusFrame++ % STATUS_SPINNER_FRAMES.length];
+			const metrics = statusMetrics(usageTotals, childModel, roleConfig.thinking);
+			const text = `${frame} ${statusLabel}: ${statusAction}${metrics ? `  ${metrics}` : ""}`;
+			lastStatusText = text;
+			input.onStatus({ key: statusKey, text });
+		};
+		const setStatusAction = (action: string) => {
+			statusAction = action;
+			emitStatus();
+		};
+		emitStatus();
+		const statusTimer = input.onStatus ? setInterval(emitStatus, 120) : undefined;
+		(statusTimer as { unref?: () => void } | undefined)?.unref?.();
+		const rememberArtifactError = (context: string, error: unknown) => {
+			if (artifactErrorMessage) return;
+			const message = error instanceof Error ? error.message : String(error);
+			artifactErrorMessage = `Child artifact write failed (${context}): ${message}`;
+			stderr = appendBoundedTail(stderr, `${artifactErrorMessage}\n`, MAX_STDERR_BYTES);
+		};
+		const safeAppendCappedArtifactFile = (target: string, content: string, state: { bytes: number; capped: boolean }, maxBytes: number, context: string) => {
+			try {
+				appendCappedArtifactFile(input.runDir, target, content, state, maxBytes);
+			} catch (error) {
+				rememberArtifactError(context, error);
+			}
+		};
 		const processLine = (line: string) => {
 			if (!line.trim()) return;
-			appendCappedArtifactFile(input.runDir, transcriptPath, `${line}\n`, transcriptCap, MAX_TRANSCRIPT_ARTIFACT_BYTES);
+			safeAppendCappedArtifactFile(transcriptPath, `${line}\n`, transcriptCap, MAX_TRANSCRIPT_ARTIFACT_BYTES, "transcript");
 			try {
-				const event = JSON.parse(line);
-				if (event.type === "message_end" && event.message?.role === "assistant") {
+				const event = JSON.parse(line) as { type?: string; toolName?: string; args?: unknown; input?: unknown; partialResult?: unknown; result?: unknown; isError?: boolean; message?: { role?: string; content?: Array<{ type?: string; text?: unknown }>; stopReason?: unknown; errorMessage?: unknown; provider?: unknown; model?: unknown } };
+				if (event.type === "tool_execution_start") {
+					const detail = compactArgs(event.args ?? event.input);
+					setStatusAction(`${event.toolName ?? "tool"}${detail ? ` ${detail}` : ""}`);
+				} else if (event.type === "tool_execution_update") {
+					const detail = compactArgs(event.args ?? event.input);
+					setStatusAction(`${event.toolName ?? "tool"}${detail ? ` ${detail}` : ""}`);
+				} else if (event.type === "tool_execution_end") {
+					setStatusAction(event.isError ? `${event.toolName ?? "tool"} failed` : `${event.toolName ?? "tool"} done`);
+				} else if (event.type === "message_start") {
+					setStatusAction("thinking");
+				} else if (event.type === "message_end" && event.message?.role === "assistant") {
+					if (typeof event.message.provider === "string" && typeof event.message.model === "string") childModel = event.message.model;
+					const usage = messageUsage(event.message);
+					if (usage) {
+						usageTotals.input += usage.input;
+						usageTotals.output += usage.output;
+						usageTotals.cacheRead += usage.cacheRead;
+						usageTotals.cacheWrite += usage.cacheWrite;
+						usageTotals.cost += usage.cost;
+						usageTotals.latestTotalTokens = usage.totalTokens;
+					}
 					if (typeof event.message.stopReason === "string") assistantStopReason = event.message.stopReason;
 					if (typeof event.message.errorMessage === "string") assistantErrorMessage = event.message.errorMessage;
 					const textParts = (event.message.content ?? [])
@@ -203,8 +358,12 @@ export async function spawnPiRole(input: {
 					if (finalOutput) {
 						const firstLine = finalOutput.split("\n")[0] ?? "";
 						input.onUpdate?.(`${input.role}: ${takeUtf8Head(firstLine, MAX_PROGRESS_LINE_BYTES)}`);
+						setStatusAction(takeUtf8Head(firstLine, MAX_PROGRESS_LINE_BYTES));
 					} else if (isFailedStopReason(assistantStopReason) && assistantErrorMessage) {
 						input.onUpdate?.(`${input.role}: ${takeUtf8Head(assistantErrorMessage, MAX_PROGRESS_LINE_BYTES)}`);
+						setStatusAction(takeUtf8Head(assistantErrorMessage, MAX_PROGRESS_LINE_BYTES));
+					} else {
+						setStatusAction("waiting");
 					}
 				}
 			} catch { /* ignore non-json */ }
@@ -226,7 +385,7 @@ export async function spawnPiRole(input: {
 			const line = `${reason}\n`;
 			const artifactLine = stderr.endsWith("\n") || stderr.length === 0 ? line : `\n${line}`;
 			stderr = appendBoundedTail(stderr, artifactLine, MAX_STDERR_BYTES);
-			appendCappedArtifactFile(input.runDir, stderrPath, artifactLine, stderrCap, MAX_STDERR_ARTIFACT_BYTES);
+			safeAppendCappedArtifactFile(stderrPath, artifactLine, stderrCap, MAX_STDERR_ARTIFACT_BYTES, "stderr");
 			if (process.platform === "win32" && child.pid) {
 				const killer = spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], { stdio: "ignore", windowsHide: true });
 				killer.on("error", () => child.kill());
@@ -246,21 +405,29 @@ export async function spawnPiRole(input: {
 		const finish = (exitCode: number) => {
 			if (settled) return;
 			settled = true;
+			if (statusTimer) clearInterval(statusTimer);
+			input.onStatus?.({ key: statusKey, text: undefined });
 			if (timeoutTimer) clearTimeout(timeoutTimer);
 			if (input.signal) input.signal.removeEventListener("abort", onAbort);
 			buffer += stdoutDecoder.end();
 			const stderrTail = stderrDecoder.end();
 			if (stderrTail) {
-				appendCappedArtifactFile(input.runDir, stderrPath, stderrTail, stderrCap, MAX_STDERR_ARTIFACT_BYTES);
+				safeAppendCappedArtifactFile(stderrPath, stderrTail, stderrCap, MAX_STDERR_ARTIFACT_BYTES, "stderr");
 				stderr = appendBoundedTail(stderr, stderrTail, MAX_STDERR_BYTES);
 			}
 			if (buffer.trim()) processLine(buffer);
-			const effectiveExitCode = exitCode === 0 && isFailedStopReason(assistantStopReason) ? 1 : exitCode;
 			const baseOutput = finalOutput
 				|| (assistantErrorMessage ? `Assistant ${assistantStopReason ?? "failed"}: ${assistantErrorMessage}` : "")
 				|| (stderr ? `No assistant output. Stderr log: ${stderrPath}\n\n${stderr}` : "(no output)");
-			const fullOutput = baseOutput;
-			const outputPath = writeArtifact(input.runDir, `outputs/${input.role}-${stampBase}.md`, fullOutput);
+			let fullOutput = artifactErrorMessage ? `${baseOutput}\n\nChild run infrastructure error:\n${artifactErrorMessage}` : baseOutput;
+			let outputPath = resolveArtifactPath(input.runDir, `outputs/${input.role}-${stampBase}.md`);
+			try {
+				outputPath = writeArtifact(input.runDir, `outputs/${input.role}-${stampBase}.md`, fullOutput);
+			} catch (error) {
+				rememberArtifactError("output", error);
+				fullOutput = `${fullOutput}\n\nChild run infrastructure error:\n${artifactErrorMessage}`;
+			}
+			const effectiveExitCode = artifactErrorMessage ? 1 : exitCode === 0 && isFailedStopReason(assistantStopReason) ? 1 : exitCode;
 			const truncatedOutput = truncateForTool(fullOutput, MAX_TOOL_OUTPUT_BYTES);
 			const truncatedStderr = truncateForTool(stderr, MAX_STDERR_BYTES);
 			resolve({
@@ -294,7 +461,7 @@ export async function spawnPiRole(input: {
 		child.stderr.on("data", (chunk: Buffer) => {
 			const text = stderrDecoder.write(chunk);
 			if (!text) return;
-			appendCappedArtifactFile(input.runDir, stderrPath, text, stderrCap, MAX_STDERR_ARTIFACT_BYTES);
+			safeAppendCappedArtifactFile(stderrPath, text, stderrCap, MAX_STDERR_ARTIFACT_BYTES, "stderr");
 			stderr = appendBoundedTail(stderr, text, MAX_STDERR_BYTES);
 		});
 		child.on("close", (code, signal) => {
@@ -302,7 +469,7 @@ export async function spawnPiRole(input: {
 		});
 		child.on("error", (error) => {
 			const message = error instanceof Error ? error.message : String(error);
-			appendCappedArtifactFile(input.runDir, stderrPath, message, stderrCap, MAX_STDERR_ARTIFACT_BYTES);
+			safeAppendCappedArtifactFile(stderrPath, message, stderrCap, MAX_STDERR_ARTIFACT_BYTES, "stderr");
 			stderr = appendBoundedTail(stderr, message, MAX_STDERR_BYTES);
 			finish(1);
 		});

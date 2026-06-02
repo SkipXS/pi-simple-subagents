@@ -68,9 +68,11 @@ export function readReference(cwd: string, input: string, label: string, config:
 	const pathLike = atMatch?.[1] ?? atMatch?.[2] ?? atMatch?.[3];
 	if (!atMatch || !pathLike) return { text: input, source: `inline ${label}`, warnings: [] };
 
-	const absolutePath = path.resolve(cwd, pathLike);
-	if (!fs.existsSync(absolutePath)) throw new Error(`${label} reference not found: ${pathLike}`);
-	const outsideCwd = !isPathInside(path.resolve(cwd), absolutePath);
+	const requestedPath = path.resolve(cwd, pathLike);
+	if (!fs.existsSync(requestedPath)) throw new Error(`${label} reference not found: ${pathLike}`);
+	const realCwd = fs.realpathSync.native(cwd);
+	const absolutePath = fs.realpathSync.native(requestedPath);
+	const outsideCwd = !isPathInside(realCwd, absolutePath);
 	if (outsideCwd && !config.references.allowOutsideCwd) {
 		throw new Error(`${label} reference points outside the current project: ${absolutePath}. Set references.allowOutsideCwd=true to allow it intentionally.`);
 	}

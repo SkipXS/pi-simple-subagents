@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { pathToFileURL } from "node:url";
 import { getPiInvocation, quoteAtReferencePath, shouldForwardCurrentExtension, spawnPiRole, wasLoadedWithExtensionFlag, type ChildRunResult } from "../extensions/pi-simple-subagents/child-runner.ts";
 import { DEFAULT_CONFIG, type Config } from "../extensions/pi-simple-subagents/config.ts";
 import orchestratorAgentsExtension from "../extensions/pi-simple-subagents/index.ts";
@@ -88,6 +89,35 @@ test("Pi CLI discovery supports config override", () => {
 	assert.deepEqual(getPiInvocation(["--version"], config), { command: "/custom/pi", args: ["--version"] });
 });
 
+test("Pi CLI discovery resolves the package bin without override", () => {
+	const oldEnv = process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
+	try {
+		delete process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
+		const config = cloneConfig();
+		delete config.children.piCliPath;
+		const invocation = getPiInvocation(["--version"], config);
+		assert.equal(invocation.command, process.execPath);
+		assert.match(invocation.args[0] ?? "", /@earendil-works[\\/]pi-coding-agent[\\/]dist[\\/]cli\.js$/);
+		assert.equal(invocation.args.at(-1), "--version");
+	} finally {
+		if (oldEnv === undefined) delete process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
+		else process.env.PI_SIMPLE_SUBAGENTS_PI_CLI = oldEnv;
+	}
+});
+
+test("package pi.extensions manifest points at loadable extension modules", async () => {
+	const manifest = JSON.parse(fs.readFileSync(path.join(process.cwd(), "package.json"), "utf8")) as { pi?: { extensions?: unknown } };
+	assert.ok(Array.isArray(manifest.pi?.extensions));
+	for (const extensionPath of manifest.pi.extensions) {
+		assert.equal(typeof extensionPath, "string");
+		const resolved = path.resolve(process.cwd(), extensionPath as string);
+		const entrypoint = fs.statSync(resolved).isDirectory() ? path.join(resolved, "index.ts") : resolved;
+		assert.equal(fs.existsSync(entrypoint), true);
+		const module = await import(pathToFileURL(entrypoint).href);
+		assert.equal(typeof module.default, "function");
+	}
+});
+
 test("child runs report timeout accurately", async () => {
 	const cwd = tempProject();
 	const runDir = path.join(cwd, ".pi", "run");
@@ -99,6 +129,27 @@ test("child runs report timeout accurately", async () => {
 	const result = await spawnPiRole({ cwd, role: "worker", task: "timeout test", runDir, config });
 	assert.equal(result.timedOut, true);
 	assert.equal(result.exitCode, 124);
+});
+
+test("child runs emit per-subagent status with tool activity and usage metrics", async () => {
+	const cwd = tempProject();
+	const runDir = path.join(cwd, ".pi", "run");
+	const cli = path.join(cwd, "fake-pi.js");
+	fs.writeFileSync(cli, `
+console.log(JSON.stringify({ type: "message_start", message: { role: "assistant" } }));
+console.log(JSON.stringify({ type: "tool_execution_start", toolName: "bash", args: { command: "npm test" } }));
+console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", provider: "openai-codex", model: "gpt-5.5", content: [{ type: "text", text: "done" }], stopReason: "stop", usage: { input: 1000, output: 2000, cacheRead: 3000, cacheWrite: 4000, totalTokens: 10000, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.123 } } } }));
+`, "utf8");
+	const config = cloneConfig();
+	config.children.piCliPath = cli;
+	const statuses: Array<{ key: string; text: string | undefined }> = [];
+	const result = await spawnPiRole({ cwd, role: "worker", task: "status test", runDir, config, statusKey: "subagent:test-worker", statusLabel: "test-worker", onStatus: (status) => statuses.push(status) });
+
+	assert.equal(result.exitCode, 0);
+	assert.equal(statuses.at(-1)?.key, "subagent:test-worker");
+	assert.equal(statuses.at(-1)?.text, undefined);
+	assert.equal(statuses.some((status) => /test-worker: bash npm test/.test(status.text ?? "")), true);
+	assert.equal(statuses.some((status) => /↑1\.0k ↓2\.0k R3\.0k W4\.0k \$0\.123 3\.7%\/272k \(auto\) - gpt-5\.5 • medium/.test(status.text ?? "")), true);
 });
 
 test("parallel workers abort and await siblings after a child setup/spawn failure", async () => {
@@ -146,6 +197,17 @@ test("review target reviewers run in parallel and preserve result order", async 
 	assert.equal(maxActiveReviewers, 2);
 	assert.deepEqual(result.reviews.map((review) => review.role), ["reviewer", "reviewer"]);
 	assert.deepEqual(calls.slice(0, 2), ["reviewer:b", "reviewer:a"]);
+});
+
+test("review target caps custom reviewer fanout", async () => {
+	const cwd = tempProject();
+	const config = cloneConfig();
+	await assert.rejects(() => runReviewTarget(cwd, { target: "inline target", includeScout: false, reviewers: Array.from({ length: 9 }, (_, index) => `reviewer-${index}`) }, undefined, undefined, {
+		loadConfig: () => config,
+		async spawnPiRole(input) {
+			return fakeResult(input.role, input.runDir);
+		},
+	}), /at most 8 reviewers/);
 });
 
 test("/work-parallel validates object fields before running", async () => {
