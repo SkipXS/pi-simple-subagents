@@ -108,9 +108,9 @@ Parallel workers for independent tasks:
 /work-parallel {"tasks":[{"name":"docs","task":"Update README usage examples"},{"name":"tests","task":"Add parser regression tests"}]}
 ```
 
-The slash command accepts JSON only: either an array of task strings, an array of task objects, or an object with a `tasks` array. It requires 2-8 tasks. Object fields are `task` (required non-empty string), `name` (optional string), `purpose` (optional `implementation`, `fix`, or `validation`), and `outputFile` (optional string). Invalid JSON, wrong task count, unsupported shapes, or invalid fields are reported in the Pi UI and do not start workers.
+The slash command accepts JSON only: either an array of task strings, an array of task objects, or an object with a `tasks` array. It requires 2-8 tasks. Object fields are `task` (required non-empty string), `name` (optional string), `purpose` (optional `implementation`, `fix`, or `validation`), and `outputFile` (optional string). Unknown fields such as `output_file`, invalid JSON, wrong task count, unsupported shapes, or invalid fields are reported in the Pi UI and do not start workers.
 
-or let the model call `run_parallel_workers` with `tasks: [{ name?, task, purpose?, outputFile? }, ...]`. Each worker gets its own child run directory and `sessions/worker.jsonl`, so their transcripts do not collide. YOLO mode still does not prevent source edit conflicts; use this only when tasks are independent enough that workers are unlikely to edit the same files.
+or let the model call `run_parallel_workers` with `tasks: [{ name?, task, purpose?, outputFile? }, ...]`. Each worker gets its own child run directory and `sessions/worker.jsonl`, so their transcripts do not collide. YOLO mode still does not prevent source edit conflicts; use this only when tasks are independent enough that workers are unlikely to edit the same files. Setup/spawn errors abort sibling workers and wait for shutdown; ordinary non-zero child exits are collected so siblings can finish, then `parallel-workers-summary.md` is written and the batch fails.
 
 Review fanout for an existing target:
 
@@ -120,14 +120,14 @@ Review fanout for an existing target:
 
 The text after the target is treated as focus/instructions. Use explicit `--reviewer` options when you want custom reviewer angles.
 
-The slash command also accepts a small option prefix before the target:
+The slash command also accepts a small option prefix before the target. Unknown `--...` options are rejected before any review starts so typos do not turn into accidental inline targets:
 
 ```text
 /review [--scout|--no-scout] [--reviewer <angle>|--reviewer=<angle>]... @path-or-dir [focus/instructions]
 /review --no-scout --reviewer "security boundaries" --reviewer "packaging UX" @extensions/pi-simple-subagents
 ```
 
-or let the model call `review_target` for the full schema (`target`, `focus`, `reviewers`, `includeScout`). This creates a run directory, runs an optional scout, then starts fresh reviewers with distinct angles in parallel, preserves their configured order for synthesis, and writes a synthesized `final-summary.md`. Custom reviewer fanout is capped at 8 reviewers. It does not run a worker; in YOLO mode the extension does not enforce source-write restrictions.
+or let the model call `review_target` for the full schema (`target`, `focus`, `reviewers`, `includeScout`). This creates a run directory, runs an optional scout, then starts fresh reviewers with distinct angles in parallel, preserves their configured order for synthesis, and writes a synthesized `final-summary.md`. Custom reviewer fanout is capped at 8 reviewers. If reviewer fanout fails, the extension writes `review-failure-summary.md` before throwing. It does not run a worker; in YOLO mode the extension does not enforce source-write restrictions.
 
 ## Important workflow guidance
 
@@ -161,7 +161,7 @@ This policy is not a confidentiality boundary or OS/container sandbox. Run this 
 
 ## Compaction policy
 
-Pi auto-compaction still applies per child session. In addition, every child role session that has a run directory (`orchestrator`, `scout`, `worker`, and `reviewer`) can call `compact_session` when its context gets long. It is most often useful for the persistent `orchestrator` and `worker` sessions. The tool requests Pi compaction with instructions to preserve:
+Pi auto-compaction still applies per child session. In addition, every valid child role session that has a run directory (`orchestrator`, `scout`, `worker`, and `reviewer`) can call `compact_session` when its context gets long. Child-only artifact tools are not registered for a root process that merely has a stale run-directory environment variable. Compaction is most often useful for the persistent `orchestrator` and `worker` sessions. The tool requests Pi compaction with instructions to preserve:
 
 - original plan/current goal
 - changed files and implementation decisions
@@ -237,7 +237,7 @@ Config reference:
 
 ## Source layout
 
-The extension entrypoint stays in `extensions/pi-simple-subagents/index.ts` and wires Pi tools and commands. Workflow internals are split into focused modules: `config.ts`, `roles.ts`, `artifacts.ts`, `references.ts`, `child-runner.ts`, `workflows.ts`, `state.ts`, `schemas.ts`, `prompts.ts`, and `text.ts`.
+The extension entrypoint stays in `extensions/pi-simple-subagents/index.ts` and wires Pi tools and commands. Workflow internals are split into focused modules: `config.ts`, `constants.ts`, `roles.ts`, `artifacts.ts`, `references.ts`, `child-runner.ts`, `workflows.ts`, `state.ts`, `schemas.ts`, `prompts.ts`, and `text.ts`.
 
 ## Run artifacts
 
@@ -302,6 +302,7 @@ Review-target runs create:
   scout-review-context.md        # when scout is enabled
   review-*.md
   final-summary.md
+  review-failure-summary.md      # only when reviewer fanout fails
   logs/
   outputs/
   prompts/
@@ -310,6 +311,16 @@ Review-target runs create:
 ```
 
 Child transcripts, stderr logs, referenced input files, reference warnings, and final outputs are stored under the run directory subject to artifact caps for runaway output. Tool-return previews may still be more concise for chat readability. `artifacts.baseDir` may be inside or outside the current project, but symlinked/junction base paths are rejected to avoid surprising writes elsewhere. Keep the artifact directory ignored/private when targets may contain sensitive data.
+
+## Troubleshooting and failure recovery
+
+- Unknown slash options/fields: `/review` rejects unknown `--...` options; `/work-parallel` rejects unknown JSON keys. Fix the typo and rerun; no child workers/reviewers are started for parser errors.
+- Config parse/schema errors: Pi reports the config path and key. Remove unknown/legacy keys or move trusted `children.piCliPath` overrides to the global config or `PI_SIMPLE_SUBAGENTS_PI_CLI`.
+- Child CLI discovery failures: set `PI_SIMPLE_SUBAGENTS_PI_CLI=/absolute/path/to/pi` (or `pi.cmd` on Windows), then rerun the workflow.
+- Timeouts/truncated output: inspect `logs/*.stderr.log`, `logs/*.jsonl`, and `outputs/*.md` in the run directory. Increase `children.timeoutMs` or caps only when you trust the workload.
+- Partial parallel failures: `parallel-workers-summary.md` lists completed workers, exit codes, output artifacts, transcripts, and setup/spawn errors.
+- Partial review fanout failures: `review-failure-summary.md` lists failed reviewers plus any completed reviewer artifacts. Fix the cause and rerun `/review`.
+- Artifact ownership/path errors: expected output artifacts must be regular files under the run directory and cannot live in reserved subdirectories (`logs`, `outputs`, `prompts`, `sessions`, `tasks`, `delegations`). Remove accidental directories/symlinks and rerun.
 
 ## Subagent status display
 

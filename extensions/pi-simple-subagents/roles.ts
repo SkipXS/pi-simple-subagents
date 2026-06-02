@@ -1,3 +1,5 @@
+import { ROLE_RUN_PURPOSES } from "./constants.ts";
+
 export const ROLE_ENV = "PI_ORCHESTRATOR_AGENT_ROLE";
 export const RUN_DIR_ENV = "PI_ORCHESTRATOR_AGENT_RUN_DIR";
 export const WORKER_RUNS_ENV = "PI_ORCHESTRATOR_AGENT_WORKER_RUNS";
@@ -6,7 +8,7 @@ export const REVIEW_RUNS_ENV = "PI_ORCHESTRATOR_AGENT_REVIEW_RUNS";
 export const ROLE_NAMES = ["orchestrator", "scout", "worker", "reviewer"] as const;
 
 export type RoleName = typeof ROLE_NAMES[number];
-export type Purpose = "context" | "implementation" | "review" | "fix" | "validation";
+export type Purpose = typeof ROLE_RUN_PURPOSES[number];
 
 export const MAX_TOOL_OUTPUT_BYTES = 24 * 1024;
 export const MAX_STDERR_BYTES = 16 * 1024;

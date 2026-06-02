@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { copyArtifactFile, validateOutputArtifactPath, writeArtifact } from "./artifacts.ts";
 import { childEnvCounts, childResultText, throwChildRunError, spawnPiRole, type ChildStatusUpdate } from "./child-runner.ts";
+import { WORK_PARALLEL_ROOT_KEYS, WORK_PARALLEL_TASK_KEYS, WORKER_PURPOSES } from "./constants.ts";
 import { loadConfig } from "./config.ts";
 import {
 	ROLE_ENV,
@@ -79,6 +80,11 @@ function requireNonEmpty(value: string, label: string): string {
 	const trimmed = value.trim();
 	if (!trimmed) throw new Error(`${label} must be a non-empty string`);
 	return trimmed;
+}
+
+function assertKnownKeys(record: Record<string, unknown>, allowedKeys: readonly string[], label: string): void {
+	const unknown = Object.keys(record).filter((key) => !allowedKeys.includes(key));
+	if (unknown.length > 0) throw new Error(`${label} has unknown field${unknown.length === 1 ? "" : "s"}: ${unknown.join(", ")}`);
 }
 
 function formatSubagentProgress(snapshot: SubagentProgressSnapshot): string {
@@ -258,12 +264,12 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 				const config = loadConfig(ctx.cwd);
 				const label = `${params.role}${params.round ? `-round-${params.round}` : ""}`;
 				const taskInput = requireNonEmpty(params.task, "role task");
-				const outputFile = params.outputFile?.trim();
-				const outputArtifactPath = outputFile ? validateOutputArtifactPath(runDir, outputFile) : undefined;
+				const outputFile = params.outputFile?.trim() || `${label}.md`;
+				const outputArtifactPath = validateOutputArtifactPath(runDir, outputFile);
 				const task = `${taskInput}
 
 Run directory: ${runDir}
-Expected output artifact: ${outputFile ?? `${label}.md`}
+Expected output artifact: ${outputFile}
 Purpose: ${params.purpose}`;
 				writeArtifact(runDir, `delegations/${label}-${Date.now()}.md`, task);
 				const progress = createSubagentProgress({ onToolUpdate: onUpdate });
@@ -285,10 +291,8 @@ Purpose: ${params.purpose}`;
 					persistState();
 					throw new Error(childResultText(`${params.role} failed`, result));
 				}
-				if (outputFile && outputArtifactPath) {
-					validateOutputArtifactPath(runDir, outputFile);
-					if (!fs.existsSync(outputArtifactPath)) copyArtifactFile(runDir, result.outputPath, outputArtifactPath);
-				}
+				validateOutputArtifactPath(runDir, outputFile);
+				if (!fs.existsSync(outputArtifactPath)) copyArtifactFile(runDir, result.outputPath, outputArtifactPath);
 
 				if (succeeded && params.role === "worker" && (params.purpose === "implementation" || params.purpose === "fix" || params.purpose === "validation")) {
 					workerRuns++;
@@ -301,8 +305,8 @@ Purpose: ${params.purpose}`;
 				}
 				persistState();
 				return {
-					content: [{ type: "text", text: childResultText(`${params.role} finished`, { ...result, outputPath: outputArtifactPath ?? result.outputPath }) }],
-					details: { ...result, purpose: params.purpose, round: params.round, latestWorkerRunReviewedClean, workerRuns, reviewRuns, reviewRunsSinceLatestWorker },
+					content: [{ type: "text", text: childResultText(`${params.role} finished`, { ...result, outputPath: outputArtifactPath }) }],
+					details: { ...result, outputPath: outputArtifactPath, purpose: params.purpose, round: params.round, latestWorkerRunReviewedClean, workerRuns, reviewRuns, reviewRunsSinceLatestWorker },
 				};
 
 			},
@@ -326,7 +330,7 @@ Purpose: ${params.purpose}`;
 		});
 	}
 
-	if (runDir) {
+	if (role && runDir) {
 		pi.registerTool({
 			name: "compact_session",
 			label: "Compact Session",
@@ -485,7 +489,20 @@ Purpose: ${params.purpose}`;
 					ctx.ui.notify(`/work-parallel expects JSON: ${message}`, "error");
 					return;
 				}
-				const rawTasks = Array.isArray(parsed) ? parsed : typeof parsed === "object" && parsed !== null && Array.isArray((parsed as { tasks?: unknown }).tasks) ? (parsed as { tasks: unknown[] }).tasks : undefined;
+				let rawTasks: unknown[] | undefined;
+				try {
+					if (Array.isArray(parsed)) {
+						rawTasks = parsed;
+					} else if (typeof parsed === "object" && parsed !== null) {
+						const rawObject = parsed as Record<string, unknown>;
+						assertKnownKeys(rawObject, WORK_PARALLEL_ROOT_KEYS, "/work-parallel root object");
+						if (Array.isArray(rawObject.tasks)) rawTasks = rawObject.tasks;
+					}
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					ctx.ui.notify(message, "error");
+					return;
+				}
 				if (!rawTasks || rawTasks.length < 2 || rawTasks.length > 8) {
 					ctx.ui.notify("/work-parallel requires 2-8 tasks", "warning");
 					return;
@@ -499,10 +516,11 @@ Purpose: ${params.purpose}`;
 						}
 						if (typeof item !== "object" || item === null) throw new Error(`Invalid task at index ${index}: expected string or object`);
 						const raw = item as { name?: unknown; task?: unknown; purpose?: unknown; outputFile?: unknown };
+						assertKnownKeys(raw as Record<string, unknown>, WORK_PARALLEL_TASK_KEYS, `Invalid task at index ${index}`);
 						if (typeof raw.task !== "string" || raw.task.trim() === "") throw new Error(`Invalid task at index ${index}: task must be a non-empty string`);
 						if (raw.name !== undefined && typeof raw.name !== "string") throw new Error(`Invalid task at index ${index}: name must be a string`);
 						if (raw.outputFile !== undefined && typeof raw.outputFile !== "string") throw new Error(`Invalid task at index ${index}: outputFile must be a string`);
-						if (raw.purpose !== undefined && !["implementation", "fix", "validation"].includes(String(raw.purpose))) throw new Error(`Invalid task at index ${index}: purpose must be implementation, fix, or validation`);
+						if (raw.purpose !== undefined && (typeof raw.purpose !== "string" || !(WORKER_PURPOSES as readonly string[]).includes(raw.purpose))) throw new Error(`Invalid task at index ${index}: purpose must be implementation, fix, or validation`);
 						return {
 							...(raw.name !== undefined ? { name: raw.name } : {}),
 							task: raw.task,

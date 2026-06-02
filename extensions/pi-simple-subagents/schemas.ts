@@ -1,9 +1,10 @@
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type, type Static } from "typebox";
+import { ROLE_RUN_PURPOSES, WORKER_PURPOSES } from "./constants.ts";
 
 export const RoleRunParams = Type.Object({
 	role: StringEnum(["scout", "worker", "reviewer"] as const, { description: "Role to run" }),
-	purpose: StringEnum(["context", "implementation", "review", "fix", "validation"] as const, { description: "Why this role is being run. Use validation for final tests/end-user checks." }),
+	purpose: StringEnum(ROLE_RUN_PURPOSES, { description: "Why this role is being run. Use validation for final tests/end-user checks." }),
 	task: Type.String({ minLength: 1, description: "Concrete task for the role. Include artifact paths and constraints." }),
 	round: Type.Optional(Type.Integer({ minimum: 1 })),
 	outputFile: Type.Optional(Type.String({ minLength: 1, description: "Expected handoff artifact filename inside the run dir, e.g. review-round-1.md" })),
@@ -25,7 +26,7 @@ export type ReviewTargetParams = Static<typeof ReviewTargetParams>;
 
 export const WorkerAgentParams = Type.Object({
 	task: Type.String({ minLength: 1, description: "Concrete standalone worker task, inline text, @file, or @directory. The worker may edit project files in YOLO mode." }),
-	purpose: Type.Optional(StringEnum(["implementation", "fix", "validation"] as const, { description: "Why the worker is being run. Default: implementation." })),
+	purpose: Type.Optional(StringEnum(WORKER_PURPOSES, { description: "Why the worker is being run. Default: implementation." })),
 	outputFile: Type.Optional(Type.String({ minLength: 1, description: "Expected worker report artifact filename inside the run dir. Default: worker-report.md" })),
 });
 export type WorkerAgentParams = Static<typeof WorkerAgentParams>;
@@ -33,7 +34,7 @@ export type WorkerAgentParams = Static<typeof WorkerAgentParams>;
 export const ParallelWorkerTaskParams = Type.Object({
 	name: Type.Optional(Type.String({ minLength: 1, description: "Short label for this worker, used in artifact paths." })),
 	task: Type.String({ minLength: 1, description: "Concrete worker task, inline text, @file, or @directory. Keep parallel tasks independent to avoid edit conflicts." }),
-	purpose: Type.Optional(StringEnum(["implementation", "fix", "validation"] as const, { description: "Why this worker is being run. Default: implementation." })),
+	purpose: Type.Optional(StringEnum(WORKER_PURPOSES, { description: "Why this worker is being run. Default: implementation." })),
 	outputFile: Type.Optional(Type.String({ minLength: 1, description: "Expected worker report artifact filename inside this worker's run dir. Default: worker-report.md" })),
 });
 export type ParallelWorkerTaskParams = Static<typeof ParallelWorkerTaskParams>;

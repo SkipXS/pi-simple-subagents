@@ -66,6 +66,8 @@ test("parseReviewTargetCommand preserves quoted Windows backslashes", () => {
 test("parseReviewTargetCommand uses current /review error wording", () => {
 	assert.throws(() => parseReviewTargetCommand("--reviewer"), /\/review --reviewer/);
 	assert.throws(() => parseReviewTargetCommand("--no-scout"), /\/review requires a target/);
+	assert.throws(() => parseReviewTargetCommand("--noScout @README.md docs"), /\/review unknown option: --noScout/);
+	assert.throws(() => parseReviewTargetCommand("--reviewer security --bad @README.md"), /\/review unknown option: --bad/);
 });
 
 test("child task @ references are quoted for whitespace paths", () => {
@@ -130,6 +132,7 @@ test("package tarball dry-run contains only release files", () => {
 		"extensions/pi-simple-subagents/artifacts.ts",
 		"extensions/pi-simple-subagents/child-runner.ts",
 		"extensions/pi-simple-subagents/config.ts",
+		"extensions/pi-simple-subagents/constants.ts",
 		"extensions/pi-simple-subagents/index.ts",
 		"extensions/pi-simple-subagents/prompts.ts",
 		"extensions/pi-simple-subagents/references.ts",
@@ -234,6 +237,45 @@ test("review target caps custom reviewer fanout", async () => {
 	}), /at most 8 reviewers/);
 });
 
+test("review target rejects non-regular reviewer artifact and writes failure summary", async () => {
+	const cwd = tempProject();
+	const config = cloneConfig();
+	config.artifacts.baseDir = ".pi/runs";
+	let summaryPath = "";
+	await assert.rejects(async () => {
+		try {
+			await runReviewTarget(cwd, { target: "inline target", includeScout: false, reviewers: ["runtime bugs"] }, undefined, undefined, {
+				loadConfig: () => config,
+				async spawnPiRole(input) {
+					if (input.task.includes("Assigned review angle:")) {
+						fs.mkdirSync(path.join(input.runDir, "review-1-runtime-bugs.md"), { recursive: true });
+					}
+					return fakeResult(input.role, input.runDir);
+				},
+			});
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			summaryPath = /Summary: (.+)$/m.exec(message)?.[1] ?? "";
+			throw error;
+		}
+	}, /not a regular file/);
+	assert.match(summaryPath, /review-failure-summary\.md$/);
+	assert.equal(fs.existsSync(summaryPath), true);
+});
+
+test("review target rejects non-regular final summary artifact", async () => {
+	const cwd = tempProject();
+	const config = cloneConfig();
+	config.artifacts.baseDir = ".pi/runs";
+	await assert.rejects(() => runReviewTarget(cwd, { target: "inline target", includeScout: false, reviewers: ["runtime bugs"] }, undefined, undefined, {
+		loadConfig: () => config,
+		async spawnPiRole(input) {
+			if (input.task.includes("Synthesize this review-only run")) fs.mkdirSync(path.join(input.runDir, "final-summary.md"), { recursive: true });
+			return fakeResult(input.role, input.runDir);
+		},
+	}), /not a regular file/);
+});
+
 test("worker outputFile validates reserved paths before spawning", async () => {
 	const cwd = tempProject();
 	const config = cloneConfig();
@@ -246,6 +288,52 @@ test("worker outputFile validates reserved paths before spawning", async () => {
 		},
 	}), /reserved run directory/);
 	assert.equal(spawned, false);
+});
+
+test("parallel workers collect non-zero child exits without aborting siblings", async () => {
+	const cwd = tempProject();
+	const config = cloneConfig();
+	config.artifacts.baseDir = ".pi/runs";
+	let secondSawAbort = false;
+	await assert.rejects(() => runParallelWorkers(cwd, { tasks: [{ name: "fail", task: "first" }, { name: "finish", task: "second" }] }, undefined, undefined, {
+		loadConfig: () => config,
+		async spawnPiRole(input) {
+			if (input.task.includes("Name: fail")) return { ...fakeResult(input.role, input.runDir), exitCode: 2 };
+			secondSawAbort = input.signal?.aborted ?? false;
+			return fakeResult(input.role, input.runDir);
+		},
+	}), /Parallel workers failed: fail exit 2/);
+	assert.equal(secondSawAbort, false);
+});
+
+test("run_role_agent validates and materializes default output artifact", async () => {
+	const oldRole = process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+	const oldRunDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+	const oldCli = process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
+	try {
+		const cwd = tempProject();
+		const runDir = path.join(cwd, ".pi", "run");
+		const cli = path.join(cwd, "fake-pi.js");
+		fs.writeFileSync(cli, `console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", provider: "fake", model: "fake-model", content: [{ type: "text", text: "child done" }], stopReason: "stop" } }));\n`, "utf8");
+		process.env.PI_ORCHESTRATOR_AGENT_ROLE = "orchestrator";
+		process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR = runDir;
+		process.env.PI_SIMPLE_SUBAGENTS_PI_CLI = cli;
+		let runRole: { execute: (...args: any[]) => Promise<any> } | undefined;
+		orchestratorAgentsExtension({ registerTool: (tool: { name: string; execute: (...args: any[]) => Promise<any> }) => { if (tool.name === "run_role_agent") runRole = tool; }, registerCommand() {}, sendMessage() {} } as never);
+		assert.ok(runRole);
+		const result = await runRole.execute("id", { role: "worker", purpose: "implementation", task: "do work" }, new AbortController().signal, undefined, { cwd } as never);
+		const expected = path.join(runDir, "worker.md");
+		assert.equal(fs.existsSync(expected), true);
+		assert.equal(result.details.outputPath, expected);
+		assert.match(fs.readFileSync(expected, "utf8"), /child done/);
+	} finally {
+		if (oldRole === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+		else process.env.PI_ORCHESTRATOR_AGENT_ROLE = oldRole;
+		if (oldRunDir === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+		else process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR = oldRunDir;
+		if (oldCli === undefined) delete process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
+		else process.env.PI_SIMPLE_SUBAGENTS_PI_CLI = oldCli;
+	}
 });
 
 test("/work-parallel validates object fields before running", async () => {
@@ -262,6 +350,12 @@ test("/work-parallel validates object fields before running", async () => {
 		notifications.length = 0;
 		await handler?.('["ok","   "]', { cwd: tempProject(), signal: new AbortController().signal, ui: { notify: (message) => notifications.push(message), setStatus() {} } });
 		assert.match(notifications.join("\n"), /task must be a non-empty string/);
+		notifications.length = 0;
+		await handler?.('[{"task":"ok"},{"task":"bad","output_file":"report.md"}]', { cwd: tempProject(), signal: new AbortController().signal, ui: { notify: (message) => notifications.push(message), setStatus() {} } });
+		assert.match(notifications.join("\n"), /unknown field: output_file/);
+		notifications.length = 0;
+		await handler?.('{"tasks":["ok","also ok"],"extra":true}', { cwd: tempProject(), signal: new AbortController().signal, ui: { notify: (message) => notifications.push(message), setStatus() {} } });
+		assert.match(notifications.join("\n"), /unknown field: extra/);
 	} finally {
 		if (oldRole === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_ROLE;
 		else process.env.PI_ORCHESTRATOR_AGENT_ROLE = oldRole;
@@ -281,6 +375,12 @@ test("extension registration is role-gated", () => {
 		orchestratorAgentsExtension({ registerTool: (tool: { name: string }) => rootTools.push(tool.name), registerCommand: (name: string) => rootCommands.push(name), sendMessage() {} } as never);
 		assert.deepEqual(rootTools.slice(0, 4), ["orchestrate_plan", "review_target", "run_worker_agent", "run_parallel_workers"]);
 		assert.equal(rootCommands.includes("review"), true);
+
+		process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR = tempProject();
+		const staleRunDirTools: string[] = [];
+		orchestratorAgentsExtension({ registerTool: (tool: { name: string }) => staleRunDirTools.push(tool.name), registerCommand() {}, sendMessage() {} } as never);
+		assert.equal(staleRunDirTools.includes("write_run_artifact"), false);
+		delete process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
 
 		process.env.PI_ORCHESTRATOR_AGENT_ROLE = "orchestrator";
 		process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR = tempProject();

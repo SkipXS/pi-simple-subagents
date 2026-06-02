@@ -1,7 +1,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { copyArtifactFile, ensureDir, resolveArtifactPath, resolveRunBaseDir, runId, validateOutputArtifactPath, writeArtifact } from "./artifacts.ts";
+import { copyArtifactFile, ensureDir, resolveRunBaseDir, runId, validateOutputArtifactPath, writeArtifact } from "./artifacts.ts";
 import { childResultText, spawnPiRole, throwChildRunError, type ChildRunResult, type ChildStatusUpdate } from "./child-runner.ts";
+import { CONFIG_EFFECTIVE_FILE, DEFAULT_WORKER_OUTPUT_FILE, FINAL_SUMMARY_FILE, INPUT_TARGET_FILE, INPUT_WORKER_TASK_FILE, PARALLEL_WORKERS_FILE, PARALLEL_WORKERS_SUMMARY_FILE, REVIEW_FAILURE_SUMMARY_FILE, SCOUT_REVIEW_CONTEXT_FILE } from "./constants.ts";
 import { loadConfig } from "./config.ts";
 import { reviewTargetSystemPrompt } from "./prompts.ts";
 import { formatReferenceWarnings, readPlanReference, readReference } from "./references.ts";
@@ -96,6 +97,10 @@ function requireNonEmpty(value: string, label: string): string {
 	return trimmed;
 }
 
+function unknownOptionError(command: string, token: string): Error {
+	return new Error(`${command} unknown option: ${token}`);
+}
+
 export function parseReviewTargetCommand(input: string): ReviewTargetParams {
 	const trimmed = input.trim();
 	const tokens = tokenizeCommand(trimmed);
@@ -128,11 +133,14 @@ export function parseReviewTargetCommand(input: string): ReviewTargetParams {
 			cursor++;
 			continue;
 		}
+		if (token.startsWith("--")) throw unknownOptionError("/review", token);
 		break;
 	}
+	if (tokens[0]?.startsWith("--") && cursor === 0) throw unknownOptionError("/review", tokens[0]);
 	if (cursor > 0) {
 		const target = tokens[cursor];
 		if (!target) throw new Error("/review requires a target after options");
+		if (target.startsWith("--")) throw unknownOptionError("/review", target);
 		const focus = tokens.slice(cursor + 1).join(" ").trim();
 		return {
 			target: quoteTargetIfNeeded(target),
@@ -159,7 +167,7 @@ export async function runOrchestration(cwd: string, rawPlan: string, signal?: Ab
 
 ${planText}
 `);
-	writeArtifact(dir, "config-effective.json", JSON.stringify(config, null, 2));
+	writeArtifact(dir, CONFIG_EFFECTIVE_FILE, JSON.stringify(config, null, 2));
 	const task = formatRunTask(planText, planSource, dir, warnings);
 	const result = await dep.spawnPiRole({ cwd, role: "orchestrator", task, runDir: dir, config, signal, onUpdate, onStatus: forwardChildStatus(onUpdate), statusKey: "subagent:orchestrator", statusLabel: "orchestrator" });
 	return { result, runDir: dir, planSource };
@@ -183,12 +191,12 @@ async function runWorkerInDir(cwd: string, dir: string, params: WorkerAgentParam
 	const taskInput = requireNonEmpty(params.task, "worker task");
 	const workerTask = dep.readReference(cwd, taskInput, "worker task", config, { allowDirectory: true });
 	const purpose: WorkerPurpose = params.purpose ?? "implementation";
-	const outputFile = params.outputFile?.trim() || "worker-report.md";
+	const outputFile = params.outputFile?.trim() || DEFAULT_WORKER_OUTPUT_FILE;
 	const outputArtifactPath = validateOutputArtifactPath(dir, outputFile);
 	const referenceWarningText = formatReferenceWarnings(workerTask.warnings);
 	const name = "name" in params && params.name?.trim() ? params.name.trim() : progressLabel;
-	writeArtifact(dir, "input-worker-task.md", `Source: ${workerTask.source}\nName: ${name}\nPurpose: ${purpose}\nExpected output artifact: ${outputFile}${referenceWarningText}\n\n${workerTask.text}\n`);
-	writeArtifact(dir, "config-effective.json", JSON.stringify(config, null, 2));
+	writeArtifact(dir, INPUT_WORKER_TASK_FILE, `Source: ${workerTask.source}\nName: ${name}\nPurpose: ${purpose}\nExpected output artifact: ${outputFile}${referenceWarningText}\n\n${workerTask.text}\n`);
+	writeArtifact(dir, CONFIG_EFFECTIVE_FILE, JSON.stringify(config, null, 2));
 	const task = `Worker task source: ${workerTask.source}\nName: ${name}\nPurpose: ${purpose}\nExpected output artifact: ${outputFile}${referenceWarningText}\nRun directory: ${dir}\nRead input-worker-task.md, perform the requested work, run useful checks, and write ${outputFile}. If running as part of a parallel worker batch, stay within the assigned task and avoid editing files likely owned by sibling workers. If a product, architecture, or scope decision is missing, stop and report it instead of guessing.`;
 	const result = await dep.spawnPiRole({ cwd, role: "worker", task, runDir: dir, config, signal, onUpdate: (text) => onUpdate?.(`${progressLabel}: ${text}`), onStatus: forwardChildStatus(onUpdate), statusKey: `subagent:${safePathLabel(progressLabel, "worker")}`, statusLabel: progressLabel });
 	if (result.exitCode === 0) {
@@ -220,12 +228,12 @@ export async function runParallelWorkers(cwd: string, params: ParallelWorkersPar
 		dep.readReference(cwd, requireNonEmpty(task.task, `worker ${index + 1} task`), `worker ${index + 1} task`, config, { allowDirectory: true });
 		const label = safePathLabel(task.name, `worker-${index + 1}`);
 		const workerDir = path.join(dir, `${String(index + 1).padStart(2, "0")}-${label}`);
-		validateOutputArtifactPath(workerDir, task.outputFile?.trim() || "worker-report.md");
+		validateOutputArtifactPath(workerDir, task.outputFile?.trim() || DEFAULT_WORKER_OUTPUT_FILE);
 	}
 
 	ensureDir(dir);
-	writeArtifact(dir, "parallel-workers.md", `# Parallel Workers\n\n${params.tasks.map((task, index) => `## Worker ${index + 1}: ${task.name?.trim() || `worker-${index + 1}`}\n\nPurpose: ${task.purpose ?? "implementation"}\n\n${task.task}`).join("\n\n")}\n`);
-	writeArtifact(dir, "config-effective.json", JSON.stringify(config, null, 2));
+	writeArtifact(dir, PARALLEL_WORKERS_FILE, `# Parallel Workers\n\n${params.tasks.map((task, index) => `## Worker ${index + 1}: ${task.name?.trim() || `worker-${index + 1}`}\n\nPurpose: ${task.purpose ?? "implementation"}\n\n${task.task}`).join("\n\n")}\n`);
+	writeArtifact(dir, CONFIG_EFFECTIVE_FILE, JSON.stringify(config, null, 2));
 	onUpdate?.(`parallel-workers: starting ${params.tasks.length} workers`);
 	const localAbort = new AbortController();
 	const forwardAbort = () => localAbort.abort(signal?.reason);
@@ -247,7 +255,7 @@ export async function runParallelWorkers(cwd: string, params: ParallelWorkersPar
 		const workers = settled.flatMap((entry) => entry.status === "fulfilled" ? [entry.value] : []);
 		const rejected = settled.flatMap((entry, index) => entry.status === "rejected" ? [{ index, reason: entry.reason }] : []);
 		const failed = workers.filter((worker) => worker.result.exitCode !== 0);
-		const summaryPath = writeArtifact(dir, "parallel-workers-summary.md", `# Parallel Workers Summary\n\n${workers.map((worker, index) => `## Worker ${index + 1}: ${worker.name}\n\n- Exit code: ${worker.result.exitCode}\n- Run dir: ${worker.runDir}\n- Output: ${worker.outputArtifactPath}\n- Transcript: ${worker.result.transcriptPath}`).join("\n\n")}${rejected.length > 0 ? `\n\n## Setup/spawn errors\n\n${rejected.map((entry) => `- Worker ${entry.index + 1}: ${entry.reason instanceof Error ? entry.reason.message : String(entry.reason)}`).join("\n")}` : ""}\n`);
+		const summaryPath = writeArtifact(dir, PARALLEL_WORKERS_SUMMARY_FILE, `# Parallel Workers Summary\n\n${workers.map((worker, index) => `## Worker ${index + 1}: ${worker.name}\n\n- Exit code: ${worker.result.exitCode}\n- Run dir: ${worker.runDir}\n- Output: ${worker.outputArtifactPath}\n- Transcript: ${worker.result.transcriptPath}`).join("\n\n")}${rejected.length > 0 ? `\n\n## Setup/spawn errors\n\n${rejected.map((entry) => `- Worker ${entry.index + 1}: ${entry.reason instanceof Error ? entry.reason.message : String(entry.reason)}`).join("\n")}` : ""}\n`);
 		if (rejected.length > 0) {
 			throw new Error(`Parallel workers aborted after error(s): ${rejected.map((entry) => `worker ${entry.index + 1}: ${entry.reason instanceof Error ? entry.reason.message : String(entry.reason)}`).join("; ")}\nRun dir: ${dir}\nSummary: ${summaryPath}`);
 		}
@@ -271,8 +279,8 @@ export async function runReviewTarget(cwd: string, params: ReviewTargetParams, s
 	const referenceWarningText = formatReferenceWarnings(target.warnings);
 	if (params.reviewers && params.reviewers.length > MAX_REVIEW_TARGET_REVIEWERS) throw new Error(`review_target supports at most ${MAX_REVIEW_TARGET_REVIEWERS} reviewers`);
 	const reviewers = params.reviewers && params.reviewers.length > 0 ? params.reviewers.map((reviewer, index) => requireNonEmpty(reviewer, `reviewer ${index + 1}`)) : [...DEFAULT_REVIEW_ANGLES];
-	writeArtifact(dir, "input-target.md", `Source: ${target.source}\nFocus: ${focus}${referenceWarningText}\n\n${target.text}\n`);
-	writeArtifact(dir, "config-effective.json", JSON.stringify(config, null, 2));
+	writeArtifact(dir, INPUT_TARGET_FILE, `Source: ${target.source}\nFocus: ${focus}${referenceWarningText}\n\n${target.text}\n`);
+	writeArtifact(dir, CONFIG_EFFECTIVE_FILE, JSON.stringify(config, null, 2));
 
 	let scout: ChildRunResult | undefined;
 	if (params.includeScout ?? true) {
@@ -291,8 +299,9 @@ export async function runReviewTarget(cwd: string, params: ReviewTargetParams, s
 			systemPrompt: reviewTargetSystemPrompt("scout", dir, config),
 		});
 		if (scout.exitCode !== 0) throwChildRunError("review-target scout failed", scout);
-		const scoutArtifact = resolveArtifactPath(dir, "scout-review-context.md");
+		const scoutArtifact = validateOutputArtifactPath(dir, SCOUT_REVIEW_CONTEXT_FILE);
 		if (!dep.existsSync(scoutArtifact)) dep.copyArtifactFile(dir, scout.outputPath, scoutArtifact);
+		else validateOutputArtifactPath(dir, SCOUT_REVIEW_CONTEXT_FILE);
 	}
 
 	onUpdate?.(`review-target: ${reviewers.length} reviewers running in parallel`);
@@ -308,7 +317,7 @@ export async function runReviewTarget(cwd: string, params: ReviewTargetParams, s
 			onUpdate?.(`review-target: reviewer ${index + 1}/${reviewers.length} starting`);
 			const safeName = angle.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 48) || `review-${index + 1}`;
 			const expectedFile = `review-${index + 1}-${safeName}.md`;
-			const expectedPath = resolveArtifactPath(dir, expectedFile);
+			const expectedPath = validateOutputArtifactPath(dir, expectedFile);
 			const result = await dep.spawnPiRole({
 				cwd,
 				role: "reviewer",
@@ -323,6 +332,7 @@ export async function runReviewTarget(cwd: string, params: ReviewTargetParams, s
 				systemPrompt: reviewTargetSystemPrompt("reviewer", dir, config),
 			});
 			if (result.exitCode !== 0) throw new Error(childResultText(`review-target reviewer ${index + 1} failed`, result));
+			validateOutputArtifactPath(dir, expectedFile);
 			if (!dep.existsSync(expectedPath)) dep.copyArtifactFile(dir, result.outputPath, expectedPath);
 			return { result, expectedPath, angle };
 		}).map((promise) => promise.catch((error) => {
@@ -331,7 +341,10 @@ export async function runReviewTarget(cwd: string, params: ReviewTargetParams, s
 		}));
 		const settled = await Promise.allSettled(reviewPromises);
 		const failures = settled.flatMap((entry, index) => entry.status === "rejected" ? [`reviewer ${index + 1}: ${entry.reason instanceof Error ? entry.reason.message : String(entry.reason)}`] : []);
-		if (failures.length > 0) throw new Error(`Review target reviewer fanout failed: ${failures.join("; ")}\nRun dir: ${dir}`);
+		if (failures.length > 0) {
+			const summaryPath = writeArtifact(dir, REVIEW_FAILURE_SUMMARY_FILE, `# Review Fanout Failure Summary\n\nRun dir: ${dir}\nTarget source: ${target.source}\nFocus: ${focus}${referenceWarningText}\n\n## Failures\n\n${failures.map((failure) => `- ${failure}`).join("\n")}\n\n## Completed reviewers\n\n${settled.flatMap((entry, index) => entry.status === "fulfilled" ? [`- Reviewer ${index + 1} (${entry.value.angle}): artifact ${entry.value.expectedPath}; output log ${entry.value.result.outputPath}`] : []).join("\n") || "none"}\n`);
+			throw new Error(`Review target reviewer fanout failed: ${failures.join("; ")}\nRun dir: ${dir}\nSummary: ${summaryPath}`);
+		}
 		reviewRecords = settled.map((entry) => {
 			if (entry.status !== "fulfilled") throw new Error("unreachable review settlement state");
 			return entry.value;
@@ -356,7 +369,8 @@ export async function runReviewTarget(cwd: string, params: ReviewTargetParams, s
 		systemPrompt: reviewTargetSystemPrompt("synthesis", dir, config),
 	});
 	if (synthesis.exitCode !== 0) throwChildRunError("review-target synthesis failed", synthesis);
-	const finalSummaryPath = resolveArtifactPath(dir, "final-summary.md");
+	const finalSummaryPath = validateOutputArtifactPath(dir, FINAL_SUMMARY_FILE);
 	if (!dep.existsSync(finalSummaryPath)) dep.copyArtifactFile(dir, synthesis.outputPath, finalSummaryPath);
+	else validateOutputArtifactPath(dir, FINAL_SUMMARY_FILE);
 	return { runDir: dir, targetSource: target.source, scout, reviews, synthesis, finalSummaryPath };
 }
