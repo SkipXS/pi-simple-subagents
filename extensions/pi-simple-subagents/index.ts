@@ -1,5 +1,5 @@
 import * as fs from "node:fs";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { copyArtifactFile, resolveArtifactPath, writeArtifact } from "./artifacts.ts";
 import { childEnvCounts, childResultText, throwChildRunError, spawnPiRole } from "./child-runner.ts";
 import { loadConfig } from "./config.ts";
@@ -9,23 +9,28 @@ import {
 	RUN_DIR_ENV,
 	WORKER_RUNS_ENV,
 	parseRoleEnv,
+	validateRolePurpose,
 } from "./roles.ts";
 import {
 	ArtifactParams,
 	CompactSessionParams,
 	MarkReviewCleanParams,
 	OrchestrateParams,
+	ParallelWorkersParams,
 	ReviewTargetParams,
 	RoleRunParams,
+	WorkerAgentParams,
 	type ArtifactParams as ArtifactParamsType,
 	type CompactSessionParams as CompactSessionParamsType,
 	type MarkReviewCleanParams as MarkReviewCleanParamsType,
 	type OrchestrateParams as OrchestrateParamsType,
+	type ParallelWorkersParams as ParallelWorkersParamsType,
 	type ReviewTargetParams as ReviewTargetParamsType,
 	type RoleRunParams as RoleRunParamsType,
+	type WorkerAgentParams as WorkerAgentParamsType,
 } from "./schemas.ts";
 import { readOrchestrationState, writeOrchestrationState } from "./state.ts";
-import { parseReviewTargetCommand, runOrchestration, runReviewTarget } from "./workflows.ts";
+import { parseReviewTargetCommand, runOrchestration, runParallelWorkers, runReviewTarget, runWorkerAgent } from "./workflows.ts";
 
 export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 	const role = parseRoleEnv(process.env[ROLE_ENV]);
@@ -73,20 +78,57 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 				};
 			},
 		});
+
+		pi.registerTool({
+			name: "run_worker_agent",
+			label: "Run Worker Agent",
+			description: "Run a standalone worker subagent for implementation, fixes, or validation without starting a full orchestrator workflow. YOLO mode does not enforce source-write restrictions.",
+			promptSnippet: "Run a standalone worker subagent for implementation, fixes, or validation",
+			promptGuidelines: ["Use run_worker_agent when the user asks to implement, fix, or validate something via a worker subagent without a full orchestrator workflow."],
+			executionMode: "sequential",
+			parameters: WorkerAgentParams,
+			async execute(_id, params: WorkerAgentParamsType, signal, onUpdate, ctx) {
+				const result = await runWorkerAgent(ctx.cwd, params, signal, (text) => onUpdate?.({ content: [{ type: "text", text }], details: {} }));
+				return {
+					content: [{ type: "text", text: `Worker finished.\nRun dir: ${result.runDir}\nTask source: ${result.taskSource}\nOutput: ${result.outputArtifactPath}\nTranscript: ${result.result.transcriptPath}\n\n${result.result.output}` }],
+					details: result,
+				};
+			},
+		});
+
+		pi.registerTool({
+			name: "run_parallel_workers",
+			label: "Run Parallel Workers",
+			description: "Run multiple standalone worker subagents concurrently for independent implementation, fix, or validation tasks. Each worker gets its own run directory and session file; YOLO mode does not prevent source edit conflicts.",
+			promptSnippet: "Run multiple standalone worker subagents concurrently for independent tasks",
+			promptGuidelines: ["Use run_parallel_workers only when worker tasks are independent enough to run concurrently without likely file-edit conflicts."],
+			parameters: ParallelWorkersParams,
+			async execute(_id, params: ParallelWorkersParamsType, signal, onUpdate, ctx) {
+				const result = await runParallelWorkers(ctx.cwd, params, signal, (text) => onUpdate?.({ content: [{ type: "text", text }], details: {} }));
+				const summary = result.workers.map((worker, index) => `${index + 1}. ${worker.name}: output ${worker.outputArtifactPath}; transcript ${worker.result.transcriptPath}`).join("\n");
+				return {
+					content: [{ type: "text", text: `Parallel workers finished.\nRun dir: ${result.runDir}\nWorkers: ${result.workers.length}\n\n${summary}` }],
+					details: result,
+				};
+			},
+		});
 	}
 
 	if (role === "orchestrator" && runDir) {
 		pi.registerTool({
 			name: "run_role_agent",
 			label: "Run Role Agent",
-			description: "Run scout, worker, or reviewer for one concrete handoff task in the current orchestration run. YOLO by design: no file, time, validation, or snapshot guardrails are imposed.",
+			description: "Run scout, worker, or reviewer for one concrete handoff task in the current orchestration run. YOLO by design: no file, time, validation, or snapshot guardrails are imposed. Calls are serialized so persistent child sessions are not shared concurrently.",
 			promptSnippet: "Delegate a concrete task to scout, worker, or reviewer within the current orchestration run",
 			promptGuidelines: [
 				"Use run_role_agent from orchestrator after deciding the next workflow step.",
 				"Use purpose=validation for final tests or end-user checks when useful; Pi YOLO policy applies.",
+				"run_role_agent calls are serialized; do not rely on parallel worker execution in a single assistant turn.",
 			],
+			executionMode: "sequential",
 			parameters: RoleRunParams,
 			async execute(_id, params: RoleRunParamsType, signal, onUpdate, ctx) {
+				validateRolePurpose(params.role, params.purpose);
 				const config = loadConfig(ctx.cwd);
 				const label = `${params.role}${params.round ? `-round-${params.round}` : ""}`;
 				const outputArtifactPath = params.outputFile ? resolveArtifactPath(runDir, params.outputFile) : undefined;
@@ -198,59 +240,145 @@ Purpose: ${params.purpose}`;
 	}
 
 	if (!role) {
+		const runOrchestrateCommand = async (args: string, ctx: ExtensionCommandContext) => {
+			const plan = args.trim();
+			if (!plan) {
+				ctx.ui.notify("Usage: /orchestrate @path/to/plan.md or /orchestrate <plan>", "warning");
+				return;
+			}
+			ctx.ui.notify("Starting orchestrator workflow...", "info");
+			try {
+				const { result, runDir } = await runOrchestration(ctx.cwd, plan, ctx.signal, (text) => ctx.ui.setStatus("orchestrator", text));
+				if (result.exitCode !== 0) throwChildRunError("Orchestration failed", result);
+				pi.sendMessage({
+					customType: "pi-simple-subagents-result",
+					display: true,
+					content: `Orchestration finished.\n\nRun dir: ${runDir}\nOutput: ${result.outputPath}\nTranscript: ${result.transcriptPath}\n\n${result.output}`,
+					details: { runDir, result },
+				});
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				ctx.ui.notify(`Orchestration failed: ${message.split("\n")[0]}`, "error");
+				throw error;
+			} finally {
+				ctx.ui.setStatus("orchestrator", undefined);
+			}
+		};
+
+		const runWorkCommand = async (args: string, ctx: ExtensionCommandContext) => {
+			const task = args.trim();
+			if (!task) {
+				ctx.ui.notify("Usage: /work @task-file, @directory, or inline implementation/fix/validation instructions", "warning");
+				return;
+			}
+			ctx.ui.notify("Starting worker...", "info");
+			try {
+				const result = await runWorkerAgent(ctx.cwd, { task }, ctx.signal, (text) => ctx.ui.setStatus("work", text));
+				pi.sendMessage({
+					customType: "pi-simple-subagents-worker-result",
+					display: true,
+					content: `Worker finished.\n\nRun dir: ${result.runDir}\nOutput: ${result.outputArtifactPath}\nTranscript: ${result.result.transcriptPath}\n\n${result.result.output}`,
+					details: result,
+				});
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				ctx.ui.notify(`Worker failed: ${message.split("\n")[0]}`, "error");
+				throw error;
+			} finally {
+				ctx.ui.setStatus("work", undefined);
+			}
+		};
+
+		const runReviewCommand = async (args: string, ctx: ExtensionCommandContext) => {
+			const target = args.trim();
+			if (!target) {
+				ctx.ui.notify("Usage: /review [--scout|--no-scout] [--reviewer <angle>]... @path-or-dir [focus/instructions]", "warning");
+				return;
+			}
+			ctx.ui.notify("Starting review workflow...", "info");
+			try {
+				const result = await runReviewTarget(ctx.cwd, parseReviewTargetCommand(target), ctx.signal, (text) => ctx.ui.setStatus("review", text));
+				pi.sendMessage({
+					customType: "pi-simple-subagents-review-result",
+					display: true,
+					content: `Review finished.\n\nRun dir: ${result.runDir}\nFinal summary: ${result.finalSummaryPath}\n\n${result.synthesis.output}`,
+					details: result,
+				});
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				ctx.ui.notify(`Review failed: ${message.split("\n")[0]}`, "error");
+				throw error;
+			} finally {
+				ctx.ui.setStatus("review", undefined);
+			}
+		};
+
 		pi.registerCommand("orchestrate", {
 			description: "Run the simple orchestrator workflow for a plan or @plan-file",
+			handler: runOrchestrateCommand,
+		});
+
+		pi.registerCommand("work", {
+			description: "Run a standalone worker subagent. Usage: @task-file, @directory, or inline implementation/fix/validation instructions",
+			handler: runWorkCommand,
+		});
+
+		pi.registerCommand("work-parallel", {
+			description: "Run multiple worker subagents concurrently. Usage: JSON array of strings or {name, task, purpose, outputFile} objects",
 			handler: async (args, ctx) => {
-				const plan = args.trim();
-				if (!plan) {
-					ctx.ui.notify("Usage: /orchestrate @path/to/plan.md or /orchestrate <plan>", "warning");
+				const input = args.trim();
+				if (!input) {
+					ctx.ui.notify("Usage: /work-parallel [{\"name\":\"docs\",\"task\":\"...\"},{\"name\":\"tests\",\"task\":\"...\"}]", "warning");
 					return;
 				}
-				ctx.ui.notify("Starting orchestrator workflow...", "info");
+				let parsed: unknown;
 				try {
-					const { result, runDir } = await runOrchestration(ctx.cwd, plan, ctx.signal, (text) => ctx.ui.setStatus("orchestrator", text));
-					if (result.exitCode !== 0) throwChildRunError("Orchestration failed", result);
-					pi.sendMessage({
-						customType: "pi-simple-subagents-result",
-						display: true,
-						content: `Orchestration finished.\n\nRun dir: ${runDir}\nOutput: ${result.outputPath}\nTranscript: ${result.transcriptPath}\n\n${result.output}`,
-						details: { runDir, result },
+					parsed = JSON.parse(input);
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					ctx.ui.notify(`/work-parallel expects JSON: ${message}`, "error");
+					return;
+				}
+				const rawTasks = Array.isArray(parsed) ? parsed : typeof parsed === "object" && parsed !== null && Array.isArray((parsed as { tasks?: unknown }).tasks) ? (parsed as { tasks: unknown[] }).tasks : undefined;
+				if (!rawTasks || rawTasks.length < 2 || rawTasks.length > 8) {
+					ctx.ui.notify("/work-parallel requires 2-8 tasks", "warning");
+					return;
+				}
+				let tasks: ParallelWorkersParamsType["tasks"];
+				try {
+					tasks = rawTasks.map((item, index) => {
+						if (typeof item === "string") return { name: `worker-${index + 1}`, task: item };
+						if (typeof item === "object" && item !== null && typeof (item as { task?: unknown }).task === "string") return item as ParallelWorkersParamsType["tasks"][number];
+						throw new Error(`Invalid task at index ${index}`);
 					});
 				} catch (error) {
 					const message = error instanceof Error ? error.message : String(error);
-					ctx.ui.notify(`Orchestration failed: ${message.split("\n")[0]}`, "error");
-					throw error;
-				} finally {
-					ctx.ui.setStatus("orchestrator", undefined);
-				}
-			},
-		});
-
-		pi.registerCommand("review-target", {
-			description: "Run scout/reviewer fanout for a target and synthesize improvements",
-			handler: async (args, ctx) => {
-				const target = args.trim();
-				if (!target) {
-					ctx.ui.notify("Usage: /review-target @path-or-dir [focus/instructions]", "warning");
+					ctx.ui.notify(message, "error");
 					return;
 				}
-				ctx.ui.notify("Starting review workflow...", "info");
+				ctx.ui.notify(`Starting ${tasks.length} workers in parallel...`, "info");
 				try {
-					const result = await runReviewTarget(ctx.cwd, parseReviewTargetCommand(target), ctx.signal, (text) => ctx.ui.setStatus("review-target", text));
+					const result = await runParallelWorkers(ctx.cwd, { tasks }, ctx.signal, (text) => ctx.ui.setStatus("work-parallel", text));
 					pi.sendMessage({
-						customType: "pi-simple-subagents-review-result",
+						customType: "pi-simple-subagents-parallel-workers-result",
 						display: true,
-						content: `Review finished.\n\nRun dir: ${result.runDir}\nFinal summary: ${result.finalSummaryPath}\n\n${result.synthesis.output}`,
+						content: `Parallel workers finished.\n\nRun dir: ${result.runDir}\nWorkers: ${result.workers.length}\n\n${result.workers.map((worker, index) => `${index + 1}. ${worker.name}: ${worker.outputArtifactPath}`).join("\n")}`,
 						details: result,
 					});
 				} catch (error) {
 					const message = error instanceof Error ? error.message : String(error);
-					ctx.ui.notify(`Review failed: ${message.split("\n")[0]}`, "error");
+					ctx.ui.notify(`Parallel workers failed: ${message.split("\n")[0]}`, "error");
 					throw error;
 				} finally {
-					ctx.ui.setStatus("review-target", undefined);
+					ctx.ui.setStatus("work-parallel", undefined);
 				}
 			},
 		});
+
+		pi.registerCommand("review", {
+			description: "Run scout/reviewer fanout for a target and synthesize improvements. Usage: [--scout|--no-scout] [--reviewer <angle>]... @path-or-dir [focus/instructions]",
+			handler: runReviewCommand,
+		});
+
 	}
 }

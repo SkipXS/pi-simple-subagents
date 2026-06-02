@@ -12,12 +12,17 @@ export interface RoleConfig {
 	thinking?: typeof THINKING_LEVELS[number];
 }
 
+export const EXTENSION_FORWARD_MODES = ["auto", "always", "never"] as const;
+
+export type ExtensionForwardMode = typeof EXTENSION_FORWARD_MODES[number];
+
 export interface Config {
 	roles: Record<RoleName, RoleConfig>;
 	children: {
 		inheritExtensions: boolean;
 		inheritExtensionsForReadOnly: boolean;
 		inheritSkills: boolean;
+		forwardCurrentExtension: ExtensionForwardMode;
 	};
 	artifacts: {
 		baseDir: string;
@@ -47,6 +52,7 @@ export const DEFAULT_CONFIG: Config = {
 		inheritExtensions: true,
 		inheritExtensionsForReadOnly: false,
 		inheritSkills: false,
+		forwardCurrentExtension: "auto",
 	},
 	artifacts: { baseDir: ".pi/agent-runs" },
 };
@@ -95,6 +101,12 @@ function expectThinking(value: unknown, source: string, pathName: string): typeo
 	return thinking as typeof THINKING_LEVELS[number];
 }
 
+function expectExtensionForwardMode(value: unknown, source: string, pathName: string): ExtensionForwardMode {
+	const mode = expectString(value, source, pathName);
+	if (!(EXTENSION_FORWARD_MODES as readonly string[]).includes(mode)) throw configError(source, `${pathName} must be one of: ${EXTENSION_FORWARD_MODES.join(", ")}`);
+	return mode as ExtensionForwardMode;
+}
+
 function mergeConfig(base: Config, override: unknown, source = "unknown"): Config {
 	if (override === undefined) return cloneConfig(base);
 	const overrideObject = expectObject(override, source, "root");
@@ -117,6 +129,7 @@ function mergeConfig(base: Config, override: unknown, source = "unknown"): Confi
 		if (children.inheritExtensions !== undefined) next.children.inheritExtensions = expectBoolean(children.inheritExtensions, source, "children.inheritExtensions");
 		if (children.inheritExtensionsForReadOnly !== undefined) next.children.inheritExtensionsForReadOnly = expectBoolean(children.inheritExtensionsForReadOnly, source, "children.inheritExtensionsForReadOnly");
 		if (children.inheritSkills !== undefined) next.children.inheritSkills = expectBoolean(children.inheritSkills, source, "children.inheritSkills");
+		if (children.forwardCurrentExtension !== undefined) next.children.forwardCurrentExtension = expectExtensionForwardMode(children.forwardCurrentExtension, source, "children.forwardCurrentExtension");
 	}
 
 	if (overrideObject.artifacts !== undefined) {

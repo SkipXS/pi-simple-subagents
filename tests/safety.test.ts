@@ -5,6 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { loadConfig } from "../extensions/pi-simple-subagents/config.ts";
 import { readReference } from "../extensions/pi-simple-subagents/references.ts";
+import { validateRolePurpose } from "../extensions/pi-simple-subagents/roles.ts";
 import { writeArtifact } from "../extensions/pi-simple-subagents/artifacts.ts";
 import { readOrchestrationState } from "../extensions/pi-simple-subagents/state.ts";
 
@@ -19,6 +20,7 @@ test("default config is YOLO without boundary config knobs", () => {
 	assert.equal("workflow" in config, false);
 	assert.equal("references" in config, false);
 	assert.equal("roleTimeoutMs" in config.children, false);
+	assert.equal(config.children.forwardCurrentExtension, "auto");
 	assert.equal("allowOutsideCwd" in config.artifacts, false);
 	for (const role of Object.values(config.roles)) assert.equal("tools" in role, false);
 });
@@ -63,7 +65,19 @@ test("references are not blocked by size, outside-cwd, or binary-looking content
 
 	assert.equal(large.source, largePath);
 	assert.equal(large.text.length, 600 * 1024);
+	assert.match(large.warnings.join("\n"), /large/);
 	assert.equal(binary.source, binaryPath);
+	assert.match(binary.warnings.join("\n"), /binary|non-text/);
+});
+
+test("role and purpose combinations are validated", () => {
+	assert.doesNotThrow(() => validateRolePurpose("worker", "implementation"));
+	assert.doesNotThrow(() => validateRolePurpose("worker", "fix"));
+	assert.doesNotThrow(() => validateRolePurpose("worker", "validation"));
+	assert.doesNotThrow(() => validateRolePurpose("scout", "context"));
+	assert.doesNotThrow(() => validateRolePurpose("reviewer", "review"));
+	assert.throws(() => validateRolePurpose("worker", "review"), /Invalid role\/purpose/);
+	assert.throws(() => validateRolePurpose("reviewer", "implementation"), /Invalid role\/purpose/);
 });
 
 test("corrupt orchestration state is quarantined and ignored", () => {

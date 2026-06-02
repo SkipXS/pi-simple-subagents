@@ -20,7 +20,8 @@
   "children": {
     "inheritExtensions": true,
     "inheritExtensionsForReadOnly": false,
-    "inheritSkills": false
+    "inheritSkills": false,
+    "forwardCurrentExtension": "auto"
   },
   "artifacts": {
     "baseDir": ".pi/agent-runs"

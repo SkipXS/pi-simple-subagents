@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 import { appendArtifactFile, resolveRoleSessionFile, uniqueSuffix, writeArtifact } from "./artifacts.ts";
-import { applyThinking, type Config } from "./config.ts";
+import { applyThinking, type Config, type ExtensionForwardMode } from "./config.ts";
 import { roleSystemPrompt } from "./prompts.ts";
 import {
 	MAX_PROGRESS_LINE_BYTES,
@@ -83,6 +83,21 @@ function getPiInvocation(args: string[]): { command: string; args: string[] } {
 	return { command: "pi", args };
 }
 
+export function quoteAtReferencePath(filePath: string): string {
+	if (!/[\s"']/.test(filePath)) return `@${filePath}`;
+	return `@"${filePath.replace(/\\/g, "\\\\").replace(/"/g, "\\\"")}"`;
+}
+
+export function wasLoadedWithExtensionFlag(argv: readonly string[] = process.argv): boolean {
+	return argv.some((arg) => arg === "--extension" || arg === "-e" || arg.startsWith("--extension="));
+}
+
+export function shouldForwardCurrentExtension(mode: ExtensionForwardMode, argv: readonly string[] = process.argv): boolean {
+	if (mode === "always") return true;
+	if (mode === "never") return false;
+	return wasLoadedWithExtensionFlag(argv);
+}
+
 export async function spawnPiRole(input: {
 	cwd: string;
 	role: RoleName;
@@ -105,6 +120,8 @@ export async function spawnPiRole(input: {
 	const inheritExtensions = input.role === "worker" ? input.config.children.inheritExtensions : input.config.children.inheritExtensionsForReadOnly;
 	if (!inheritExtensions) {
 		args.push("--no-extensions", "--extension", EXTENSION_PATH);
+	} else if (shouldForwardCurrentExtension(input.config.children.forwardCurrentExtension)) {
+		args.push("--extension", EXTENSION_PATH);
 	}
 	if (!input.config.children.inheritSkills) {
 		args.push("--no-skills");
@@ -113,7 +130,7 @@ export async function spawnPiRole(input: {
 		"--model", applyThinking(roleConfig.model, roleConfig.thinking),
 		"--system-prompt", promptPath,
 	);
-	args.push("-p", `@${taskPath}`);
+	args.push("-p", quoteAtReferencePath(taskPath));
 	const env: NodeJS.ProcessEnv = {
 		...process.env,
 		[ROLE_ENV]: input.role,

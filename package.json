@@ -3,9 +3,17 @@
   "version": "0.1.0",
   "description": "Small, opinionated Pi extension for plan-driven subagent orchestration with scout, worker, and fresh reviewers.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SkipXS/pi-simple-subagents.git"
+  },
+  "bugs": {
+    "url": "https://github.com/SkipXS/pi-simple-subagents/issues"
+  },
+  "homepage": "https://github.com/SkipXS/pi-simple-subagents#readme",
   "type": "module",
   "engines": {
-    "node": ">=22.6"
+    "node": ">=22.19.0"
   },
   "keywords": [
     "pi-package",

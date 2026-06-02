@@ -23,6 +23,26 @@ export const ReviewTargetParams = Type.Object({
 });
 export type ReviewTargetParams = Static<typeof ReviewTargetParams>;
 
+export const WorkerAgentParams = Type.Object({
+	task: Type.String({ description: "Concrete standalone worker task, inline text, @file, or @directory. The worker may edit project files in YOLO mode." }),
+	purpose: Type.Optional(StringEnum(["implementation", "fix", "validation"] as const, { description: "Why the worker is being run. Default: implementation." })),
+	outputFile: Type.Optional(Type.String({ description: "Expected worker report artifact filename inside the run dir. Default: worker-report.md" })),
+});
+export type WorkerAgentParams = Static<typeof WorkerAgentParams>;
+
+export const ParallelWorkerTaskParams = Type.Object({
+	name: Type.Optional(Type.String({ description: "Short label for this worker, used in artifact paths." })),
+	task: Type.String({ description: "Concrete worker task, inline text, @file, or @directory. Keep parallel tasks independent to avoid edit conflicts." }),
+	purpose: Type.Optional(StringEnum(["implementation", "fix", "validation"] as const, { description: "Why this worker is being run. Default: implementation." })),
+	outputFile: Type.Optional(Type.String({ description: "Expected worker report artifact filename inside this worker's run dir. Default: worker-report.md" })),
+});
+export type ParallelWorkerTaskParams = Static<typeof ParallelWorkerTaskParams>;
+
+export const ParallelWorkersParams = Type.Object({
+	tasks: Type.Array(ParallelWorkerTaskParams, { minItems: 2, maxItems: 8, description: "Independent worker tasks to run concurrently. Do not use for tasks likely to edit the same files." }),
+});
+export type ParallelWorkersParams = Static<typeof ParallelWorkersParams>;
+
 export const ArtifactParams = Type.Object({
 	path: Type.String({ description: "Artifact path relative to the current run directory, e.g. review-round-1.md" }),
 	content: Type.String({ description: "Markdown/text content to write" }),
