@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { copyArtifactFile, resolveArtifactPath, writeArtifact } from "./artifacts.ts";
+import { copyArtifactFile, validateOutputArtifactPath, writeArtifact } from "./artifacts.ts";
 import { childEnvCounts, childResultText, throwChildRunError, spawnPiRole, type ChildStatusUpdate } from "./child-runner.ts";
 import { loadConfig } from "./config.ts";
 import {
@@ -42,34 +42,56 @@ interface SubagentProgressSnapshot {
 
 const STATUS_SPINNER_PATTERN = /^([⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏])\s+(.+)$/u;
 
-function splitChildStatusText(text: string): { summary: string; current: string } {
+interface ParsedStatusLine {
+	spinner?: string;
+	label: string;
+	status: string;
+	action: string;
+}
+
+function parseStatusLine(text: string, fallback: string): ParsedStatusLine {
 	const trimmed = text.trim();
 	const spinnerMatch = STATUS_SPINNER_PATTERN.exec(trimmed);
 	const spinner = spinnerMatch?.[1];
 	const body = spinnerMatch?.[2] ?? trimmed;
 	const separatorIndex = body.indexOf(":");
-	if (separatorIndex < 0) return { summary: trimmed, current: body };
-
-	const label = body.slice(0, separatorIndex).trim();
+	if (separatorIndex < 0) return { spinner, label: fallback, status: "", action: body };
+	const label = body.slice(0, separatorIndex).trim() || fallback;
 	const rest = body.slice(separatorIndex + 1).trim();
-	const metricsMatch = /^(.*?)(\s{2,}.+)$/.exec(rest);
-	const action = (metricsMatch?.[1] ?? rest).trim();
-	const metrics = metricsMatch?.[2]?.trim();
-	const summary = `${spinner ? `${spinner} ` : ""}${label}:${metrics ? ` ${metrics}` : ""}`;
-	return { summary, current: action ? `${label}: ${action}` : label };
+	const actionSeparator = rest.lastIndexOf(" - ");
+	if (actionSeparator < 0) return { spinner, label, status: "", action: rest };
+	return {
+		spinner,
+		label,
+		status: rest.slice(0, actionSeparator).trim(),
+		action: rest.slice(actionSeparator + " - ".length).trim(),
+	};
 }
 
-function statusLabelFromSummary(summary: string, fallback: string): string {
-	const withoutSpinner = summary.replace(STATUS_SPINNER_PATTERN, "$2");
-	return withoutSpinner.split(":", 1)[0]?.trim() || fallback;
+function finishStatusText(existing: string | undefined, fallback: string): string {
+	if (!existing) return `${fallback}: finished`;
+	const parsed = parseStatusLine(existing, fallback);
+	const prefix = parsed.spinner ? `${parsed.spinner} ` : "";
+	return `${prefix}${parsed.label}: ${parsed.status ? `${parsed.status} - finished` : "finished"}`;
+}
+
+function requireNonEmpty(value: string, label: string): string {
+	const trimmed = value.trim();
+	if (!trimmed) throw new Error(`${label} must be a non-empty string`);
+	return trimmed;
 }
 
 function formatSubagentProgress(snapshot: SubagentProgressSnapshot): string {
-	const lines = snapshot.statuses.length > 0
-		? ["Subagents:", ...snapshot.statuses.map((status) => `- ${status.text}`)]
-		: ["Subagents:", "- starting"];
-	if (snapshot.current) lines.push("", `Current: ${snapshot.current}`);
-	return lines.join("\n");
+	if (snapshot.statuses.length === 0) return ["Subagents:", "- starting"].join("\n");
+	const parsed = snapshot.statuses.map((status) => ({ key: status.key, ...parseStatusLine(status.text, status.key) }));
+	const roleWidth = Math.max(...parsed.map((status) => `${status.spinner ? `${status.spinner} ` : "  "}${status.label}`.length));
+	const statusWidth = Math.max(...parsed.map((status) => status.status.length));
+	const lines = parsed.map((status) => {
+		const role = `${status.spinner ? `${status.spinner} ` : "  "}${status.label}`.padEnd(roleWidth);
+		const statusText = status.status ? `${status.status.padEnd(statusWidth)} - ${status.action}` : status.action;
+		return `- ${role}: ${statusText}`;
+	});
+	return ["Subagents:", ...lines].join("\n");
 }
 
 function createSubagentProgress(options: { onToolUpdate?: ToolProgressOnUpdate; setWidget?: WidgetSetter }) {
@@ -101,17 +123,17 @@ function createSubagentProgress(options: { onToolUpdate?: ToolProgressOnUpdate; 
 			const existing = statuses.get(status.key);
 			if (status.text === undefined) {
 				if (!existing) return;
-				const label = statusLabelFromSummary(existing, status.key);
-				const finished = `${label}: finished`;
+				const finished = finishStatusText(existing, status.key);
+				if (finished === existing) return;
 				statuses.set(status.key, finished);
 				current = finished;
 				publish();
 				return;
 			}
-			const parsed = splitChildStatusText(status.text);
-			if (!parsed.summary || (parsed.summary === existing && parsed.current === current)) return;
-			statuses.set(status.key, parsed.summary);
-			current = parsed.current;
+			const text = status.text.trim();
+			if (!text || text === existing) return;
+			statuses.set(status.key, text);
+			current = text;
 			publish();
 		},
 		clear() {
@@ -235,11 +257,13 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 				validateRolePurpose(params.role, params.purpose);
 				const config = loadConfig(ctx.cwd);
 				const label = `${params.role}${params.round ? `-round-${params.round}` : ""}`;
-				const outputArtifactPath = params.outputFile ? resolveArtifactPath(runDir, params.outputFile) : undefined;
-				const task = `${params.task}
+				const taskInput = requireNonEmpty(params.task, "role task");
+				const outputFile = params.outputFile?.trim();
+				const outputArtifactPath = outputFile ? validateOutputArtifactPath(runDir, outputFile) : undefined;
+				const task = `${taskInput}
 
 Run directory: ${runDir}
-Expected output artifact: ${params.outputFile ?? `${label}.md`}
+Expected output artifact: ${outputFile ?? `${label}.md`}
 Purpose: ${params.purpose}`;
 				writeArtifact(runDir, `delegations/${label}-${Date.now()}.md`, task);
 				const progress = createSubagentProgress({ onToolUpdate: onUpdate });
@@ -261,8 +285,9 @@ Purpose: ${params.purpose}`;
 					persistState();
 					throw new Error(childResultText(`${params.role} failed`, result));
 				}
-				if (params.outputFile && outputArtifactPath && !fs.existsSync(outputArtifactPath)) {
-					copyArtifactFile(runDir, result.outputPath, outputArtifactPath);
+				if (outputFile && outputArtifactPath) {
+					validateOutputArtifactPath(runDir, outputFile);
+					if (!fs.existsSync(outputArtifactPath)) copyArtifactFile(runDir, result.outputPath, outputArtifactPath);
 				}
 
 				if (succeeded && params.role === "worker" && (params.purpose === "implementation" || params.purpose === "fix" || params.purpose === "validation")) {
@@ -292,8 +317,9 @@ Purpose: ${params.purpose}`;
 			executionMode: "sequential",
 			parameters: MarkReviewCleanParams,
 			async execute(_id, params: MarkReviewCleanParamsType) {
+				const summary = requireNonEmpty(params.summary, "clean review summary");
 				latestWorkerRunReviewedClean = true;
-				const pathName = writeArtifact(runDir, `review-clean-${params.round ?? reviewRuns}.md`, `# Clean Review Mark\n\nRound: ${params.round ?? reviewRuns}\n\n${params.summary}\n`);
+				const pathName = writeArtifact(runDir, `review-clean-${params.round ?? reviewRuns}.md`, `# Clean Review Mark\n\nRound: ${params.round ?? reviewRuns}\n\n${summary}\n`);
 				const statePath = persistState();
 				return { content: [{ type: "text", text: `Marked latest worker changes as cleanly reviewed. Artifact: ${pathName}` }], details: { latestWorkerRunReviewedClean, path: pathName, statePath, workerRuns, reviewRuns, reviewRunsSinceLatestWorker } };
 			},
@@ -341,7 +367,7 @@ Purpose: ${params.purpose}`;
 			promptGuidelines: ["Use write_run_artifact for scout, worker, reviewer, and orchestrator handoff files instead of writing project files."],
 			parameters: ArtifactParams,
 			async execute(_id, params: ArtifactParamsType) {
-				const target = writeArtifact(runDir, params.path, params.content);
+				const target = writeArtifact(runDir, requireNonEmpty(params.path, "artifact path"), params.content);
 				return { content: [{ type: "text", text: `Wrote artifact: ${target}` }], details: { path: target } };
 			},
 		});
@@ -467,7 +493,10 @@ Purpose: ${params.purpose}`;
 				let tasks: ParallelWorkersParamsType["tasks"];
 				try {
 					tasks = rawTasks.map((item, index) => {
-						if (typeof item === "string") return { name: `worker-${index + 1}`, task: item };
+						if (typeof item === "string") {
+							if (item.trim() === "") throw new Error(`Invalid task at index ${index}: task must be a non-empty string`);
+							return { name: `worker-${index + 1}`, task: item };
+						}
 						if (typeof item !== "object" || item === null) throw new Error(`Invalid task at index ${index}: expected string or object`);
 						const raw = item as { name?: unknown; task?: unknown; purpose?: unknown; outputFile?: unknown };
 						if (typeof raw.task !== "string" || raw.task.trim() === "") throw new Error(`Invalid task at index ${index}: task must be a non-empty string`);

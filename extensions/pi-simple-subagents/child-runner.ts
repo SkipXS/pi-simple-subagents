@@ -52,6 +52,7 @@ function isFailedStopReason(stopReason: string | undefined): boolean {
 }
 
 const STATUS_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const STATUS_UPDATE_INTERVAL_MS = 1000;
 
 interface UsageTotals {
 	input: number;
@@ -305,6 +306,7 @@ export async function spawnPiRole(input: {
 		let statusFrame = 0;
 		let statusAction = "starting";
 		let lastStatusText = "";
+		let lastStatusEmitAt = 0;
 		let settled = false;
 		let aborted = false;
 		let timedOut = false;
@@ -312,20 +314,27 @@ export async function spawnPiRole(input: {
 		let artifactErrorMessage: string | undefined;
 		const transcriptCap = { bytes: 0, capped: false };
 		const stderrCap = { bytes: 0, capped: false };
-		const emitStatus = () => {
-			if (!input.onStatus) return;
+		const formatStatusText = (action = statusAction) => {
 			const frame = STATUS_SPINNER_FRAMES[statusFrame++ % STATUS_SPINNER_FRAMES.length];
 			const metrics = statusMetrics(usageTotals, childModel, roleConfig.thinking);
-			const text = `${frame} ${statusLabel}: ${statusAction}${metrics ? `  ${metrics}` : ""}`;
+			return `${frame} ${statusLabel}: ${metrics ? `${metrics} - ${action}` : action}`;
+		};
+		const emitStatus = (options: { force?: boolean; action?: string } = {}) => {
+			if (!input.onStatus) return;
+			const text = formatStatusText(options.action);
+			const now = Date.now();
+			if (!options.force && text === lastStatusText) return;
+			if (!options.force && now - lastStatusEmitAt < STATUS_UPDATE_INTERVAL_MS) return;
 			lastStatusText = text;
+			lastStatusEmitAt = now;
 			input.onStatus({ key: statusKey, text });
 		};
 		const setStatusAction = (action: string) => {
 			statusAction = action;
 			emitStatus();
 		};
-		emitStatus();
-		const statusTimer = input.onStatus ? setInterval(emitStatus, 120) : undefined;
+		emitStatus({ force: true });
+		const statusTimer = input.onStatus ? setInterval(emitStatus, STATUS_UPDATE_INTERVAL_MS) : undefined;
 		(statusTimer as { unref?: () => void } | undefined)?.unref?.();
 		const rememberArtifactError = (context: string, error: unknown) => {
 			if (artifactErrorMessage) return;
@@ -424,7 +433,7 @@ export async function spawnPiRole(input: {
 			if (settled) return;
 			settled = true;
 			if (statusTimer) clearInterval(statusTimer);
-			input.onStatus?.({ key: statusKey, text: undefined });
+			input.onStatus?.({ key: statusKey, text: formatStatusText("finished") });
 			if (timeoutTimer) clearTimeout(timeoutTimer);
 			if (input.signal) input.signal.removeEventListener("abort", onAbort);
 			buffer += stdoutDecoder.end();

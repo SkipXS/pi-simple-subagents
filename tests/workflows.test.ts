@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import * as childProcess from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -7,7 +8,7 @@ import { pathToFileURL } from "node:url";
 import { getPiInvocation, quoteAtReferencePath, shouldForwardCurrentExtension, spawnPiRole, wasLoadedWithExtensionFlag, type ChildRunResult } from "../extensions/pi-simple-subagents/child-runner.ts";
 import { DEFAULT_CONFIG, type Config } from "../extensions/pi-simple-subagents/config.ts";
 import orchestratorAgentsExtension from "../extensions/pi-simple-subagents/index.ts";
-import { runParallelWorkers, runReviewTarget, parseReviewTargetCommand } from "../extensions/pi-simple-subagents/workflows.ts";
+import { runParallelWorkers, runReviewTarget, runWorkerAgent, parseReviewTargetCommand } from "../extensions/pi-simple-subagents/workflows.ts";
 
 function tempProject(): string {
 	return fs.mkdtempSync(path.join(os.tmpdir(), "pi-simple-subagents-test-"));
@@ -118,6 +119,29 @@ test("package pi.extensions manifest points at loadable extension modules", asyn
 	}
 });
 
+test("package tarball dry-run contains only release files", () => {
+	const output = childProcess.execSync("npm pack --dry-run --json --ignore-scripts", { cwd: process.cwd(), encoding: "utf8", shell: process.platform === "win32" ? "cmd.exe" : undefined });
+	const pack = (JSON.parse(output) as Array<{ files: Array<{ path: string }> }>)[0];
+	const files = pack.files.map((file) => file.path).sort();
+	assert.deepEqual(files, [
+		"LICENSE",
+		"README.md",
+		"examples/config.json",
+		"extensions/pi-simple-subagents/artifacts.ts",
+		"extensions/pi-simple-subagents/child-runner.ts",
+		"extensions/pi-simple-subagents/config.ts",
+		"extensions/pi-simple-subagents/index.ts",
+		"extensions/pi-simple-subagents/prompts.ts",
+		"extensions/pi-simple-subagents/references.ts",
+		"extensions/pi-simple-subagents/roles.ts",
+		"extensions/pi-simple-subagents/schemas.ts",
+		"extensions/pi-simple-subagents/state.ts",
+		"extensions/pi-simple-subagents/text.ts",
+		"extensions/pi-simple-subagents/workflows.ts",
+		"package.json",
+	].sort());
+});
+
 test("child runs report timeout accurately", async () => {
 	const cwd = tempProject();
 	const runDir = path.join(cwd, ".pi", "run");
@@ -147,9 +171,9 @@ console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", 
 
 	assert.equal(result.exitCode, 0);
 	assert.equal(statuses.at(-1)?.key, "subagent:test-worker");
-	assert.equal(statuses.at(-1)?.text, undefined);
-	assert.equal(statuses.some((status) => /test-worker: bash npm test/.test(status.text ?? "")), true);
-	assert.equal(statuses.some((status) => /↑1\.0k ↓2\.0k R3\.0k W4\.0k \$0\.123 3\.7%\/272k \(auto\) - gpt-5\.5 • medium/.test(status.text ?? "")), true);
+	assert.match(statuses.at(-1)?.text ?? "", /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] test-worker: ↑1\.0k ↓2\.0k R3\.0k W4\.0k \$0\.123 .* - finished$/u);
+	assert.equal(statuses.some((status) => /↑1\.0k ↓2\.0k R3\.0k W4\.0k \$0\.123 3\.7%\/272k \(auto\) - gpt-5\.5 • medium - finished/.test(status.text ?? "")), true);
+	assert.equal(statuses.some((status) => /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] /u.test(status.text ?? "")), true);
 });
 
 test("parallel workers abort and await siblings after a child setup/spawn failure", async () => {
@@ -210,6 +234,20 @@ test("review target caps custom reviewer fanout", async () => {
 	}), /at most 8 reviewers/);
 });
 
+test("worker outputFile validates reserved paths before spawning", async () => {
+	const cwd = tempProject();
+	const config = cloneConfig();
+	let spawned = false;
+	await assert.rejects(() => runWorkerAgent(cwd, { task: "inline task", outputFile: "logs" }, undefined, undefined, {
+		loadConfig: () => config,
+		async spawnPiRole(input) {
+			spawned = true;
+			return fakeResult(input.role, input.runDir);
+		},
+	}), /reserved run directory/);
+	assert.equal(spawned, false);
+});
+
 test("/work-parallel validates object fields before running", async () => {
 	const oldRole = process.env.PI_ORCHESTRATOR_AGENT_ROLE;
 	const oldRunDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
@@ -221,6 +259,9 @@ test("/work-parallel validates object fields before running", async () => {
 		const notifications: string[] = [];
 		await handler?.('[{"task":"ok"},{"task":"bad","purpose":"review"}]', { cwd: tempProject(), signal: new AbortController().signal, ui: { notify: (message) => notifications.push(message), setStatus() {} } });
 		assert.match(notifications.join("\n"), /purpose must be implementation, fix, or validation/);
+		notifications.length = 0;
+		await handler?.('["ok","   "]', { cwd: tempProject(), signal: new AbortController().signal, ui: { notify: (message) => notifications.push(message), setStatus() {} } });
+		assert.match(notifications.join("\n"), /task must be a non-empty string/);
 	} finally {
 		if (oldRole === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_ROLE;
 		else process.env.PI_ORCHESTRATOR_AGENT_ROLE = oldRole;

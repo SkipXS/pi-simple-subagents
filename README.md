@@ -115,9 +115,10 @@ or let the model call `run_parallel_workers` with `tasks: [{ name?, task, purpos
 Review fanout for an existing target:
 
 ```text
-/review @extensions/pi-simple-subagents/index.ts runtime bugs, security, packaging, UX
+/review @extensions/pi-simple-subagents/index.ts focus on runtime bugs, security, packaging, and UX
 ```
 
+The text after the target is treated as focus/instructions. Use explicit `--reviewer` options when you want custom reviewer angles.
 
 The slash command also accepts a small option prefix before the target:
 
@@ -145,7 +146,7 @@ Pi is intentionally YOLO by default, and this extension follows that model for r
 
 - Role runs do not pass a restrictive `--tools` allowlist; every role gets the normal inherited Pi tool surface.
 - Child runs have a configurable extension timeout (`children.timeoutMs`, default 30 minutes; set `0` to disable). Timeout kills the child process tree where supported and marks `timedOut` in results.
-- Child runs normally discover Pi from the installed `@earendil-works/pi-coding-agent` package `bin`. If your install layout is unusual, set `PI_SIMPLE_SUBAGENTS_PI_CLI=/absolute/path/to/pi` (or `pi.cmd` on Windows) or configure `children.piCliPath`; the environment variable wins.
+- Child runs normally discover Pi from the installed `@earendil-works/pi-coding-agent` package `bin`. If your install layout is unusual, set `PI_SIMPLE_SUBAGENTS_PI_CLI=/absolute/path/to/pi` (or `pi.cmd` on Windows) or configure `children.piCliPath` in the global config; the environment variable wins. Project config may not set `children.piCliPath` because it is executable trust.
 - Child stdout/stderr/transcript artifacts are capped to avoid unbounded disk/context growth; chat previews remain separately truncated.
 - Plan/target/task `@` file references default to project-local, non-binary, and at most 1 MiB. Configure `references.allowOutsideCwd`, `references.allowBinary`, and `references.maxFileBytes` when you intentionally need broader access.
 - Artifact writes are constrained to the run directory and refuse/fence link-based append/write/copy surprises.
@@ -156,7 +157,7 @@ Pi is intentionally YOLO by default, and this extension follows that model for r
 
 Unknown config keys are rejected during config loading so typos are visible instead of silently ignored. Before `1.0`, obsolete/legacy config fields are not carried forward; remove them instead of relying on compatibility shims.
 
-This policy is not a confidentiality boundary or OS/container sandbox. Run this extension only on trusted projects or inside an external sandbox when agents may execute untrusted code, access secrets, or run generated scripts. If child CLI discovery fails, set `PI_SIMPLE_SUBAGENTS_PI_CLI=/absolute/path/to/pi` or `children.piCliPath`.
+This policy is not a confidentiality boundary or OS/container sandbox. Run this extension only on trusted projects or inside an external sandbox when agents may execute untrusted code, access secrets, or run generated scripts. If child CLI discovery fails, set `PI_SIMPLE_SUBAGENTS_PI_CLI=/absolute/path/to/pi` or set `children.piCliPath` in the global config.
 
 ## Compaction policy
 
@@ -193,7 +194,7 @@ Global defaults can live at:
 ~/.pi/agent/pi-simple-subagents/config.json
 ```
 
-Project config overrides global config. Unknown keys are treated as config errors to catch typos. Before `1.0`, legacy config fields are rejected rather than silently accepted; keep configs on the documented schema below.
+Project config overrides global config, except project config is not allowed to set `children.piCliPath` because that value is executed as a child process. Put CLI path overrides in `PI_SIMPLE_SUBAGENTS_PI_CLI` or the global config. Unknown keys are treated as config errors to catch typos. Before `1.0`, legacy config fields are rejected rather than silently accepted; keep configs on the documented schema below.
 
 Example with explicit YOLO defaults (all sections are optional; omit anything you do not want to override):
 
@@ -207,8 +208,7 @@ Example with explicit YOLO defaults (all sections are optional; omit anything yo
   },
   "children": {
     "forwardCurrentExtension": "auto",
-    "timeoutMs": 1800000,
-    "piCliPath": "/optional/path/to/pi-or-pi.cmd"
+    "timeoutMs": 1800000
   },
   "references": {
     "maxFileBytes": 1048576,
@@ -229,11 +229,11 @@ Config reference:
 | `roles.<role>.thinking` | role-specific | Thinking suffix: `off`, `minimal`, `low`, `medium`, `high`, or `xhigh`. |
 | `children.forwardCurrentExtension` | `"auto"` | `"auto"` forwards this extension to child runs when the parent Pi process was started with `-e/--extension`; `"always"` always adds `--extension <this-extension>`; `"never"` never does. This helps temporary extension loading expose `write_run_artifact` and `compact_session` to child roles. |
 | `children.timeoutMs` | `1800000` | Child run timeout in milliseconds. Use `0` to disable. Timed-out runs return `timedOut: true` and exit code `124`. |
-| `children.piCliPath` | unset | Optional Pi CLI command/path override. `PI_SIMPLE_SUBAGENTS_PI_CLI` environment variable takes precedence. Useful for unusual global installs, Windows, and troubleshooting CLI discovery. |
+| `children.piCliPath` | unset | Optional Pi CLI command/path override, allowed only in the global config. `PI_SIMPLE_SUBAGENTS_PI_CLI` environment variable takes precedence. Useful for unusual global installs, Windows, and troubleshooting CLI discovery. Do not accept this value from untrusted repos; it is executable trust. |
 | `references.maxFileBytes` | `1048576` | Maximum bytes read from an `@file` reference. Larger files are truncated with a warning. Use `0` to disable truncation. |
 | `references.allowOutsideCwd` | `false` | Allow `@` references outside the current project directory. Keep `false` to reduce accidental secret exposure. |
 | `references.allowBinary` | `false` | Allow binary-looking `@` files to be decoded as UTF-8. |
-| `artifacts.baseDir` | `.pi/agent-runs` | Directory for run artifacts. Relative paths resolve under the current project. |
+| `artifacts.baseDir` | `.pi/agent-runs` | Directory for run artifacts. Relative paths resolve under the current project. The base path and existing parent components must not be symlinks/junctions. |
 
 ## Source layout
 
@@ -309,18 +309,16 @@ Review-target runs create:
   tasks/
 ```
 
-Child transcripts, stderr logs, referenced input files, reference warnings, and final outputs are stored under the run directory subject to artifact caps for runaway output. Tool-return previews may still be more concise for chat readability. `artifacts.baseDir` may be inside or outside the current project; keep the artifact directory ignored/private when targets may contain sensitive data.
+Child transcripts, stderr logs, referenced input files, reference warnings, and final outputs are stored under the run directory subject to artifact caps for runaway output. Tool-return previews may still be more concise for chat readability. `artifacts.baseDir` may be inside or outside the current project, but symlinked/junction base paths are rejected to avoid surprising writes elsewhere. Keep the artifact directory ignored/private when targets may contain sensitive data.
 
 ## Subagent status display
 
-While child agents run in interactive Pi, tool calls stream a stable multi-line progress block into the tool-call window. Slash commands (`/orchestrate`, `/work`, `/work-parallel`, `/review`) show the same progress as a below-editor widget instead of using the footer, so long activity lines do not make the footer jump. The subagent list keeps the spinner and compact usage/model information when available; the frequently changing activity is shown at the end:
+While child agents run in interactive Pi, tool calls stream a stable multi-line progress block into the tool-call window. Slash commands (`/orchestrate`, `/work`, `/work-parallel`, `/review`) show the same progress as a below-editor widget instead of using the footer, so long activity lines do not make the footer jump. The subagent list updates at a calmer cadence and aligns the spinner/role column plus the compact usage/model status column; only the trailing activity text varies. Finished roles keep their final usage information:
 
 ```text
 Subagents:
-- ⠋ worker: ↑1.0k ↓2.0k R3.0k W4.0k $0.123 3.7%/272k (auto) - gpt-5.5 • medium
-- ⠙ reviewer-1: ↑867 ↓103 R31k $0.023 11.8%/272k (auto) - gpt-5.5 • high
-
-Current: reviewer-1: read references.ts
+- ⠋ worker    : ↑1k ↓2k R3k W4.0k $0.123 3.7%/272k (auto) - gpt-5.5 • medium - finished
+- ⠙ reviewer-1: ↑867 ↓103 R31k $0.023 11.8%/272k (auto) - gpt-5.5 • high   - read references.ts
 ```
 
 The context percentage is estimated from the latest child response token total and known model-family context windows; child processes do not currently expose Pi's exact parent footer context calculation.

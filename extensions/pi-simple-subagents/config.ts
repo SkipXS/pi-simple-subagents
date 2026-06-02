@@ -129,7 +129,7 @@ function rejectUnknownKeys(object: Record<string, unknown>, source: string, path
 	if (unknown.length > 0) throw configError(source, `${pathName} contains unknown key${unknown.length === 1 ? "" : "s"}: ${unknown.join(", ")}`);
 }
 
-function mergeConfig(base: Config, override: unknown, source = "unknown"): Config {
+function mergeConfig(base: Config, override: unknown, source = "unknown", options: { allowPiCliPath?: boolean } = {}): Config {
 	if (override === undefined) return cloneConfig(base);
 	const overrideObject = expectObject(override, source, "root");
 	rejectUnknownKeys(overrideObject, source, "root", ["roles", "children", "references", "artifacts"]);
@@ -154,7 +154,10 @@ function mergeConfig(base: Config, override: unknown, source = "unknown"): Confi
 		rejectUnknownKeys(children, source, "children", ["forwardCurrentExtension", "timeoutMs", "piCliPath"]);
 		if (children.forwardCurrentExtension !== undefined) next.children.forwardCurrentExtension = expectExtensionForwardMode(children.forwardCurrentExtension, source, "children.forwardCurrentExtension");
 		if (children.timeoutMs !== undefined) next.children.timeoutMs = expectNonNegativeInteger(children.timeoutMs, source, "children.timeoutMs");
-		if (children.piCliPath !== undefined) next.children.piCliPath = expectString(children.piCliPath, source, "children.piCliPath");
+		if (children.piCliPath !== undefined) {
+			if (!options.allowPiCliPath) throw configError(source, "children.piCliPath is only allowed in the global config; use PI_SIMPLE_SUBAGENTS_PI_CLI for per-project/testing overrides");
+			next.children.piCliPath = expectString(children.piCliPath, source, "children.piCliPath");
+		}
 	}
 
 	if (overrideObject.references !== undefined) {
@@ -188,7 +191,7 @@ export function loadConfig(cwd: string): Config {
 	const globalConfigPath = path.join(os.homedir(), ".pi", "agent", "pi-simple-subagents", "config.json");
 	const projectConfigPath = path.join(cwd, ".pi", "pi-simple-subagents", "config.json");
 	let config = cloneConfig(DEFAULT_CONFIG);
-	config = mergeConfig(config, readJsonIfExists(globalConfigPath), globalConfigPath);
+	config = mergeConfig(config, readJsonIfExists(globalConfigPath), globalConfigPath, { allowPiCliPath: true });
 	config = mergeConfig(config, readJsonIfExists(projectConfigPath), projectConfigPath);
 	return config;
 }

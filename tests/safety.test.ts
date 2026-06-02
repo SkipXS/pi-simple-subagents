@@ -6,7 +6,7 @@ import * as path from "node:path";
 import { loadConfig } from "../extensions/pi-simple-subagents/config.ts";
 import { readReference } from "../extensions/pi-simple-subagents/references.ts";
 import { validateRolePurpose } from "../extensions/pi-simple-subagents/roles.ts";
-import { appendArtifactFile, copyArtifactFile, writeArtifact } from "../extensions/pi-simple-subagents/artifacts.ts";
+import { appendArtifactFile, copyArtifactFile, resolveRoleSessionFile, resolveRunBaseDir, validateOutputArtifactPath, writeArtifact } from "../extensions/pi-simple-subagents/artifacts.ts";
 import { readOrchestrationState } from "../extensions/pi-simple-subagents/state.ts";
 
 function tempProject(): string {
@@ -64,6 +64,9 @@ test("guardrail config keys are parsed and pre-1.0 legacy keys are not accepted"
 
 	fs.writeFileSync(configPath, JSON.stringify({ children: { inheritSkills: false } }), "utf8");
 	assert.throws(() => loadConfig(cwd), /children contains unknown key: inheritSkills/);
+
+	fs.writeFileSync(configPath, JSON.stringify({ children: { piCliPath: "/tmp/pi" } }), "utf8");
+	assert.throws(() => loadConfig(cwd), /piCliPath is only allowed in the global config/);
 });
 
 test("config rejects unknown keys so typos are visible", () => {
@@ -157,6 +160,50 @@ test("artifact writes do not follow existing links outside the run dir", () => {
 	copyArtifactFile(runDir, outside, hardlink);
 	assert.equal(fs.readFileSync(outside, "utf8"), "copy-source");
 	assert.equal(fs.readFileSync(hardlink, "utf8"), "copy-source");
+});
+
+test("child session files reject existing hard links and non-files", () => {
+	const runDir = tempProject();
+	const outside = path.join(tempProject(), "outside-session.jsonl");
+	fs.writeFileSync(outside, "outside", "utf8");
+	fs.mkdirSync(path.join(runDir, "sessions"), { recursive: true });
+	fs.linkSync(outside, path.join(runDir, "sessions", "worker.jsonl"));
+
+	assert.throws(() => resolveRoleSessionFile(runDir, "worker"), /multiple hard links/);
+	assert.equal(fs.readFileSync(outside, "utf8"), "outside");
+
+	fs.rmSync(path.join(runDir, "sessions", "worker.jsonl"), { force: true });
+	fs.mkdirSync(path.join(runDir, "sessions", "worker.jsonl"));
+	assert.throws(() => resolveRoleSessionFile(runDir, "worker"), /not a regular file/);
+});
+
+test("output artifact targets reject reserved dirs, directories, and hard links", () => {
+	const runDir = tempProject();
+	assert.throws(() => validateOutputArtifactPath(runDir, "/tmp/report.md"), /relative to the run dir/);
+	assert.throws(() => validateOutputArtifactPath(runDir, "logs"), /reserved run directory/);
+	assert.throws(() => validateOutputArtifactPath(runDir, "sessions/worker-report.md"), /reserved run directory/);
+	fs.mkdirSync(path.join(runDir, "report.md"));
+	assert.throws(() => validateOutputArtifactPath(runDir, "report.md"), /not a regular file/);
+
+	const outside = path.join(tempProject(), "outside-report.md");
+	fs.writeFileSync(outside, "outside", "utf8");
+	const hardlink = path.join(runDir, "linked-report.md");
+	fs.linkSync(outside, hardlink);
+	assert.throws(() => validateOutputArtifactPath(runDir, "linked-report.md"), /multiple hard links/);
+});
+
+test("artifact base dir rejects symlinks and junctions", (t) => {
+	const cwd = tempProject();
+	const outside = tempProject();
+	const piDir = path.join(cwd, ".pi");
+	try {
+		fs.symlinkSync(outside, piDir, process.platform === "win32" ? "junction" : "dir");
+	} catch (error) {
+		t.skip(`symlink/junction creation unavailable: ${error instanceof Error ? error.message : String(error)}`);
+		return;
+	}
+	const config = loadConfig(cwd);
+	assert.throws(() => resolveRunBaseDir(cwd, config), /symbolic link|junction/);
 });
 
 test("role and purpose combinations are validated", () => {

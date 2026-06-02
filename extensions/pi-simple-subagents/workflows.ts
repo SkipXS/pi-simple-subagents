@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { copyArtifactFile, ensureDir, resolveArtifactPath, resolveRunBaseDir, runId, writeArtifact } from "./artifacts.ts";
+import { copyArtifactFile, ensureDir, resolveArtifactPath, resolveRunBaseDir, runId, validateOutputArtifactPath, writeArtifact } from "./artifacts.ts";
 import { childResultText, spawnPiRole, throwChildRunError, type ChildRunResult, type ChildStatusUpdate } from "./child-runner.ts";
 import { loadConfig } from "./config.ts";
 import { reviewTargetSystemPrompt } from "./prompts.ts";
@@ -90,6 +90,12 @@ function forwardChildStatus(onUpdate: WorkflowUpdate | undefined): (status: Chil
 	return (status) => onUpdate?.("", status);
 }
 
+function requireNonEmpty(value: string, label: string): string {
+	const trimmed = value.trim();
+	if (!trimmed) throw new Error(`${label} must be a non-empty string`);
+	return trimmed;
+}
+
 export function parseReviewTargetCommand(input: string): ReviewTargetParams {
 	const trimmed = input.trim();
 	const tokens = tokenizeCommand(trimmed);
@@ -143,11 +149,12 @@ export function parseReviewTargetCommand(input: string): ReviewTargetParams {
 
 export async function runOrchestration(cwd: string, rawPlan: string, signal?: AbortSignal, onUpdate?: WorkflowUpdate, deps?: WorkflowDeps): Promise<{ result: ChildRunResult; runDir: string; planSource: string }> {
 	const dep = workflowDeps(deps);
+	const planInput = requireNonEmpty(rawPlan, "orchestration plan");
 	const config = dep.loadConfig(cwd);
 	const baseDir = resolveRunBaseDir(cwd, config);
 	const dir = path.join(baseDir, runId());
 	ensureDir(dir);
-	const { planText, planSource, warnings } = dep.readPlanReference(cwd, rawPlan, config);
+	const { planText, planSource, warnings } = dep.readPlanReference(cwd, planInput, config);
 	writeArtifact(dir, "input-plan.md", `Source: ${planSource}${formatReferenceWarnings(warnings)}
 
 ${planText}
@@ -173,17 +180,21 @@ async function runWorkerInDir(cwd: string, dir: string, params: WorkerAgentParam
 	const dep = workflowDeps(deps);
 	const config = dep.loadConfig(cwd);
 	ensureDir(dir);
-	const workerTask = dep.readReference(cwd, params.task, "worker task", config, { allowDirectory: true });
+	const taskInput = requireNonEmpty(params.task, "worker task");
+	const workerTask = dep.readReference(cwd, taskInput, "worker task", config, { allowDirectory: true });
 	const purpose: WorkerPurpose = params.purpose ?? "implementation";
 	const outputFile = params.outputFile?.trim() || "worker-report.md";
-	const outputArtifactPath = resolveArtifactPath(dir, outputFile);
+	const outputArtifactPath = validateOutputArtifactPath(dir, outputFile);
 	const referenceWarningText = formatReferenceWarnings(workerTask.warnings);
 	const name = "name" in params && params.name?.trim() ? params.name.trim() : progressLabel;
 	writeArtifact(dir, "input-worker-task.md", `Source: ${workerTask.source}\nName: ${name}\nPurpose: ${purpose}\nExpected output artifact: ${outputFile}${referenceWarningText}\n\n${workerTask.text}\n`);
 	writeArtifact(dir, "config-effective.json", JSON.stringify(config, null, 2));
 	const task = `Worker task source: ${workerTask.source}\nName: ${name}\nPurpose: ${purpose}\nExpected output artifact: ${outputFile}${referenceWarningText}\nRun directory: ${dir}\nRead input-worker-task.md, perform the requested work, run useful checks, and write ${outputFile}. If running as part of a parallel worker batch, stay within the assigned task and avoid editing files likely owned by sibling workers. If a product, architecture, or scope decision is missing, stop and report it instead of guessing.`;
 	const result = await dep.spawnPiRole({ cwd, role: "worker", task, runDir: dir, config, signal, onUpdate: (text) => onUpdate?.(`${progressLabel}: ${text}`), onStatus: forwardChildStatus(onUpdate), statusKey: `subagent:${safePathLabel(progressLabel, "worker")}`, statusLabel: progressLabel });
-	if (result.exitCode === 0 && !dep.existsSync(outputArtifactPath)) dep.copyArtifactFile(dir, result.outputPath, outputArtifactPath);
+	if (result.exitCode === 0) {
+		validateOutputArtifactPath(dir, outputFile);
+		if (!dep.existsSync(outputArtifactPath)) dep.copyArtifactFile(dir, result.outputPath, outputArtifactPath);
+	}
 	return { name, runDir: dir, taskSource: workerTask.source, result: { ...result, outputPath: result.exitCode === 0 ? outputArtifactPath : result.outputPath }, outputArtifactPath, purpose };
 }
 
@@ -206,10 +217,10 @@ export async function runParallelWorkers(cwd: string, params: ParallelWorkersPar
 
 	// Validate references/output paths before spawning any children so setup errors do not leave siblings running.
 	for (const [index, task] of params.tasks.entries()) {
-		dep.readReference(cwd, task.task, `worker ${index + 1} task`, config, { allowDirectory: true });
+		dep.readReference(cwd, requireNonEmpty(task.task, `worker ${index + 1} task`), `worker ${index + 1} task`, config, { allowDirectory: true });
 		const label = safePathLabel(task.name, `worker-${index + 1}`);
 		const workerDir = path.join(dir, `${String(index + 1).padStart(2, "0")}-${label}`);
-		resolveArtifactPath(workerDir, task.outputFile?.trim() || "worker-report.md");
+		validateOutputArtifactPath(workerDir, task.outputFile?.trim() || "worker-report.md");
 	}
 
 	ensureDir(dir);
@@ -255,11 +266,11 @@ export async function runReviewTarget(cwd: string, params: ReviewTargetParams, s
 	const baseDir = resolveRunBaseDir(cwd, config);
 	const dir = path.join(baseDir, runId());
 	ensureDir(dir);
-	const target = dep.readReference(cwd, params.target, "review target", config, { allowDirectory: true });
+	const target = dep.readReference(cwd, requireNonEmpty(params.target, "review target"), "review target", config, { allowDirectory: true });
 	const focus = params.focus?.trim() || "runtime bugs, security boundaries, API/UX, packaging, and maintainability";
 	const referenceWarningText = formatReferenceWarnings(target.warnings);
 	if (params.reviewers && params.reviewers.length > MAX_REVIEW_TARGET_REVIEWERS) throw new Error(`review_target supports at most ${MAX_REVIEW_TARGET_REVIEWERS} reviewers`);
-	const reviewers = params.reviewers && params.reviewers.length > 0 ? params.reviewers : [...DEFAULT_REVIEW_ANGLES];
+	const reviewers = params.reviewers && params.reviewers.length > 0 ? params.reviewers.map((reviewer, index) => requireNonEmpty(reviewer, `reviewer ${index + 1}`)) : [...DEFAULT_REVIEW_ANGLES];
 	writeArtifact(dir, "input-target.md", `Source: ${target.source}\nFocus: ${focus}${referenceWarningText}\n\n${target.text}\n`);
 	writeArtifact(dir, "config-effective.json", JSON.stringify(config, null, 2));
 

@@ -13,10 +13,28 @@ export function isPathInside(parent: string, child: string): boolean {
 	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
+function assertPathComponentsAreNotSymlinks(target: string): void {
+	const absoluteTarget = path.resolve(target);
+	const parsed = path.parse(absoluteTarget);
+	let current = parsed.root;
+	const relativeParts = path.relative(parsed.root, absoluteTarget).split(path.sep).filter(Boolean);
+	for (const part of relativeParts) {
+		current = path.join(current, part);
+		if (!fs.existsSync(current)) return;
+		const stat = fs.lstatSync(current);
+		if (stat.isSymbolicLink()) throw new Error(`Artifact base path is a symbolic link or junction: ${current}`);
+		if (!stat.isDirectory()) throw new Error(`Artifact base path component is not a directory: ${current}`);
+	}
+}
+
 export function resolveRunBaseDir(cwd: string, config: Config): string {
 	const base = config.artifacts.baseDir || ".pi/agent-runs";
 	const resolved = path.isAbsolute(base) ? path.resolve(base) : path.resolve(cwd, base);
+	if (path.isAbsolute(base)) assertPathComponentsAreNotSymlinks(resolved);
+	else assertExistingParentsAreNotSymlinks(path.resolve(cwd), path.join(resolved, ".base-probe"));
 	fs.mkdirSync(resolved, { recursive: true });
+	if (path.isAbsolute(base)) assertPathComponentsAreNotSymlinks(resolved);
+	else assertExistingParentsAreNotSymlinks(path.resolve(cwd), path.join(resolved, ".base-probe"));
 	return resolved;
 }
 
@@ -67,6 +85,33 @@ function ensureArtifactTarget(runDir: string, target: string): void {
 	fs.mkdirSync(path.dirname(absoluteTarget), { recursive: true });
 }
 
+const RESERVED_OUTPUT_ARTIFACT_DIRS = new Set(["delegations", "logs", "outputs", "prompts", "sessions", "tasks"]);
+
+export function validateOutputArtifactPath(runDir: string, name: string): string {
+	const trimmed = name.trim();
+	if (!trimmed) throw new Error("Output artifact path must be a non-empty file path");
+	if (path.isAbsolute(trimmed) || /^[/\\]/.test(trimmed)) throw new Error(`Output artifact path must be relative to the run dir: ${name}`);
+	const target = resolveArtifactPath(runDir, trimmed);
+	const relative = path.relative(path.resolve(runDir), target);
+	if (relative === "") throw new Error("Output artifact path must be a file path inside the run dir, not the run dir itself");
+	const firstPart = relative.split(path.sep).filter(Boolean)[0]?.toLowerCase();
+	if (firstPart && RESERVED_OUTPUT_ARTIFACT_DIRS.has(firstPart)) throw new Error(`Output artifact path uses reserved run directory: ${firstPart}`);
+	assertExistingParentsAreNotSymlinks(runDir, target);
+	assertNoExistingLink(target, "append");
+	return target;
+}
+
+function ensureArtifactFileForAppend(runDir: string, target: string): void {
+	ensureArtifactTarget(runDir, target);
+	assertNoExistingLink(target, "append");
+	try {
+		fs.writeFileSync(target, "", { encoding: "utf8", flag: "wx" });
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+		assertNoExistingLink(target, "append");
+	}
+}
+
 function atomicReplaceFile(target: string, contentOrSource: string, mode: "content" | "copy"): void {
 	const dir = path.dirname(target);
 	const temp = path.join(dir, `.tmp-${path.basename(target)}-${uniqueSuffix()}`);
@@ -107,6 +152,6 @@ export function uniqueSuffix(): string {
 export function resolveRoleSessionFile(runDir: string, role: RoleName): string {
 	const fileName = role === "worker" || role === "orchestrator" ? `sessions/${role}.jsonl` : `sessions/${role}-${uniqueSuffix()}.jsonl`;
 	const sessionFile = resolveArtifactPath(runDir, fileName);
-	ensureArtifactTarget(runDir, sessionFile);
+	ensureArtifactFileForAppend(runDir, sessionFile);
 	return sessionFile;
 }
