@@ -209,6 +209,33 @@ console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", 
 	assert.equal(statuses.some((status) => /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] /u.test(status.text ?? "")), true);
 });
 
+test("orchestrator child forwards nested run_role_agent subagent status", async () => {
+	const cwd = tempProject();
+	const runDir = path.join(cwd, ".pi", "run");
+	const cli = path.join(cwd, "fake-pi.js");
+	fs.writeFileSync(cli, `
+const args = { role: "worker", purpose: "implementation", task: "do work" };
+const progress = (text) => ({ details: { subagentProgress: { statuses: [{ key: "subagent:worker", text }] } } });
+const events = [
+	{ type: "message_start", message: { role: "assistant" } },
+	{ type: "tool_execution_start", toolName: "run_role_agent", args },
+	{ type: "tool_execution_update", toolName: "run_role_agent", args, partialResult: progress("⠋ worker: thinking") },
+	{ type: "tool_execution_update", toolName: "run_role_agent", args, partialResult: progress("⠙ worker: ↑1.0k - finished") },
+	{ type: "tool_execution_end", toolName: "run_role_agent", args, result: progress("⠹ worker: ↑1.0k - finished") },
+	{ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "orchestration done" }], stopReason: "stop" } },
+];
+for (const event of events) console.log(JSON.stringify(event));
+`, "utf8");
+	const config = cloneConfig();
+	config.children.piCliPath = cli;
+	const statuses: Array<{ key: string; text: string | undefined }> = [];
+	const result = await spawnPiRole({ cwd, role: "orchestrator", task: "nested status test", runDir, config, statusKey: "subagent:orchestrator", statusLabel: "orchestrator", onStatus: (status) => statuses.push(status) });
+
+	assert.equal(result.exitCode, 0);
+	assert.equal(statuses.some((status) => status.key === "subagent:worker" && /worker: .*finished/.test(status.text ?? "")), true);
+	assert.equal(statuses.some((status) => status.key === "subagent:orchestrator" && /run_role_agent worker\/implementation/.test(status.text ?? "")), true);
+});
+
 test("child status spinner updates faster than model status cadence", async () => {
 	const cwd = tempProject();
 	const runDir = path.join(cwd, ".pi", "run");

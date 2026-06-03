@@ -392,7 +392,7 @@ Child transcripts, stderr logs, referenced input files, reference warnings, and 
 
 ## Subagent status display
 
-While child agents run in interactive Pi, tool calls stream a stable multi-line progress block into the tool-call window. Slash commands (`/orchestrate`, `/work`, `/work-parallel`, `/review`) show the same progress as a below-editor widget instead of using the footer, so long activity lines do not make the footer jump. Only the header's working indicator animates quickly; role rows update their activity text at a calmer cadence and keep aligned role plus compact usage/model columns. Finished roles keep their final usage information:
+While child agents run in interactive Pi, tool calls stream a stable multi-line progress block into the tool-call window. Slash commands (`/orchestrate`, `/work`, `/work-parallel`, `/review`) show the same progress as a below-editor widget instead of using the footer, so long activity lines do not make the footer jump. When an orchestrator delegates via `run_role_agent`, nested scout/worker/reviewer progress is forwarded into the parent block so the user can see which subagent is running. Only the header's working indicator animates quickly; role rows update their activity text at a calmer cadence and keep aligned role plus compact usage/model columns. Finished roles keep their final usage information:
 
 ```text
 Subagents: ⠋ working

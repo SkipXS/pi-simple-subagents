@@ -82,11 +82,28 @@ function inferContextWindow(model: string | undefined): number | undefined {
 function compactArgs(value: unknown): string {
 	if (!value || typeof value !== "object") return "";
 	const record = value as Record<string, unknown>;
+	if (typeof record.role === "string" && record.role.trim()) {
+		const purpose = typeof record.purpose === "string" && record.purpose.trim() ? `/${record.purpose.trim()}` : "";
+		return `${record.role.trim()}${purpose}`;
+	}
 	for (const key of ["command", "path", "target", "task", "plan", "url"] as const) {
 		const raw = record[key];
 		if (typeof raw === "string" && raw.trim()) return raw.trim().replace(/\s+/g, " ").slice(0, 64);
 	}
 	return "";
+}
+
+function nestedSubagentStatuses(value: unknown): ChildStatusUpdate[] {
+	if (!value || typeof value !== "object") return [];
+	const root = value as Record<string, unknown>;
+	const details = root.details && typeof root.details === "object" ? root.details as Record<string, unknown> : undefined;
+	const progress = details?.subagentProgress && typeof details.subagentProgress === "object" ? details.subagentProgress as Record<string, unknown> : undefined;
+	const statuses = Array.isArray(progress?.statuses) ? progress.statuses : [];
+	return statuses.flatMap((entry) => {
+		if (!entry || typeof entry !== "object") return [];
+		const status = entry as Record<string, unknown>;
+		return typeof status.key === "string" && typeof status.text === "string" ? [{ key: status.key, text: status.text }] : [];
+	});
 }
 
 function messageUsage(message: unknown): { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens: number; cost: number } | undefined {
@@ -368,11 +385,13 @@ export async function spawnPiRole(input: {
 				const event = JSON.parse(line) as { type?: string; toolName?: string; args?: unknown; input?: unknown; partialResult?: unknown; result?: unknown; isError?: boolean; message?: { role?: string; content?: Array<{ type?: string; text?: unknown }>; stopReason?: unknown; errorMessage?: unknown; provider?: unknown; model?: unknown } };
 				if (event.type === "tool_execution_start") {
 					const detail = compactArgs(event.args ?? event.input);
-					setStatusAction(`${event.toolName ?? "tool"}${detail ? ` ${detail}` : ""}`);
+					setStatusAction(`${event.toolName ?? "tool"}${detail ? ` ${detail}` : ""}`, { force: event.toolName === "run_role_agent" });
 				} else if (event.type === "tool_execution_update") {
+					for (const nestedStatus of nestedSubagentStatuses(event.partialResult)) input.onStatus?.(nestedStatus);
 					const detail = compactArgs(event.args ?? event.input);
 					setStatusAction(`${event.toolName ?? "tool"}${detail ? ` ${detail}` : ""}`);
 				} else if (event.type === "tool_execution_end") {
+					for (const nestedStatus of nestedSubagentStatuses(event.result)) input.onStatus?.(nestedStatus);
 					setStatusAction(event.isError ? `${event.toolName ?? "tool"} failed` : `${event.toolName ?? "tool"} done`);
 				} else if (event.type === "message_start") {
 					setStatusAction("thinking");
