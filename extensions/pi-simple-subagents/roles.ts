@@ -1,19 +1,15 @@
-import { ROLE_RUN_PURPOSES } from "./constants.ts";
+import { ROLE_NAMES, ROLE_REGISTRY, type Purpose, type RoleName } from "./role-registry.ts";
 
 export const ROLE_ENV = "PI_ORCHESTRATOR_AGENT_ROLE";
 export const RUN_DIR_ENV = "PI_ORCHESTRATOR_AGENT_RUN_DIR";
 export const WORKER_RUNS_ENV = "PI_ORCHESTRATOR_AGENT_WORKER_RUNS";
 export const REVIEW_RUNS_ENV = "PI_ORCHESTRATOR_AGENT_REVIEW_RUNS";
 
-export const ROLE_NAMES = ["orchestrator", "scout", "worker", "reviewer", "synthesis"] as const;
-
-export type RoleName = typeof ROLE_NAMES[number];
-export type Purpose = typeof ROLE_RUN_PURPOSES[number];
+export { ROLE_NAMES, THINKING_LEVELS, type Purpose, type RoleName, type ThinkingLevel } from "./role-registry.ts";
 
 export const MAX_TOOL_OUTPUT_BYTES = 24 * 1024;
 export const MAX_STDERR_BYTES = 16 * 1024;
 export const MAX_PROGRESS_LINE_BYTES = 500;
-export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
 export const DEFAULT_REVIEW_ANGLES = [
 	"correctness, regressions, and runtime failures",
 	"security, role boundaries, and tool-policy bypasses",
@@ -34,12 +30,11 @@ export function parseRoleEnv(value: string | undefined): RoleName | undefined {
 	throw new Error(`Invalid ${ROLE_ENV}: ${value}. Expected one of: ${ROLE_NAMES.join(", ")}`);
 }
 
-export const ROLE_PURPOSES: Record<Exclude<RoleName, "orchestrator">, Set<Purpose>> = {
-	scout: new Set(["context"]),
-	worker: new Set(["implementation", "fix", "validation"]),
-	reviewer: new Set(["review"]),
-	synthesis: new Set(["review"]),
-};
+export const ROLE_PURPOSES = Object.fromEntries(
+	ROLE_NAMES
+		.filter((role) => role !== "orchestrator")
+		.map((role) => [role, new Set(ROLE_REGISTRY[role].allowedPurposes)]),
+) as Record<Exclude<RoleName, "orchestrator">, Set<Purpose>>;
 
 export function validateRolePurpose(role: Exclude<RoleName, "orchestrator">, purpose: Purpose): void {
 	if (!ROLE_PURPOSES[role].has(purpose)) {

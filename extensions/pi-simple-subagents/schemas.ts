@@ -1,9 +1,10 @@
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type, type Static } from "typebox";
 import { ROLE_RUN_PURPOSES, WORKER_PURPOSES } from "./constants.ts";
+import { DELEGABLE_ROLE_NAMES } from "./role-registry.ts";
 
 export const RoleRunParams = Type.Object({
-	role: StringEnum(["scout", "worker", "reviewer"] as const, { description: "Role to run inside an orchestration. Allowed purpose combinations: scout=context; worker=implementation/fix/validation; reviewer=review." }),
+	role: StringEnum(DELEGABLE_ROLE_NAMES, { description: "Role to run inside an orchestration. Allowed purpose combinations: scout=context; worker=implementation/fix/validation; reviewer=review." }),
 	purpose: StringEnum(ROLE_RUN_PURPOSES, { description: "Why this role is being run. Allowed combinations: scout=context; worker=implementation/fix/validation; reviewer=review. Use validation for final tests/end-user checks." }),
 	task: Type.String({ minLength: 1, description: "Concrete task for the role. Include artifact paths, expected output file, constraints, and relevant prior artifacts/context." }),
 	round: Type.Optional(Type.Integer({ minimum: 1, description: "Optional review/fix round number for artifact labels and status display." })),

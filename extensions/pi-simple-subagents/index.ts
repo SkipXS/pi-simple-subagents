@@ -32,6 +32,7 @@ import {
 	type ScoutAgentParams as ScoutAgentParamsType,
 	type WorkerAgentParams as WorkerAgentParamsType,
 } from "./schemas.ts";
+import { DELEGABLE_ROLE_NAMES } from "./role-registry.ts";
 import { readOrchestrationState, writeOrchestrationState } from "./state.ts";
 import { parseReviewTargetCommand, runOrchestration, runParallelWorkers, runReviewTarget, runScoutAgent, runWorkerAgent } from "./workflows.ts";
 
@@ -301,11 +302,12 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 	}
 
 	if (role === "orchestrator" && runDir) {
+		const delegableRoleText = DELEGABLE_ROLE_NAMES.join(", ");
 		pi.registerTool({
 			name: "run_role_agent",
 			label: "Run Role Agent",
-			description: "Run scout, worker, or reviewer for one concrete handoff task in the current orchestration run. YOLO by design: no file, time, validation, or snapshot guardrails are imposed. Calls are serialized so persistent child sessions are not shared concurrently.",
-			promptSnippet: "Delegate a concrete task to scout, worker, or reviewer within the current orchestration run",
+			description: `Run ${delegableRoleText} for one concrete handoff task in the current orchestration run. YOLO by design: no file, time, validation, or snapshot guardrails are imposed. Calls are serialized so persistent child sessions are not shared concurrently.`,
+			promptSnippet: `Delegate a concrete task to ${delegableRoleText} within the current orchestration run`,
 			promptGuidelines: [
 				"Use run_role_agent from orchestrator after deciding the next workflow step.",
 				"Use purpose=validation for final tests or end-user checks when useful; Pi YOLO policy applies.",

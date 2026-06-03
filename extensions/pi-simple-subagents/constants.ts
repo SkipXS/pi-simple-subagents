@@ -1,5 +1,7 @@
-export const ROLE_RUN_PURPOSES = ["context", "implementation", "review", "fix", "validation"] as const;
-export const WORKER_PURPOSES = ["implementation", "fix", "validation"] as const;
+import { ROLE_PURPOSE_VALUES, WORKER_ROLE_PURPOSES } from "./role-registry.ts";
+
+export const ROLE_RUN_PURPOSES = ROLE_PURPOSE_VALUES;
+export const WORKER_PURPOSES = WORKER_ROLE_PURPOSES;
 
 export const DEFAULT_SCOUT_OUTPUT_FILE = "scout-report.md";
 export const DEFAULT_WORKER_OUTPUT_FILE = "worker-report.md";

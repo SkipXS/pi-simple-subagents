@@ -165,6 +165,7 @@ test("package tarball dry-run contains only release files", () => {
 		"extensions/pi-simple-subagents/index.ts",
 		"extensions/pi-simple-subagents/prompts.ts",
 		"extensions/pi-simple-subagents/references.ts",
+		"extensions/pi-simple-subagents/role-registry.ts",
 		"extensions/pi-simple-subagents/roles.ts",
 		"extensions/pi-simple-subagents/schemas.ts",
 		"extensions/pi-simple-subagents/state.ts",

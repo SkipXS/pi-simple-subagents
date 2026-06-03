@@ -1,10 +1,10 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { ROLE_METADATA, ROLE_NAMES, type RoleName } from "./role-registry.ts";
 import {
 	THINKING_LEVELS,
 	isObject,
-	type RoleName,
 } from "./roles.ts";
 
 export interface RoleConfig {
@@ -37,28 +37,7 @@ export interface Config {
 }
 
 export const DEFAULT_CONFIG: Config = {
-	roles: {
-		orchestrator: {
-			model: "openai-codex/gpt-5.5",
-			thinking: "medium",
-		},
-		scout: {
-			model: "openai-codex/gpt-5.3-codex-spark",
-			thinking: "medium",
-		},
-		worker: {
-			model: "openai-codex/gpt-5.5",
-			thinking: "medium",
-		},
-		reviewer: {
-			model: "openai-codex/gpt-5.5",
-			thinking: "low",
-		},
-		synthesis: {
-			model: "openai-codex/gpt-5.5",
-			thinking: "medium",
-		},
-	},
+	roles: Object.fromEntries(ROLE_METADATA.map((role) => [role.id, { ...role.defaultConfig }])) as Record<RoleName, RoleConfig>,
 	children: {
 		forwardCurrentExtension: "auto",
 		timeoutMs: 30 * 60 * 1000,
@@ -73,13 +52,7 @@ export const DEFAULT_CONFIG: Config = {
 
 function cloneConfig(config: Config): Config {
 	return {
-		roles: {
-			orchestrator: { ...config.roles.orchestrator },
-			scout: { ...config.roles.scout },
-			worker: { ...config.roles.worker },
-			reviewer: { ...config.roles.reviewer },
-			synthesis: { ...config.roles.synthesis },
-		},
+		roles: Object.fromEntries(ROLE_NAMES.map((role) => [role, { ...config.roles[role] }])) as Record<RoleName, RoleConfig>,
 		children: { ...config.children },
 		references: { ...config.references },
 		artifacts: { ...config.artifacts },
@@ -142,8 +115,8 @@ function mergeConfig(base: Config, override: unknown, source = "unknown", option
 
 	if (overrideObject.roles !== undefined) {
 		const roles = expectObject(overrideObject.roles, source, "roles");
-		rejectUnknownKeys(roles, source, "roles", ["orchestrator", "scout", "worker", "reviewer", "synthesis"]);
-		for (const role of ["orchestrator", "scout", "worker", "reviewer", "synthesis"] as const) {
+		rejectUnknownKeys(roles, source, "roles", ROLE_NAMES);
+		for (const role of ROLE_NAMES) {
 			if (roles[role] === undefined) continue;
 			const roleObject = expectObject(roles[role], source, `roles.${role}`);
 			rejectUnknownKeys(roleObject, source, `roles.${role}`, ["model", "thinking"]);

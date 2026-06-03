@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Config } from "./config.ts";
-import type { RoleName } from "./roles.ts";
+import { roleById, type RoleName } from "./role-registry.ts";
 
 export function runId(): string {
 	const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\..+/, "");
@@ -147,7 +147,7 @@ export function uniqueSuffix(): string {
 }
 
 export function resolveRoleSessionFile(runDir: string, role: RoleName): string {
-	const fileName = role === "worker" || role === "orchestrator" ? `sessions/${role}.jsonl` : `sessions/${role}-${uniqueSuffix()}.jsonl`;
+	const fileName = roleById(role).sessionStrategy === "persistent" ? `sessions/${role}.jsonl` : `sessions/${role}-${uniqueSuffix()}.jsonl`;
 	const sessionFile = resolveArtifactPath(runDir, fileName);
 	ensureArtifactFileForAppend(runDir, sessionFile);
 	return sessionFile;
