@@ -39,6 +39,23 @@ function fakeResult(role: ChildRunResult["role"], runDir: string): ChildRunResul
 	};
 }
 
+function expectedArtifactFromTask(task: string): string | undefined {
+	const explicit = /^Expected output artifact: (.+)$/m.exec(task)?.[1]?.trim();
+	if (explicit) return explicit;
+	return /write_run_artifact using path "([^"]+)"/.exec(task)?.[1];
+}
+
+function fakeCompliantResult(input: { role: ChildRunResult["role"]; runDir: string; task: string }): ChildRunResult {
+	const result = fakeResult(input.role, input.runDir);
+	const artifact = expectedArtifactFromTask(input.task);
+	if (artifact) {
+		const target = path.join(input.runDir, artifact);
+		fs.mkdirSync(path.dirname(target), { recursive: true });
+		fs.writeFileSync(target, `${input.role} artifact`, "utf8");
+	}
+	return result;
+}
+
 test("parseReviewTargetCommand preserves existing simple syntax", () => {
 	assert.deepEqual(parseReviewTargetCommand("@src/index.ts security focus"), {
 		target: "@src/index.ts",
@@ -282,7 +299,7 @@ test("parallel workers abort and await siblings after a child setup/spawn failur
 					resolve();
 				}, { once: true });
 			});
-			return fakeResult(input.role, input.runDir);
+			return fakeCompliantResult(input);
 		},
 	}), /spawn failed/);
 	assert.equal(secondWorkerAborted, true);
@@ -305,7 +322,7 @@ test("review target reviewers run in parallel and preserve result order", async 
 				await new Promise((resolve) => setTimeout(resolve, input.task.includes("angle: b") ? 80 : 10));
 				activeReviewers--;
 			}
-			return fakeResult(input.role, input.runDir);
+			return fakeCompliantResult(input);
 		},
 	});
 
@@ -326,7 +343,7 @@ test("review target writes and passes extra context to scout, reviewers, and syn
 		loadConfig: () => config,
 		async spawnPiRole(input) {
 			tasks.push(input.task);
-			return fakeResult(input.role, input.runDir);
+			return fakeCompliantResult(input);
 		},
 	});
 
@@ -381,8 +398,11 @@ test("review target rejects non-regular final summary artifact", async () => {
 	await assert.rejects(() => runReviewTarget(cwd, { target: "inline target", includeScout: false, reviewers: ["runtime bugs"] }, undefined, undefined, {
 		loadConfig: () => config,
 		async spawnPiRole(input) {
-			if (input.task.includes("Synthesize this review-only run")) fs.mkdirSync(path.join(input.runDir, "final-summary.md"), { recursive: true });
-			return fakeResult(input.role, input.runDir);
+			if (input.task.includes("Synthesize this review-only run")) {
+				fs.mkdirSync(path.join(input.runDir, "final-summary.md"), { recursive: true });
+				return fakeResult(input.role, input.runDir);
+			}
+			return fakeCompliantResult(input);
 		},
 	}), /not a regular file/);
 });
@@ -415,6 +435,20 @@ test("worker outputFile validates reserved paths before spawning", async () => {
 	assert.equal(spawned, false);
 });
 
+test("standalone roles fail when the expected artifact is missing", async () => {
+	const cwd = tempProject();
+	const config = cloneConfig();
+	config.artifacts.baseDir = ".pi/runs";
+	await assert.rejects(() => runScoutAgent(cwd, { task: "inline scout task", outputFile: "scout.md" }, undefined, undefined, {
+		loadConfig: () => config,
+		async spawnPiRole(input) {
+			fs.mkdirSync(path.join(input.runDir, "..", "wrong-place"), { recursive: true });
+			fs.writeFileSync(path.join(input.runDir, "..", "wrong-place", "scout.md"), "wrong path", "utf8");
+			return fakeResult(input.role, input.runDir);
+		},
+	}), /scout did not write the expected output artifact[\s\S]*Use write_run_artifact/);
+});
+
 test("parallel workers collect non-zero child exits without aborting siblings", async () => {
 	const cwd = tempProject();
 	const config = cloneConfig();
@@ -425,13 +459,13 @@ test("parallel workers collect non-zero child exits without aborting siblings", 
 		async spawnPiRole(input) {
 			if (input.task.includes("Name: fail")) return { ...fakeResult(input.role, input.runDir), exitCode: 2 };
 			secondSawAbort = input.signal?.aborted ?? false;
-			return fakeResult(input.role, input.runDir);
+			return fakeCompliantResult(input);
 		},
 	}), /Parallel workers failed: fail exit 2/);
 	assert.equal(secondSawAbort, false);
 });
 
-test("run_role_agent validates and materializes default output artifact", async () => {
+test("run_role_agent requires the default output artifact", async () => {
 	const oldRole = process.env.PI_ORCHESTRATOR_AGENT_ROLE;
 	const oldRunDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
 	const oldCli = process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
@@ -439,7 +473,14 @@ test("run_role_agent validates and materializes default output artifact", async 
 		const cwd = tempProject();
 		const runDir = path.join(cwd, ".pi", "run");
 		const cli = path.join(cwd, "fake-pi.js");
-		fs.writeFileSync(cli, `console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", provider: "fake", model: "fake-model", content: [{ type: "text", text: "child done" }], stopReason: "stop" } }));\n`, "utf8");
+		fs.writeFileSync(cli, `
+const fs = require("node:fs");
+const path = require("node:path");
+const runDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+fs.mkdirSync(runDir, { recursive: true });
+fs.writeFileSync(path.join(runDir, "worker.md"), "child done", "utf8");
+console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", provider: "fake", model: "fake-model", content: [{ type: "text", text: "child done" }], stopReason: "stop" } }));
+`, "utf8");
 		process.env.PI_ORCHESTRATOR_AGENT_ROLE = "orchestrator";
 		process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR = runDir;
 		process.env.PI_SIMPLE_SUBAGENTS_PI_CLI = cli;
@@ -451,6 +492,34 @@ test("run_role_agent validates and materializes default output artifact", async 
 		assert.equal(fs.existsSync(expected), true);
 		assert.equal(result.details.outputPath, expected);
 		assert.match(fs.readFileSync(expected, "utf8"), /child done/);
+	} finally {
+		if (oldRole === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+		else process.env.PI_ORCHESTRATOR_AGENT_ROLE = oldRole;
+		if (oldRunDir === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+		else process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR = oldRunDir;
+		if (oldCli === undefined) delete process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
+		else process.env.PI_SIMPLE_SUBAGENTS_PI_CLI = oldCli;
+	}
+});
+
+test("run_role_agent fails instead of copying child output when artifact is missing", async () => {
+	const oldRole = process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+	const oldRunDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+	const oldCli = process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
+	try {
+		const cwd = tempProject();
+		const runDir = path.join(cwd, ".pi", "run");
+		const cli = path.join(cwd, "fake-pi.js");
+		fs.writeFileSync(cli, `console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", provider: "fake", model: "fake-model", content: [{ type: "text", text: "child output only" }], stopReason: "stop" } }));\n`, "utf8");
+		process.env.PI_ORCHESTRATOR_AGENT_ROLE = "orchestrator";
+		process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR = runDir;
+		process.env.PI_SIMPLE_SUBAGENTS_PI_CLI = cli;
+		let runRole: { execute: (...args: any[]) => Promise<any> } | undefined;
+		orchestratorAgentsExtension({ registerTool: (tool: { name: string; execute: (...args: any[]) => Promise<any> }) => { if (tool.name === "run_role_agent") runRole = tool; }, registerCommand() {}, sendMessage() {} } as never);
+		assert.ok(runRole);
+		const tool = runRole;
+		await assert.rejects(() => tool.execute("id", { role: "worker", purpose: "implementation", task: "do work" }, new AbortController().signal, undefined, { cwd } as never), /worker did not write the expected output artifact[\s\S]*Use write_run_artifact/);
+		assert.equal(fs.existsSync(path.join(runDir, "worker.md")), false);
 	} finally {
 		if (oldRole === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_ROLE;
 		else process.env.PI_ORCHESTRATOR_AGENT_ROLE = oldRole;

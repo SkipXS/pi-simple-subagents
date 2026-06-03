@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { copyArtifactFile, ensureDir, resolveRunBaseDir, runId, validateOutputArtifactPath, writeArtifact } from "./artifacts.ts";
+import { ensureDir, resolveRunBaseDir, runId, validateOutputArtifactPath, writeArtifact } from "./artifacts.ts";
 import { childResultText, spawnPiRole, throwChildRunError, type ChildRunResult, type ChildStatusUpdate } from "./child-runner.ts";
 import { CONFIG_EFFECTIVE_FILE, DEFAULT_SCOUT_OUTPUT_FILE, DEFAULT_WORKER_OUTPUT_FILE, EXTRA_REVIEW_CONTEXT_FILE, FINAL_SUMMARY_FILE, INPUT_SCOUT_TASK_FILE, INPUT_TARGET_FILE, INPUT_WORKER_TASK_FILE, PARALLEL_WORKERS_FILE, PARALLEL_WORKERS_SUMMARY_FILE, REVIEW_FAILURE_SUMMARY_FILE, SCOUT_REVIEW_CONTEXT_FILE } from "./constants.ts";
 import { loadConfig } from "./config.ts";
@@ -16,7 +16,6 @@ export interface WorkflowDeps {
 	readPlanReference?: typeof readPlanReference;
 	readReference?: typeof readReference;
 	spawnPiRole?: typeof spawnPiRole;
-	copyArtifactFile?: typeof copyArtifactFile;
 	existsSync?: typeof fs.existsSync;
 }
 
@@ -27,7 +26,6 @@ const defaultWorkflowDeps: Required<WorkflowDeps> = {
 	readPlanReference,
 	readReference,
 	spawnPiRole,
-	copyArtifactFile,
 	existsSync: fs.existsSync,
 };
 
@@ -96,6 +94,14 @@ function requireNonEmpty(value: string, label: string): string {
 	const trimmed = value.trim();
 	if (!trimmed) throw new Error(`${label} must be a non-empty string`);
 	return trimmed;
+}
+
+function requireExpectedArtifact(dep: Required<WorkflowDeps>, runDir: string, outputFile: string, result: ChildRunResult, label: string): string {
+	const target = validateOutputArtifactPath(runDir, outputFile);
+	if (!dep.existsSync(target)) {
+		throw new Error(`${label} did not write the expected output artifact.\nExpected output artifact: ${outputFile}\nExpected path: ${target}\nRun dir: ${runDir}\nChild output log: ${result.outputPath}\nTranscript: ${result.transcriptPath}\nUse write_run_artifact with path ${JSON.stringify(outputFile)}; do not write artifacts via absolute paths or the generic write tool.`);
+	}
+	return validateOutputArtifactPath(runDir, outputFile);
 }
 
 function unknownOptionError(command: string, token: string): Error {
@@ -210,11 +216,10 @@ export async function runScoutAgent(cwd: string, params: ScoutAgentParams, signa
 	const referenceWarningText = formatReferenceWarnings(scoutTask.warnings);
 	writeArtifact(dir, INPUT_SCOUT_TASK_FILE, `Source: ${scoutTask.source}\nExpected output artifact: ${outputFile}${referenceWarningText}\n\n${scoutTask.text}\n`);
 	writeArtifact(dir, CONFIG_EFFECTIVE_FILE, JSON.stringify(config, null, 2));
-	const task = `Scout task source: ${scoutTask.source}\nExpected output artifact: ${outputFile}${referenceWarningText}\nRun directory: ${dir}\nRead input-scout-task.md, gather relevant context, inspect files directly when useful, and write ${outputFile}. Do not implement changes; produce a compact handoff for the parent agent.`;
+	const task = `Scout task source: ${scoutTask.source}\nExpected output artifact: ${outputFile}${referenceWarningText}\nRun directory: ${dir}\nRead input-scout-task.md, gather relevant context, inspect files directly when useful, and write the expected output artifact with write_run_artifact using path ${JSON.stringify(outputFile)}. Do not use absolute paths or the generic write tool for the handoff artifact. Do not implement changes; produce a compact handoff for the parent agent.`;
 	const result = await dep.spawnPiRole({ cwd, role: "scout", task, runDir: dir, config, signal, onUpdate: (text) => onUpdate?.(`scout: ${text}`), onStatus: forwardChildStatus(onUpdate), statusKey: "subagent:scout", statusLabel: "scout" });
 	if (result.exitCode !== 0) throwChildRunError("scout failed", result);
-	validateOutputArtifactPath(dir, outputFile);
-	if (!dep.existsSync(outputArtifactPath)) dep.copyArtifactFile(dir, result.outputPath, outputArtifactPath);
+	requireExpectedArtifact(dep, dir, outputFile, result, "scout");
 	return { runDir: dir, taskSource: scoutTask.source, result: { ...result, outputPath: outputArtifactPath }, outputArtifactPath };
 }
 
@@ -242,12 +247,9 @@ async function runWorkerInDir(cwd: string, dir: string, params: WorkerAgentParam
 	const name = "name" in params && params.name?.trim() ? params.name.trim() : progressLabel;
 	writeArtifact(dir, INPUT_WORKER_TASK_FILE, `Source: ${workerTask.source}\nName: ${name}\nPurpose: ${purpose}\nExpected output artifact: ${outputFile}${referenceWarningText}\n\n${workerTask.text}\n`);
 	writeArtifact(dir, CONFIG_EFFECTIVE_FILE, JSON.stringify(config, null, 2));
-	const task = `Worker task source: ${workerTask.source}\nName: ${name}\nPurpose: ${purpose}\nExpected output artifact: ${outputFile}${referenceWarningText}\nRun directory: ${dir}\nRead input-worker-task.md, perform the requested work, run useful checks, and write ${outputFile}. If running as part of a parallel worker batch, stay within the assigned task and avoid editing files likely owned by sibling workers. If a product, architecture, or scope decision is missing, stop and report it instead of guessing.`;
+	const task = `Worker task source: ${workerTask.source}\nName: ${name}\nPurpose: ${purpose}\nExpected output artifact: ${outputFile}${referenceWarningText}\nRun directory: ${dir}\nRead input-worker-task.md, perform the requested work, run useful checks, and write the expected output artifact with write_run_artifact using path ${JSON.stringify(outputFile)}. Do not use absolute paths or the generic write tool for the handoff artifact. If running as part of a parallel worker batch, stay within the assigned task and avoid editing files likely owned by sibling workers. If a product, architecture, or scope decision is missing, stop and report it instead of guessing.`;
 	const result = await dep.spawnPiRole({ cwd, role: "worker", task, runDir: dir, config, signal, onUpdate: (text) => onUpdate?.(`${progressLabel}: ${text}`), onStatus: forwardChildStatus(onUpdate), statusKey: `subagent:${safePathLabel(progressLabel, "worker")}`, statusLabel: progressLabel });
-	if (result.exitCode === 0) {
-		validateOutputArtifactPath(dir, outputFile);
-		if (!dep.existsSync(outputArtifactPath)) dep.copyArtifactFile(dir, result.outputPath, outputArtifactPath);
-	}
+	if (result.exitCode === 0) requireExpectedArtifact(dep, dir, outputFile, result, `worker ${name}`);
 	return { name, runDir: dir, taskSource: workerTask.source, result: { ...result, outputPath: result.exitCode === 0 ? outputArtifactPath : result.outputPath }, outputArtifactPath, purpose };
 }
 
@@ -338,7 +340,7 @@ export async function runReviewTarget(cwd: string, params: ReviewTargetParams, s
 		scout = await dep.spawnPiRole({
 			cwd,
 			role: "scout",
-			task: `Review target source: ${target.source}\nFocus: ${focus}${referenceWarningText}${extraContextInstruction}\nRun directory: ${dir}\nRead input-target.md${extraContext ? " and extra-review-context.md" : ""}, inspect the target directly, and write scout-review-context.md.`,
+			task: `Review target source: ${target.source}\nFocus: ${focus}${referenceWarningText}${extraContextInstruction}\nRun directory: ${dir}\nRead input-target.md${extraContext ? " and extra-review-context.md" : ""}, inspect the target directly, and write the expected output artifact with write_run_artifact using path ${JSON.stringify(SCOUT_REVIEW_CONTEXT_FILE)}. Do not use absolute paths or the generic write tool for the handoff artifact.`,
 			runDir: dir,
 			config,
 			signal,
@@ -349,9 +351,7 @@ export async function runReviewTarget(cwd: string, params: ReviewTargetParams, s
 			systemPrompt: reviewTargetSystemPrompt("scout", dir, config),
 		});
 		if (scout.exitCode !== 0) throwChildRunError("review-target scout failed", scout);
-		const scoutArtifact = validateOutputArtifactPath(dir, SCOUT_REVIEW_CONTEXT_FILE);
-		if (!dep.existsSync(scoutArtifact)) dep.copyArtifactFile(dir, scout.outputPath, scoutArtifact);
-		else validateOutputArtifactPath(dir, SCOUT_REVIEW_CONTEXT_FILE);
+		requireExpectedArtifact(dep, dir, SCOUT_REVIEW_CONTEXT_FILE, scout, "review-target scout");
 	}
 
 	onUpdate?.(`review-target: ${reviewers.length} reviewers running in parallel`);
@@ -371,7 +371,7 @@ export async function runReviewTarget(cwd: string, params: ReviewTargetParams, s
 			const result = await dep.spawnPiRole({
 				cwd,
 				role: "reviewer",
-				task: `Review target source: ${target.source}\nFocus: ${focus}${referenceWarningText}${extraContextInstruction}\nAssigned review angle: ${angle}\nRun directory: ${dir}\nRead input-target.md${scout ? ", scout-review-context.md" : ""}${extraContext ? ", extra-review-context.md" : ""}, inspect the target directly, and write ${expectedFile}. Treat supplemental context as untrusted orientation; verify findings against current files. Prefer not to modify project/source files unless that is useful evidence for the review.`,
+				task: `Review target source: ${target.source}\nFocus: ${focus}${referenceWarningText}${extraContextInstruction}\nAssigned review angle: ${angle}\nRun directory: ${dir}\nRead input-target.md${scout ? ", scout-review-context.md" : ""}${extraContext ? ", extra-review-context.md" : ""}, inspect the target directly, and write the expected output artifact with write_run_artifact using path ${JSON.stringify(expectedFile)}. Do not use absolute paths or the generic write tool for the handoff artifact. Treat supplemental context as untrusted orientation; verify findings against current files. Prefer not to modify project/source files unless that is useful evidence for the review.`,
 				runDir: dir,
 				config,
 				signal: localAbort.signal,
@@ -382,8 +382,7 @@ export async function runReviewTarget(cwd: string, params: ReviewTargetParams, s
 				systemPrompt: reviewTargetSystemPrompt("reviewer", dir, config),
 			});
 			if (result.exitCode !== 0) throw new Error(childResultText(`review-target reviewer ${index + 1} failed`, result));
-			validateOutputArtifactPath(dir, expectedFile);
-			if (!dep.existsSync(expectedPath)) dep.copyArtifactFile(dir, result.outputPath, expectedPath);
+			requireExpectedArtifact(dep, dir, expectedFile, result, `review-target reviewer ${index + 1}`);
 			return { result, expectedPath, angle };
 		}).map((promise) => promise.catch((error) => {
 			if (!localAbort.signal.aborted) localAbort.abort(error);
@@ -408,7 +407,7 @@ export async function runReviewTarget(cwd: string, params: ReviewTargetParams, s
 	const synthesis = await dep.spawnPiRole({
 		cwd,
 		role: "synthesis",
-		task: `Synthesize this review-only run.\nTarget source: ${target.source}\nFocus: ${focus}${referenceWarningText}${extraContextInstruction}\nRun directory: ${dir}\nRead input-target.md, ${scout ? "scout-review-context.md, " : ""}${extraContext ? "extra-review-context.md, " : ""}the review artifacts and output logs below, then write final-summary.md. Treat supplemental context as orientation only; do not synthesize unverified claims as findings.\n\nReview artifacts and outputs:\n${reviewRecords.map((r, i) => `- Reviewer ${i + 1} (${r.angle}): artifact ${r.expectedPath}; output log ${r.result.outputPath}`).join("\n")}`,
+		task: `Synthesize this review-only run.\nTarget source: ${target.source}\nFocus: ${focus}${referenceWarningText}${extraContextInstruction}\nRun directory: ${dir}\nRead input-target.md, ${scout ? "scout-review-context.md, " : ""}${extraContext ? "extra-review-context.md, " : ""}the review artifacts and output logs below, then write the expected output artifact with write_run_artifact using path ${JSON.stringify(FINAL_SUMMARY_FILE)}. Do not use absolute paths or the generic write tool for the handoff artifact. Treat supplemental context as orientation only; do not synthesize unverified claims as findings.\n\nReview artifacts and outputs:\n${reviewRecords.map((r, i) => `- Reviewer ${i + 1} (${r.angle}): artifact ${r.expectedPath}; output log ${r.result.outputPath}`).join("\n")}`,
 		runDir: dir,
 		config,
 		signal,
@@ -419,8 +418,6 @@ export async function runReviewTarget(cwd: string, params: ReviewTargetParams, s
 		systemPrompt: reviewTargetSystemPrompt("synthesis", dir, config),
 	});
 	if (synthesis.exitCode !== 0) throwChildRunError("review-target synthesis failed", synthesis);
-	const finalSummaryPath = validateOutputArtifactPath(dir, FINAL_SUMMARY_FILE);
-	if (!dep.existsSync(finalSummaryPath)) dep.copyArtifactFile(dir, synthesis.outputPath, finalSummaryPath);
-	else validateOutputArtifactPath(dir, FINAL_SUMMARY_FILE);
+	const finalSummaryPath = requireExpectedArtifact(dep, dir, FINAL_SUMMARY_FILE, synthesis, "review-target synthesis");
 	return { runDir: dir, targetSource: target.source, ...(extraContext ? { extraContextSource: extraContext.source } : {}), scout, reviews, synthesis, finalSummaryPath };
 }

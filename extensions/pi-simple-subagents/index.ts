@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { copyArtifactFile, validateOutputArtifactPath, writeArtifact } from "./artifacts.ts";
+import { validateOutputArtifactPath, writeArtifact } from "./artifacts.ts";
 import { childEnvCounts, childResultText, throwChildRunError, spawnPiRole, type ChildStatusUpdate } from "./child-runner.ts";
 import { WORK_PARALLEL_ROOT_KEYS, WORK_PARALLEL_TASK_KEYS, WORKER_PURPOSES } from "./constants.ts";
 import { loadConfig } from "./config.ts";
@@ -141,6 +141,14 @@ function childSummary(prefix: string, fields: Array<[string, string | number | u
 	const lines = [prefix, ...fields.flatMap(([label, value]) => value === undefined || value === "" ? [] : [`${label}: ${value}`])];
 	if (verboseResultsRequested(options.includeOutput)) return `${lines.join("\n")}\n\n${output}`;
 	return `${lines.join("\n")}\n\n${outputLocationNote(options.kind ?? "child")}`;
+}
+
+function requireExpectedRunArtifact(runDir: string, outputFile: string, result: { outputPath: string; transcriptPath: string }, label: string): string {
+	const target = validateOutputArtifactPath(runDir, outputFile);
+	if (!fs.existsSync(target)) {
+		throw new Error(`${label} did not write the expected output artifact.\nExpected output artifact: ${outputFile}\nExpected path: ${target}\nRun dir: ${runDir}\nChild output log: ${result.outputPath}\nTranscript: ${result.transcriptPath}\nUse write_run_artifact with path ${JSON.stringify(outputFile)}; do not write artifacts via absolute paths or the generic write tool.`);
+	}
+	return validateOutputArtifactPath(runDir, outputFile);
 }
 
 function assertKnownKeys(record: Record<string, unknown>, allowedKeys: readonly string[], label: string): void {
@@ -356,7 +364,9 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 
 Run directory: ${runDir}
 Expected output artifact: ${outputFile}
-Purpose: ${params.purpose}`;
+Purpose: ${params.purpose}
+
+Write the expected output artifact with write_run_artifact using path ${JSON.stringify(outputFile)}. Do not use absolute paths or the generic write tool for the handoff artifact.`;
 				writeArtifact(runDir, `delegations/${label}-${Date.now()}.md`, task);
 				const progress = createSubagentProgress({ onToolUpdate: onUpdate });
 				const result = await spawnPiRole({
@@ -377,8 +387,7 @@ Purpose: ${params.purpose}`;
 					persistState();
 					throw new Error(childResultText(`${params.role} failed`, result));
 				}
-				validateOutputArtifactPath(runDir, outputFile);
-				if (!fs.existsSync(outputArtifactPath)) copyArtifactFile(runDir, result.outputPath, outputArtifactPath);
+				requireExpectedRunArtifact(runDir, outputFile, result, params.role);
 
 				if (succeeded && params.role === "worker" && (params.purpose === "implementation" || params.purpose === "fix" || params.purpose === "validation")) {
 					workerRuns++;
@@ -455,7 +464,7 @@ Purpose: ${params.purpose}`;
 			label: "Write Run Artifact",
 			description: "Write a handoff artifact relative to the current orchestration run directory.",
 			promptSnippet: "Write a handoff artifact inside the current orchestration run directory",
-			promptGuidelines: ["Use write_run_artifact for scout, worker, reviewer, and orchestrator handoff files instead of writing project files."],
+			promptGuidelines: ["Use write_run_artifact for scout, worker, reviewer, and orchestrator handoff files instead of the generic write tool. For expected outputs, pass the exact relative filename from 'Expected output artifact' as path; never invent absolute artifact paths."],
 			parameters: ArtifactParams,
 			async execute(_id, params: ArtifactParamsType) {
 				const artifactPath = requireNonEmpty(params.path, "artifact path");

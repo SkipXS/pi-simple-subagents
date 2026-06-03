@@ -125,7 +125,7 @@ Standalone scout for context gathering before implementation or review. Prefer a
 /scout Map current parser behavior, affected files, risks, and recommended next steps before implementation
 ```
 
-or let the model call `run_scout_agent` for the full schema (`task`, optional `outputFile`, optional `includeOutput`). This creates a fresh run directory, starts one `scout`, and writes/copies a `scout-report.md` by default. It does not start worker/reviewer/orchestrator and is intended to keep broad reading out of the parent context while producing a compact handoff with relevant files, current behavior, risks, and next steps.
+or let the model call `run_scout_agent` for the full schema (`task`, optional `outputFile`, optional `includeOutput`). This creates a fresh run directory, starts one `scout`, and requires the scout to write `scout-report.md` by default via `write_run_artifact`. It does not start worker/reviewer/orchestrator and is intended to keep broad reading out of the parent context while producing a compact handoff with relevant files, current behavior, risks, and next steps.
 
 Standalone worker for direct implementation/fix/validation work:
 
@@ -135,7 +135,7 @@ Standalone worker for direct implementation/fix/validation work:
 ```
 
 
-or let the model call `run_worker_agent` for the full schema (`task`, optional `purpose`, optional `outputFile`, optional `includeOutput`). This creates a fresh run directory, starts one `worker`, and writes/copies a `worker-report.md` by default. It does not start scout/reviewer/orchestrator.
+or let the model call `run_worker_agent` for the full schema (`task`, optional `purpose`, optional `outputFile`, optional `includeOutput`). This creates a fresh run directory, starts one `worker`, and requires the worker to write `worker-report.md` by default via `write_run_artifact`. It does not start scout/reviewer/orchestrator.
 
 Parallel workers for independent tasks:
 
@@ -212,7 +212,7 @@ Child-only tools:
 | --- | --- | --- |
 | `run_role_agent` | orchestrator only | Delegate a concrete role task; role/purpose combinations above are enforced. |
 | `mark_review_clean` | orchestrator only | Record that the latest worker changes have a clean synthesized review; informational, not a validation gate. |
-| `write_run_artifact` | all child roles | Write handoff artifacts under the run dir, excluding reserved internal dirs like `logs`, `outputs`, `sessions`, `tasks`. |
+| `write_run_artifact` | all child roles | Write handoff artifacts under the run dir. Expected role outputs must use the exact relative filename from `Expected output artifact`; absolute paths and reserved internal dirs like `logs`, `outputs`, `sessions`, `tasks` are rejected. |
 | `compact_session` | all child roles | Request Pi compaction while preserving role-specific task/target, scout findings, decisions, changed files, validation state, and artifact paths. |
 
 ## Important workflow guidance
@@ -227,6 +227,7 @@ Pi is YOLO by default, and this extension follows that model for source edits an
 - `mark_review_clean` records the orchestrator's synthesized review state; it does not gate validation in YOLO mode.
 - `run_role_agent` calls are serialized by default so the orchestrator's persistent worker session is not shared concurrently. Use `run_parallel_workers` when you intentionally want multiple standalone workers with isolated session files.
 - Run artifacts remain the audit trail: plans, delegations, logs, outputs, review summaries, validation notes, and final summaries.
+- Expected child handoff artifacts are now required to exist at their configured relative path under the run directory. Missing artifacts fail the parent workflow instead of silently copying the child chat output, which prevents wrong-path writes such as Windows drive paths accidentally normalized to `/d/...`.
 
 ## Tool policy
 

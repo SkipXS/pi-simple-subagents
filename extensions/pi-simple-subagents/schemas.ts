@@ -57,7 +57,7 @@ export const ParallelWorkersParams = Type.Object({
 export type ParallelWorkersParams = Static<typeof ParallelWorkersParams>;
 
 export const ArtifactParams = Type.Object({
-	path: Type.String({ minLength: 1, description: "Artifact path relative to the current run directory, e.g. review-round-1.md" }),
+	path: Type.String({ minLength: 1, description: "Artifact path relative to the current run directory, e.g. review-round-1.md. For expected role outputs, use the exact filename from the task's Expected output artifact line; absolute paths are rejected." }),
 	content: Type.String({ description: "Markdown/text content to write" }),
 });
 export type ArtifactParams = Static<typeof ArtifactParams>;
