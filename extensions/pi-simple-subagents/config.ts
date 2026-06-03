@@ -44,7 +44,7 @@ export const DEFAULT_CONFIG: Config = {
 		},
 		scout: {
 			model: "openai-codex/gpt-5.3-codex-spark",
-			thinking: "low",
+			thinking: "medium",
 		},
 		worker: {
 			model: "openai-codex/gpt-5.5",

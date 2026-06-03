@@ -26,7 +26,7 @@ export const ReviewTargetParams = Type.Object({
 export type ReviewTargetParams = Static<typeof ReviewTargetParams>;
 
 export const ScoutAgentParams = Type.Object({
-	task: Type.String({ minLength: 1, description: "Concrete standalone scout/recon task, inline text, @file, or @directory. Use for broad reading/context gathering; the scout writes a compact handoff report and should not implement changes." }),
+	task: Type.String({ minLength: 1, description: "Concrete standalone scout/recon task, inline text, @file, or @directory. Use before implementation/review when context, side effects, or non-trivial scope need mapping; the scout writes a compact handoff report and should not implement changes." }),
 	outputFile: Type.Optional(Type.String({ minLength: 1, description: "Expected scout report artifact filename inside the run dir. Default: scout-report.md" })),
 });
 export type ScoutAgentParams = Static<typeof ScoutAgentParams>;

@@ -55,8 +55,9 @@ const REVIEW_TARGET_GUIDELINES = [
 ];
 
 const RUN_SCOUT_AGENT_GUIDELINES = [
-	"Use run_scout_agent for broad codebase or documentation reconnaissance before deciding on implementation or review.",
-	"Use run_scout_agent to keep large reading out of the parent context; ask it for a compact handoff report with relevant files, risks, and next steps.",
+	"Prefer run_scout_agent before implementation when the task is not obviously trivial: non-trivial scope, cross-file impact, behavior/API/security/packaging changes, unfamiliar code, ambiguity, or likely side effects.",
+	"Use run_scout_agent to keep large reading out of the parent context; ask it for a compact handoff with relevant files, current behavior, risks, and recommended next steps.",
+	"Skip scouting for clearly isolated, low-risk single-location edits or when the user explicitly asks to proceed directly.",
 	"Do not use run_scout_agent for implementation changes; use run_worker_agent or orchestrate_plan for source edits.",
 ];
 
@@ -117,16 +118,20 @@ function assertKnownKeys(record: Record<string, unknown>, allowedKeys: readonly 
 }
 
 function formatSubagentProgress(snapshot: SubagentProgressSnapshot): string {
-	if (snapshot.statuses.length === 0) return ["Subagents:", "- starting"].join("\n");
+	if (snapshot.statuses.length === 0) return ["Subagents: ⠋ working", "- starting"].join("\n");
 	const parsed = snapshot.statuses.map((status) => ({ key: status.key, ...parseStatusLine(status.text, status.key) }));
-	const roleWidth = Math.max(...parsed.map((status) => `${status.spinner ? `${status.spinner} ` : "  "}${status.label}`.length));
-	const statusWidth = Math.max(...parsed.map((status) => status.status.length));
+	const active = parsed.find((status) => status.action !== "finished");
+	const workingIndicator = active?.spinner ?? (parsed.length > 0 && parsed.every((status) => status.action === "finished") ? "✓" : "⠋");
+	const header = `Subagents: ${workingIndicator} ${active ? "working" : "done"}`;
+	const roleWidth = Math.max(...parsed.map((status) => status.label.length));
+	const statusWidth = Math.max(0, ...parsed.map((status) => status.status.length));
 	const lines = parsed.map((status) => {
-		const role = `${status.spinner ? `${status.spinner} ` : "  "}${status.label}`.padEnd(roleWidth);
-		const statusText = status.status ? `${status.status.padEnd(statusWidth)} - ${status.action}` : status.action;
-		return `- ${role}: ${statusText}`;
+		const marker = status.action === "finished" ? "✓" : "•";
+		const role = status.label.padEnd(roleWidth);
+		const statusText = status.status ? `${status.status.padEnd(statusWidth)} │ ${status.action}` : status.action;
+		return `- ${marker} ${role} │ ${statusText}`;
 	});
-	return ["Subagents:", ...lines].join("\n");
+	return [header, ...lines].join("\n");
 }
 
 function createSubagentProgress(options: { onToolUpdate?: ToolProgressOnUpdate; setWidget?: WidgetSetter }) {
@@ -235,8 +240,8 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 		pi.registerTool({
 			name: "run_scout_agent",
 			label: "Run Scout Agent",
-			description: "Run a standalone scout subagent for broad reconnaissance and compact context handoff without starting a full orchestration or review workflow.",
-			promptSnippet: "Run a standalone scout subagent for context gathering and handoff reports",
+			description: "Run a standalone scout subagent for context gathering before implementation/review and compact handoff without starting a full orchestration or review workflow.",
+			promptSnippet: "Run a standalone scout subagent for non-trivial or uncertain tasks before implementation",
 			promptGuidelines: RUN_SCOUT_AGENT_GUIDELINES,
 			parameters: ScoutAgentParams,
 			async execute(_id, params: ScoutAgentParamsType, signal, onUpdate, ctx) {

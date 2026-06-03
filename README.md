@@ -90,14 +90,15 @@ Use orchestrate_plan for @docs/plan.md
 
 The orchestrator receives a short prompt plus the plan content/reference, then coordinates scout/worker/reviewer. Worker and reviewer loop while it is useful; there is no default hard review-round cap.
 
-Standalone scout for broad reconnaissance/context gathering before implementation or review:
+Standalone scout for context gathering before implementation or review. Prefer a short scout when the task is not obviously trivial: non-trivial scope, cross-file impact, behavior/API/security/packaging changes, unfamiliar code, ambiguity, or likely side effects. Skip it for clearly isolated, low-risk single-location edits or when the user explicitly asks to proceed directly.
 
 ```text
 /scout @extensions/pi-simple-subagents
 /scout Find the relevant Pi extension APIs and summarize only what the parent needs
+/scout Map current parser behavior, affected files, risks, and recommended next steps before implementation
 ```
 
-or let the model call `run_scout_agent` for the full schema (`task`, optional `outputFile`). This creates a fresh run directory, starts one `scout`, and writes/copies a `scout-report.md` by default. It does not start worker/reviewer/orchestrator and is intended to keep broad reading out of the parent context.
+or let the model call `run_scout_agent` for the full schema (`task`, optional `outputFile`). This creates a fresh run directory, starts one `scout`, and writes/copies a `scout-report.md` by default. It does not start worker/reviewer/orchestrator and is intended to keep broad reading out of the parent context while producing a compact handoff with relevant files, current behavior, risks, and next steps.
 
 Standalone worker for direct implementation/fix/validation work:
 
@@ -142,7 +143,7 @@ or let the model call `review_target` for the full schema (`target`, `focus`, `e
 
 The extension exposes prompt guidelines on each root tool so models can choose the right workflow:
 
-- Use `run_scout_agent` for broad codebase or documentation reconnaissance before implementation or review. Ask for a compact handoff report and avoid implementation changes.
+- Prefer `run_scout_agent` before implementation when the task is not obviously trivial: non-trivial scope, cross-file impact, behavior/API/security/packaging changes, unfamiliar code, ambiguity, or likely side effects. Ask for a compact handoff report and avoid implementation changes; skip it for clearly isolated low-risk single-location edits.
 - Use `review_target` for review-only work. Keep the review-specific scout enabled unless the user asks to skip it, and pass a prior `scout-report.md` as `extraContext` when available.
 - Use `orchestrate_plan` for plan-driven implementation that benefits from scout/worker/reviewer coordination and review/fix loops.
 - Use `run_worker_agent` for direct implementation, fix, or validation tasks that do not need a full orchestration loop.
@@ -155,7 +156,7 @@ Root tools/commands:
 | Tool | Slash command | Key options | Use when |
 | --- | --- | --- | --- |
 | `orchestrate_plan` | `/orchestrate <plan-or-@file>` | `plan` | Plan-driven implementation should coordinate scout, worker, review, fixes, and validation. |
-| `run_scout_agent` | `/scout <task-or-@target>` | `task`, `outputFile?` | Broad reconnaissance/context gathering should be isolated into a compact handoff report. |
+| `run_scout_agent` | `/scout <task-or-@target>` | `task`, `outputFile?` | Context gathering for non-trivial, uncertain, cross-file, or side-effect-prone work should be isolated into a compact handoff report. |
 | `review_target` | `/review [options] <target> [focus]` | `target`, `focus?`, `extraContext?`, `reviewers?`, `includeScout?` | Review-only fanout should inspect a target and synthesize findings without running a worker. |
 | `run_worker_agent` | `/work <task-or-@file>` | `task`, `purpose?`, `outputFile?` | Direct implementation, fix, or validation is enough and no full review loop is needed. |
 | `run_parallel_workers` | `/work-parallel <json>` | `tasks[{name?,task,purpose?,outputFile?}]` | Multiple implementation/fix/validation tasks are independent and unlikely to touch the same files. |
@@ -253,7 +254,7 @@ Example with explicit balanced YOLO defaults (all sections are optional; omit an
 {
   "roles": {
     "orchestrator": { "model": "openai-codex/gpt-5.5", "thinking": "medium" },
-    "scout": { "model": "openai-codex/gpt-5.3-codex-spark", "thinking": "low" },
+    "scout": { "model": "openai-codex/gpt-5.3-codex-spark", "thinking": "medium" },
     "worker": { "model": "openai-codex/gpt-5.5", "thinking": "medium" },
     "reviewer": { "model": "openai-codex/gpt-5.5", "thinking": "low" },
     "synthesis": { "model": "openai-codex/gpt-5.5", "thinking": "medium" }
@@ -391,12 +392,12 @@ Child transcripts, stderr logs, referenced input files, reference warnings, and 
 
 ## Subagent status display
 
-While child agents run in interactive Pi, tool calls stream a stable multi-line progress block into the tool-call window. Slash commands (`/orchestrate`, `/work`, `/work-parallel`, `/review`) show the same progress as a below-editor widget instead of using the footer, so long activity lines do not make the footer jump. The subagent list updates at a calmer cadence and aligns the spinner/role column plus the compact usage/model status column; only the trailing activity text varies. Finished roles keep their final usage information:
+While child agents run in interactive Pi, tool calls stream a stable multi-line progress block into the tool-call window. Slash commands (`/orchestrate`, `/work`, `/work-parallel`, `/review`) show the same progress as a below-editor widget instead of using the footer, so long activity lines do not make the footer jump. Only the header's working indicator animates quickly; role rows update their activity text at a calmer cadence and keep aligned role plus compact usage/model columns. Finished roles keep their final usage information:
 
 ```text
-Subagents:
-- ⠋ worker    : ↑1k ↓2k R3k W4.0k $0.123 3.7%/272k (auto) - gpt-5.5 • medium - finished
-- ⠙ reviewer-1: ↑867 ↓103 R31k $0.023 11.8%/272k (auto) - gpt-5.5 • low    - read references.ts
+Subagents: ⠋ working
+- ✓ worker     │ ↑1k ↓2k R3k W4.0k $0.123 3.7%/272k (auto) - gpt-5.5 • medium │ finished
+- • reviewer-1 │ ↑867 ↓103 R31k $0.023 11.8%/272k (auto) - gpt-5.5 • low     │ read references.ts
 ```
 
 The context percentage is estimated from the latest child response token total and known model-family context windows; child processes do not currently expose Pi's exact parent footer context calculation.

@@ -53,6 +53,7 @@ function isFailedStopReason(stopReason: string | undefined): boolean {
 
 const STATUS_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const STATUS_SPINNER_INTERVAL_MS = 120;
+const STATUS_ACTION_INTERVAL_MS = 900;
 
 interface UsageTotals {
 	input: number;
@@ -305,6 +306,8 @@ export async function spawnPiRole(input: {
 		const statusLabel = input.statusLabel ?? input.role;
 		let statusFrame = 0;
 		let statusAction = "starting";
+		let pendingStatusAction = statusAction;
+		let lastStatusActionAt = 0;
 		let lastStatusText = "";
 		let settled = false;
 		let aborted = false;
@@ -314,6 +317,15 @@ export async function spawnPiRole(input: {
 		let killFallbackTimer: ReturnType<typeof setTimeout> | undefined;
 		const transcriptCap = { bytes: 0, capped: false };
 		const stderrCap = { bytes: 0, capped: false };
+		const commitPendingStatusAction = (options: { force?: boolean } = {}) => {
+			const now = Date.now();
+			const actionChanged = pendingStatusAction !== statusAction;
+			if (!actionChanged) return;
+			const firstUsefulAction = statusAction === "starting" && pendingStatusAction !== "starting";
+			if (!options.force && !firstUsefulAction && now - lastStatusActionAt < STATUS_ACTION_INTERVAL_MS) return;
+			statusAction = pendingStatusAction;
+			lastStatusActionAt = now;
+		};
 		const formatStatusText = (action = statusAction) => {
 			const frame = STATUS_SPINNER_FRAMES[statusFrame++ % STATUS_SPINNER_FRAMES.length];
 			const metrics = statusMetrics(usageTotals, childModel, roleConfig.thinking);
@@ -321,14 +333,17 @@ export async function spawnPiRole(input: {
 		};
 		const emitStatus = (options: { force?: boolean; action?: string } = {}) => {
 			if (!input.onStatus) return;
+			if (options.action === undefined) commitPendingStatusAction({ force: options.force });
 			const text = formatStatusText(options.action);
 			if (!options.force && text === lastStatusText) return;
 			lastStatusText = text;
 			input.onStatus({ key: statusKey, text });
 		};
-		const setStatusAction = (action: string) => {
-			statusAction = action;
-			emitStatus();
+		const setStatusAction = (action: string, options: { force?: boolean } = {}) => {
+			pendingStatusAction = action;
+			const before = statusAction;
+			commitPendingStatusAction(options);
+			if (options.force || statusAction !== before) emitStatus(options);
 		};
 		emitStatus({ force: true });
 		const statusTimer = input.onStatus ? setInterval(emitStatus, STATUS_SPINNER_INTERVAL_MS) : undefined;
