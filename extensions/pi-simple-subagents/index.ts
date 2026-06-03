@@ -383,14 +383,15 @@ Purpose: ${params.purpose}`;
 		pi.registerTool({
 			name: "compact_session",
 			label: "Compact Session",
-			description: "Request compaction for the current child session to prevent context rot while preserving orchestration state.",
-			promptSnippet: "Compact the current child session with orchestration-aware summary instructions",
-			promptGuidelines: ["Use compact_session when any child role session with a run directory is getting long; artifacts remain the source of truth after compaction."],
+			description: "Request compaction for the current child session to prevent context rot while preserving role-specific task, findings, validation state, and artifact paths.",
+			promptSnippet: "Compact the current child session with role-aware summary instructions",
+			promptGuidelines: ["Use compact_session when any child role session with a run directory is getting long, especially scouts doing broad repo/docs reconnaissance; artifacts remain the source of truth after compaction."],
 			parameters: CompactSessionParams,
 			async execute(_id, params: CompactSessionParamsType, _signal, _onUpdate, ctx) {
 				const defaultInstructions = [
-					"Preserve the original plan and current goal.",
-					"Preserve changed files, implementation decisions, and rationale.",
+					"Preserve the original plan/task/target and current goal.",
+					"For scout sessions, preserve inspected files/docs, key findings, risks, open questions, and expected scout report artifact.",
+					"Preserve changed files, implementation decisions, and rationale when any source work happened.",
 					"Preserve open reviewer findings, accepted fixes, deferred items, and validation state.",
 					"Preserve artifact paths under the run directory and any decisions needing user approval.",
 				].join(" ");

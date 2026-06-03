@@ -175,7 +175,7 @@ Child-only tools:
 | `run_role_agent` | orchestrator only | Delegate a concrete role task; role/purpose combinations above are enforced. |
 | `mark_review_clean` | orchestrator only | Record that the latest worker changes have a clean synthesized review; informational, not a validation gate. |
 | `write_run_artifact` | all child roles | Write handoff artifacts under the run dir, excluding reserved internal dirs like `logs`, `outputs`, `sessions`, `tasks`. |
-| `compact_session` | all child roles | Request Pi compaction while preserving plan, decisions, changed files, validation state, and artifact paths. |
+| `compact_session` | all child roles | Request Pi compaction while preserving role-specific task/target, scout findings, decisions, changed files, validation state, and artifact paths. |
 
 ## Important workflow guidance
 
@@ -210,10 +210,11 @@ This policy is not a confidentiality boundary or OS/container sandbox. Run this 
 
 ## Compaction policy
 
-Pi auto-compaction still applies per child session. In addition, every valid child role session that has a run directory (`orchestrator`, `scout`, `worker`, and `reviewer`) can call `compact_session` when its context gets long. Child-only artifact tools are not registered for a root process that merely has a stale run-directory environment variable. Compaction is most often useful for the persistent `orchestrator` and `worker` sessions. The tool requests Pi compaction with instructions to preserve:
+Pi auto-compaction still applies per child session. In addition, every valid child role session that has a run directory (`orchestrator`, `scout`, `worker`, `reviewer`, and `synthesis`) can call `compact_session` when its context gets long. Child-only artifact tools are not registered for a root process that merely has a stale run-directory environment variable. Compaction is most often useful for the persistent `orchestrator` and `worker` sessions, and for standalone/review scouts during broad repository or documentation reconnaissance. The tool requests Pi compaction with instructions to preserve:
 
-- original plan/current goal
-- changed files and implementation decisions
+- original plan/task/target and current goal
+- scout-specific inspected files/docs, key findings, risks, open questions, and expected report artifact
+- changed files and implementation decisions when any source work happened
 - open reviewer findings and accepted fixes
 - validation state and deferred items
 - run artifact paths
