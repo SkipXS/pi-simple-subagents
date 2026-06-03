@@ -20,6 +20,7 @@ import {
 	ParallelWorkersParams,
 	ReviewTargetParams,
 	RoleRunParams,
+	ScoutAgentParams,
 	WorkerAgentParams,
 	type ArtifactParams as ArtifactParamsType,
 	type CompactSessionParams as CompactSessionParamsType,
@@ -28,10 +29,11 @@ import {
 	type ParallelWorkersParams as ParallelWorkersParamsType,
 	type ReviewTargetParams as ReviewTargetParamsType,
 	type RoleRunParams as RoleRunParamsType,
+	type ScoutAgentParams as ScoutAgentParamsType,
 	type WorkerAgentParams as WorkerAgentParamsType,
 } from "./schemas.ts";
 import { readOrchestrationState, writeOrchestrationState } from "./state.ts";
-import { parseReviewTargetCommand, runOrchestration, runParallelWorkers, runReviewTarget, runWorkerAgent } from "./workflows.ts";
+import { parseReviewTargetCommand, runOrchestration, runParallelWorkers, runReviewTarget, runScoutAgent, runWorkerAgent } from "./workflows.ts";
 
 type ToolProgressOnUpdate = ((update: { content: Array<{ type: "text"; text: string }>; details: { subagentProgress: SubagentProgressSnapshot } }) => void) | undefined;
 type WidgetSetter = (content: string[] | undefined) => void;
@@ -40,6 +42,33 @@ interface SubagentProgressSnapshot {
 	statuses: Array<{ key: string; text: string }>;
 	current?: string;
 }
+
+const ORCHESTRATE_PLAN_GUIDELINES = [
+	"Use orchestrate_plan for plan-driven implementation work that benefits from scout/worker/reviewer coordination and review/fix loops.",
+	"Do not use orchestrate_plan for review-only work; use review_target instead.",
+];
+
+const REVIEW_TARGET_GUIDELINES = [
+	"Use review_target for review-only work when the user asks to inspect, audit, or suggest improvements without implementing changes.",
+	"Pass a prior scout-report.md or other concise background as review_target.extraContext when available, but reviewers must verify it against current files.",
+	"Keep review_target.includeScout enabled unless the user explicitly asks to skip the review-specific scout.",
+];
+
+const RUN_SCOUT_AGENT_GUIDELINES = [
+	"Use run_scout_agent for broad codebase or documentation reconnaissance before deciding on implementation or review.",
+	"Use run_scout_agent to keep large reading out of the parent context; ask it for a compact handoff report with relevant files, risks, and next steps.",
+	"Do not use run_scout_agent for implementation changes; use run_worker_agent or orchestrate_plan for source edits.",
+];
+
+const RUN_WORKER_AGENT_GUIDELINES = [
+	"Use run_worker_agent for direct implementation, fix, or validation tasks that do not need a full orchestrator/reviewer loop.",
+	"Do not use run_worker_agent for review-only work; use review_target instead.",
+];
+
+const RUN_PARALLEL_WORKERS_GUIDELINES = [
+	"Use run_parallel_workers only for clearly independent tasks unlikely to edit the same files.",
+	"Do not use run_parallel_workers for overlapping refactors, shared-file edits, or tasks that need one worker's result before another starts.",
+];
 
 const STATUS_SPINNER_PATTERN = /^([⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏])\s+(.+)$/u;
 
@@ -167,7 +196,7 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 			label: "Orchestrate Plan",
 			description: "Start the simple orchestrator workflow for a plan or @plan-file. The orchestrator coordinates scout, worker, reviewer, loops fixes, and runs validation only after implementation/review.",
 			promptSnippet: "Run the configured orchestrator workflow for a plan or @plan-file",
-			promptGuidelines: ["Use orchestrate_plan when the user asks to implement a plan through the orchestrator workflow."],
+			promptGuidelines: ORCHESTRATE_PLAN_GUIDELINES,
 			parameters: OrchestrateParams,
 			async execute(_id, params: OrchestrateParamsType, signal, onUpdate, ctx) {
 				const progress = createSubagentProgress({ onToolUpdate: onUpdate });
@@ -186,9 +215,9 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 		pi.registerTool({
 			name: "review_target",
 			label: "Review Target",
-			description: "Run a scout plus fresh reviewer fanout for an existing target, then synthesize improvements. YOLO mode does not enforce source-write restrictions.",
+			description: "Run a scout plus fresh reviewer fanout for an existing target, optional extra context, then synthesize improvements. YOLO mode does not enforce source-write restrictions.",
 			promptSnippet: "Review an existing file, directory, diff, or extension with reviewer fanout",
-			promptGuidelines: ["Use review_target when the user asks to inspect, audit, or suggest improvements without implementing changes."],
+			promptGuidelines: REVIEW_TARGET_GUIDELINES,
 			parameters: ReviewTargetParams,
 			async execute(_id, params: ReviewTargetParamsType, signal, onUpdate, ctx) {
 				const progress = createSubagentProgress({ onToolUpdate: onUpdate });
@@ -204,11 +233,31 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 		});
 
 		pi.registerTool({
+			name: "run_scout_agent",
+			label: "Run Scout Agent",
+			description: "Run a standalone scout subagent for broad reconnaissance and compact context handoff without starting a full orchestration or review workflow.",
+			promptSnippet: "Run a standalone scout subagent for context gathering and handoff reports",
+			promptGuidelines: RUN_SCOUT_AGENT_GUIDELINES,
+			parameters: ScoutAgentParams,
+			async execute(_id, params: ScoutAgentParamsType, signal, onUpdate, ctx) {
+				const progress = createSubagentProgress({ onToolUpdate: onUpdate });
+				const result = await runScoutAgent(ctx.cwd, params, signal, (text, status) => {
+					if (text) progress.text(text);
+					if (status) progress.status(status);
+				});
+				return {
+					content: [{ type: "text", text: `Scout finished.\nRun dir: ${result.runDir}\nTask source: ${result.taskSource}\nOutput: ${result.outputArtifactPath}\nTranscript: ${result.result.transcriptPath}\n\n${result.result.output}` }],
+					details: result,
+				};
+			},
+		});
+
+		pi.registerTool({
 			name: "run_worker_agent",
 			label: "Run Worker Agent",
 			description: "Run a standalone worker subagent for implementation, fixes, or validation without starting a full orchestrator workflow. YOLO mode does not enforce source-write restrictions.",
 			promptSnippet: "Run a standalone worker subagent for implementation, fixes, or validation",
-			promptGuidelines: ["Use run_worker_agent when the user asks to implement, fix, or validate something via a worker subagent without a full orchestrator workflow."],
+			promptGuidelines: RUN_WORKER_AGENT_GUIDELINES,
 			executionMode: "sequential",
 			parameters: WorkerAgentParams,
 			async execute(_id, params: WorkerAgentParamsType, signal, onUpdate, ctx) {
@@ -229,7 +278,7 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 			label: "Run Parallel Workers",
 			description: "Run multiple standalone worker subagents concurrently for independent implementation, fix, or validation tasks. Each worker gets its own run directory and session file; YOLO mode does not prevent source edit conflicts.",
 			promptSnippet: "Run multiple standalone worker subagents concurrently for independent tasks",
-			promptGuidelines: ["Use run_parallel_workers only when worker tasks are independent enough to run concurrently without likely file-edit conflicts."],
+			promptGuidelines: RUN_PARALLEL_WORKERS_GUIDELINES,
 			parameters: ParallelWorkersParams,
 			async execute(_id, params: ParallelWorkersParamsType, signal, onUpdate, ctx) {
 				const progress = createSubagentProgress({ onToolUpdate: onUpdate });
@@ -371,7 +420,9 @@ Purpose: ${params.purpose}`;
 			promptGuidelines: ["Use write_run_artifact for scout, worker, reviewer, and orchestrator handoff files instead of writing project files."],
 			parameters: ArtifactParams,
 			async execute(_id, params: ArtifactParamsType) {
-				const target = writeArtifact(runDir, requireNonEmpty(params.path, "artifact path"), params.content);
+				const artifactPath = requireNonEmpty(params.path, "artifact path");
+				const target = validateOutputArtifactPath(runDir, artifactPath);
+				writeArtifact(runDir, target, params.content);
 				return { content: [{ type: "text", text: `Wrote artifact: ${target}` }], details: { path: target } };
 			},
 		});
@@ -401,6 +452,34 @@ Purpose: ${params.purpose}`;
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				ctx.ui.notify(`Orchestration failed: ${message.split("\n")[0]}`, "error");
+				throw error;
+			} finally {
+				progress.clear();
+			}
+		};
+
+		const runScoutCommand = async (args: string, ctx: ExtensionCommandContext) => {
+			const task = args.trim();
+			if (!task) {
+				ctx.ui.notify("Usage: /scout @target-file, @directory, or inline reconnaissance instructions", "warning");
+				return;
+			}
+			ctx.ui.notify("Starting scout...", "info");
+			const progress = createSubagentProgress({ setWidget: (content) => ctx.ui.setWidget("pi-simple-subagents:scout", content, { placement: "belowEditor" }) });
+			try {
+				const result = await runScoutAgent(ctx.cwd, { task }, ctx.signal, (text, status) => {
+					if (text) progress.text(text);
+					if (status) progress.status(status);
+				});
+				pi.sendMessage({
+					customType: "pi-simple-subagents-scout-result",
+					display: true,
+					content: `Scout finished.\n\nRun dir: ${result.runDir}\nOutput: ${result.outputArtifactPath}\nTranscript: ${result.result.transcriptPath}\n\n${result.result.output}`,
+					details: result,
+				});
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				ctx.ui.notify(`Scout failed: ${message.split("\n")[0]}`, "error");
 				throw error;
 			} finally {
 				progress.clear();
@@ -438,7 +517,7 @@ Purpose: ${params.purpose}`;
 		const runReviewCommand = async (args: string, ctx: ExtensionCommandContext) => {
 			const target = args.trim();
 			if (!target) {
-				ctx.ui.notify("Usage: /review [--scout|--no-scout] [--reviewer <angle>]... @path-or-dir [focus/instructions]", "warning");
+				ctx.ui.notify("Usage: /review [--scout|--no-scout] [--context <text-or-@file>] [--reviewer <angle>]... @path-or-dir [focus/instructions]", "warning");
 				return;
 			}
 			ctx.ui.notify("Starting review workflow...", "info");
@@ -466,6 +545,11 @@ Purpose: ${params.purpose}`;
 		pi.registerCommand("orchestrate", {
 			description: "Run the simple orchestrator workflow for a plan or @plan-file",
 			handler: runOrchestrateCommand,
+		});
+
+		pi.registerCommand("scout", {
+			description: "Run a standalone scout subagent. Usage: @target-file, @directory, or inline reconnaissance instructions",
+			handler: runScoutCommand,
 		});
 
 		pi.registerCommand("work", {
@@ -557,7 +641,7 @@ Purpose: ${params.purpose}`;
 		});
 
 		pi.registerCommand("review", {
-			description: "Run scout/reviewer fanout for a target and synthesize improvements. Usage: [--scout|--no-scout] [--reviewer <angle>]... @path-or-dir [focus/instructions]",
+			description: "Run scout/reviewer fanout for a target and synthesize improvements. Usage: [--scout|--no-scout] [--context <text-or-@file>] [--reviewer <angle>]... @path-or-dir [focus/instructions]",
 			handler: runReviewCommand,
 		});
 

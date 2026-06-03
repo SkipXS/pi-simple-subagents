@@ -8,7 +8,7 @@ import { pathToFileURL } from "node:url";
 import { getPiInvocation, quoteAtReferencePath, shouldForwardCurrentExtension, spawnPiRole, wasLoadedWithExtensionFlag, type ChildRunResult } from "../extensions/pi-simple-subagents/child-runner.ts";
 import { DEFAULT_CONFIG, type Config } from "../extensions/pi-simple-subagents/config.ts";
 import orchestratorAgentsExtension from "../extensions/pi-simple-subagents/index.ts";
-import { runParallelWorkers, runReviewTarget, runWorkerAgent, parseReviewTargetCommand } from "../extensions/pi-simple-subagents/workflows.ts";
+import { runParallelWorkers, runReviewTarget, runScoutAgent, runWorkerAgent, parseReviewTargetCommand } from "../extensions/pi-simple-subagents/workflows.ts";
 
 function tempProject(): string {
 	return fs.mkdtempSync(path.join(os.tmpdir(), "pi-simple-subagents-test-"));
@@ -46,12 +46,18 @@ test("parseReviewTargetCommand preserves existing simple syntax", () => {
 	});
 });
 
-test("parseReviewTargetCommand supports scout and reviewer command options", () => {
-	assert.deepEqual(parseReviewTargetCommand("--no-scout --reviewer \"security and boundaries\" @\"dir with spaces\" runtime bugs"), {
+test("parseReviewTargetCommand supports scout, context, and reviewer command options", () => {
+	assert.deepEqual(parseReviewTargetCommand("--no-scout --context @reports/scout-report.md --reviewer \"security and boundaries\" @\"dir with spaces\" runtime bugs"), {
 		target: "@\"dir with spaces\"",
 		focus: "runtime bugs",
+		extraContext: "@reports/scout-report.md",
 		reviewers: ["security and boundaries"],
 		includeScout: false,
+	});
+	assert.deepEqual(parseReviewTargetCommand("--context=@\"reports/old scout.md\" @README.md docs"), {
+		target: "@README.md",
+		focus: "docs",
+		extraContext: "@\"reports/old scout.md\"",
 	});
 });
 
@@ -65,6 +71,7 @@ test("parseReviewTargetCommand preserves quoted Windows backslashes", () => {
 
 test("parseReviewTargetCommand uses current /review error wording", () => {
 	assert.throws(() => parseReviewTargetCommand("--reviewer"), /\/review --reviewer/);
+	assert.throws(() => parseReviewTargetCommand("--context"), /\/review --context/);
 	assert.throws(() => parseReviewTargetCommand("--no-scout"), /\/review requires a target/);
 	assert.throws(() => parseReviewTargetCommand("--noScout @README.md docs"), /\/review unknown option: --noScout/);
 	assert.throws(() => parseReviewTargetCommand("--reviewer security --bad @README.md"), /\/review unknown option: --bad/);
@@ -269,6 +276,28 @@ test("review target reviewers run in parallel and preserve result order", async 
 	assert.deepEqual(calls, ["reviewer:b", "reviewer:a", "synthesis:synthesis"]);
 });
 
+test("review target writes and passes extra context to scout, reviewers, and synthesis", async () => {
+	const cwd = tempProject();
+	const contextPath = path.join(cwd, "scout-report.md");
+	fs.writeFileSync(contextPath, "prior scout context", "utf8");
+	const config = cloneConfig();
+	config.artifacts.baseDir = ".pi/runs";
+	const tasks: string[] = [];
+	const result = await runReviewTarget(cwd, { target: "inline target", extraContext: "@scout-report.md", reviewers: ["runtime bugs"] }, undefined, undefined, {
+		loadConfig: () => config,
+		async spawnPiRole(input) {
+			tasks.push(input.task);
+			return fakeResult(input.role, input.runDir);
+		},
+	});
+
+	assert.equal(result.extraContextSource, contextPath);
+	assert.equal(fs.readFileSync(path.join(result.runDir, "extra-review-context.md"), "utf8").includes("prior scout context"), true);
+	assert.equal(tasks.length, 3);
+	assert.equal(tasks.every((task) => task.includes("extra-review-context.md")), true);
+	assert.equal(tasks.every((task) => task.includes("verify") || task.includes("unverified")), true);
+});
+
 test("review target caps custom reviewer fanout", async () => {
 	const cwd = tempProject();
 	const config = cloneConfig();
@@ -317,6 +346,20 @@ test("review target rejects non-regular final summary artifact", async () => {
 			return fakeResult(input.role, input.runDir);
 		},
 	}), /not a regular file/);
+});
+
+test("scout outputFile validates reserved paths before spawning", async () => {
+	const cwd = tempProject();
+	const config = cloneConfig();
+	let spawned = false;
+	await assert.rejects(() => runScoutAgent(cwd, { task: "inline scout task", outputFile: "logs" }, undefined, undefined, {
+		loadConfig: () => config,
+		async spawnPiRole(input) {
+			spawned = true;
+			return fakeResult(input.role, input.runDir);
+		},
+	}), /reserved run directory/);
+	assert.equal(spawned, false);
 });
 
 test("worker outputFile validates reserved paths before spawning", async () => {
@@ -379,6 +422,29 @@ test("run_role_agent validates and materializes default output artifact", async 
 	}
 });
 
+test("write_run_artifact rejects reserved internal run directories", async () => {
+	const oldRole = process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+	const oldRunDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+	try {
+		const runDir = tempProject();
+		process.env.PI_ORCHESTRATOR_AGENT_ROLE = "worker";
+		process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR = runDir;
+		let writeRunArtifact: { execute: (...args: any[]) => Promise<any> } | undefined;
+		orchestratorAgentsExtension({ registerTool: (tool: { name: string; execute: (...args: any[]) => Promise<any> }) => { if (tool.name === "write_run_artifact") writeRunArtifact = tool; }, registerCommand() {}, sendMessage() {} } as never);
+		const tool = writeRunArtifact;
+		assert.ok(tool);
+		await assert.rejects(() => tool.execute("id", { path: "logs/evil.md", content: "evil" }), /reserved run directory/);
+		const result = await tool.execute("id", { path: "scout-report.md", content: "ok" });
+		assert.match(result.details.path, /scout-report\.md$/);
+		assert.equal(fs.readFileSync(path.join(runDir, "scout-report.md"), "utf8"), "ok");
+	} finally {
+		if (oldRole === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+		else process.env.PI_ORCHESTRATOR_AGENT_ROLE = oldRole;
+		if (oldRunDir === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+		else process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR = oldRunDir;
+	}
+});
+
 test("/work-parallel validates object fields before running", async () => {
 	const oldRole = process.env.PI_ORCHESTRATOR_AGENT_ROLE;
 	const oldRunDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
@@ -416,7 +482,8 @@ test("extension registration is role-gated", () => {
 		const rootTools: string[] = [];
 		const rootCommands: string[] = [];
 		orchestratorAgentsExtension({ registerTool: (tool: { name: string }) => rootTools.push(tool.name), registerCommand: (name: string) => rootCommands.push(name), sendMessage() {} } as never);
-		assert.deepEqual(rootTools.slice(0, 4), ["orchestrate_plan", "review_target", "run_worker_agent", "run_parallel_workers"]);
+		assert.deepEqual(rootTools.slice(0, 5), ["orchestrate_plan", "review_target", "run_scout_agent", "run_worker_agent", "run_parallel_workers"]);
+		assert.equal(rootCommands.includes("scout"), true);
 		assert.equal(rootCommands.includes("review"), true);
 
 		process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR = tempProject();

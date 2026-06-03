@@ -63,7 +63,7 @@ Release/package smoke checklist:
 1. `npm run check`
 2. `npm pack --dry-run`
 3. Install or load the checkout in a Pi version satisfying the peer range (`>=0.78.0 <1`).
-4. Reload Pi, then smoke `/orchestrate`, `/work`, `/work-parallel`, `/review`, artifact writing, and (inside a child role session) `compact_session`.
+4. Reload Pi, then smoke `/orchestrate`, `/scout`, `/work`, `/work-parallel`, `/review`, artifact writing, and (inside a child role session) `compact_session`.
 
 
 For local Pi testing, install or load the package from this checkout, then reload Pi after source/config changes:
@@ -89,6 +89,15 @@ Use orchestrate_plan for @docs/plan.md
 ```
 
 The orchestrator receives a short prompt plus the plan content/reference, then coordinates scout/worker/reviewer. Worker and reviewer loop while it is useful; there is no default hard review-round cap.
+
+Standalone scout for broad reconnaissance/context gathering before implementation or review:
+
+```text
+/scout @extensions/pi-simple-subagents
+/scout Find the relevant Pi extension APIs and summarize only what the parent needs
+```
+
+or let the model call `run_scout_agent` for the full schema (`task`, optional `outputFile`). This creates a fresh run directory, starts one `scout`, and writes/copies a `scout-report.md` by default. It does not start worker/reviewer/orchestrator and is intended to keep broad reading out of the parent context.
 
 Standalone worker for direct implementation/fix/validation work:
 
@@ -120,14 +129,53 @@ Review fanout for an existing target:
 
 The text after the target is treated as focus/instructions. Use explicit `--reviewer` options when you want custom reviewer angles.
 
-The slash command also accepts a small option prefix before the target. Unknown `--...` options are rejected before any review starts so typos do not turn into accidental inline targets:
+The slash command also accepts a small option prefix before the target. Unknown `--...` options are rejected before any review starts so typos do not turn into accidental inline targets. Use `--context` to pass a compact prior scout report or other supplemental context; reviewers are instructed to treat it as orientation and verify it against current files:
 
 ```text
-/review [--scout|--no-scout] [--reviewer <angle>|--reviewer=<angle>]... @path-or-dir [focus/instructions]
-/review --no-scout --reviewer "security boundaries" --reviewer "packaging UX" @extensions/pi-simple-subagents
+/review [--scout|--no-scout] [--context <inline-or-@file>|--context=<inline-or-@file>] [--reviewer <angle>|--reviewer=<angle>]... @path-or-dir [focus/instructions]
+/review --context @.pi/agent-runs/<run-id>/scout-report.md --reviewer "security boundaries" --reviewer "packaging UX" @extensions/pi-simple-subagents
 ```
 
-or let the model call `review_target` for the full schema (`target`, `focus`, `reviewers`, `includeScout`). This creates a run directory, runs an optional scout, then starts fresh reviewers with distinct angles in parallel, preserves their configured order for synthesis, and writes a synthesized `final-summary.md`. Custom reviewer fanout is capped at 8 reviewers. If reviewer fanout fails, the extension writes `review-failure-summary.md` before throwing. It does not run a worker; in YOLO mode the extension does not enforce source-write restrictions.
+or let the model call `review_target` for the full schema (`target`, `focus`, `extraContext`, `reviewers`, `includeScout`). This creates a run directory, writes optional supplemental context to `extra-review-context.md`, runs an optional review-specific scout, then starts fresh reviewers with distinct angles in parallel, preserves their configured order for synthesis, and writes a synthesized `final-summary.md`. Custom reviewer fanout is capped at 8 reviewers. If reviewer fanout fails, the extension writes `review-failure-summary.md` before throwing. It does not run a worker; in YOLO mode the extension does not enforce source-write restrictions.
+
+## LLM routing guidance
+
+The extension exposes prompt guidelines on each root tool so models can choose the right workflow:
+
+- Use `run_scout_agent` for broad codebase or documentation reconnaissance before implementation or review. Ask for a compact handoff report and avoid implementation changes.
+- Use `review_target` for review-only work. Keep the review-specific scout enabled unless the user asks to skip it, and pass a prior `scout-report.md` as `extraContext` when available.
+- Use `orchestrate_plan` for plan-driven implementation that benefits from scout/worker/reviewer coordination and review/fix loops.
+- Use `run_worker_agent` for direct implementation, fix, or validation tasks that do not need a full orchestration loop.
+- Use `run_parallel_workers` only for clearly independent tasks unlikely to edit the same files; avoid it for overlapping refactors or ordered dependencies.
+
+## Tool and role option reference
+
+Root tools/commands:
+
+| Tool | Slash command | Key options | Use when |
+| --- | --- | --- | --- |
+| `orchestrate_plan` | `/orchestrate <plan-or-@file>` | `plan` | Plan-driven implementation should coordinate scout, worker, review, fixes, and validation. |
+| `run_scout_agent` | `/scout <task-or-@target>` | `task`, `outputFile?` | Broad reconnaissance/context gathering should be isolated into a compact handoff report. |
+| `review_target` | `/review [options] <target> [focus]` | `target`, `focus?`, `extraContext?`, `reviewers?`, `includeScout?` | Review-only fanout should inspect a target and synthesize findings without running a worker. |
+| `run_worker_agent` | `/work <task-or-@file>` | `task`, `purpose?`, `outputFile?` | Direct implementation, fix, or validation is enough and no full review loop is needed. |
+| `run_parallel_workers` | `/work-parallel <json>` | `tasks[{name?,task,purpose?,outputFile?}]` | Multiple implementation/fix/validation tasks are independent and unlikely to touch the same files. |
+
+Role options available to the orchestrator through `run_role_agent`:
+
+| Role | Allowed `purpose` | Session policy | Typical output artifact |
+| --- | --- | --- | --- |
+| `scout` | `context` | Fresh session per scout call | `scout.md` or `scout-review-context.md` |
+| `worker` | `implementation`, `fix`, `validation` | Persistent `sessions/worker.jsonl` per orchestration run | `worker.md`, `accepted-fixes-round-N.md`, `validation.md` |
+| `reviewer` | `review` | Fresh session per review round | `review-round-N.md` |
+
+Child-only tools:
+
+| Tool | Available to | Purpose |
+| --- | --- | --- |
+| `run_role_agent` | orchestrator only | Delegate a concrete role task; role/purpose combinations above are enforced. |
+| `mark_review_clean` | orchestrator only | Record that the latest worker changes have a clean synthesized review; informational, not a validation gate. |
+| `write_run_artifact` | all child roles | Write handoff artifacts under the run dir, excluding reserved internal dirs like `logs`, `outputs`, `sessions`, `tasks`. |
+| `compact_session` | all child roles | Request Pi compaction while preserving plan, decisions, changed files, validation state, and artifact paths. |
 
 ## Important workflow guidance
 
@@ -145,8 +193,8 @@ Pi is YOLO by default, and this extension follows that model for source edits an
 Pi is intentionally YOLO by default, and this extension follows that model for role tool access while adding a few operational guardrails:
 
 - Role runs do not pass a restrictive `--tools` allowlist; every role gets the normal inherited Pi tool surface.
-- Child runs have a configurable extension timeout (`children.timeoutMs`, default 30 minutes; set `0` to disable). Timeout kills the child process tree where supported and marks `timedOut` in results.
-- Child runs normally discover Pi from the installed `@earendil-works/pi-coding-agent` package `bin`. If your install layout is unusual, set `PI_SIMPLE_SUBAGENTS_PI_CLI=/absolute/path/to/pi` (or `pi.cmd` on Windows) or configure `children.piCliPath` in the global config; the environment variable wins. Project config may not set `children.piCliPath` because it is executable trust.
+- Child runs have a configurable per-child-process timeout (`children.timeoutMs`, default 30 minutes; set `0` to disable). Timeout kills that child process tree where supported and marks `timedOut` in results; multi-phase workflows can run longer than one timeout window because scout, worker, reviewer, and synthesis phases are separate children.
+- Child runs normally discover Pi from the installed `@earendil-works/pi-coding-agent` package `bin`. If your install layout is unusual, set `PI_SIMPLE_SUBAGENTS_PI_CLI=/absolute/path/to/pi` (or `pi.cmd` on Windows) or configure `children.piCliPath` in the global config; the environment variable wins. Treat both as trusted executable overrides. Project config may not set `children.piCliPath` because it is executable trust.
 - Child stdout/stderr/transcript artifacts are capped to avoid unbounded disk/context growth; chat previews remain separately truncated.
 - Plan/target/task `@` file references default to project-local, non-binary, and at most 1 MiB. Configure `references.allowOutsideCwd`, `references.allowBinary`, and `references.maxFileBytes` when you intentionally need broader access.
 - Artifact writes are constrained to the run directory and refuse/fence link-based append/write/copy surprises.
@@ -154,10 +202,11 @@ Pi is intentionally YOLO by default, and this extension follows that model for r
 - Scout/reviewer child runs are not fenced with source snapshots and are not auto-restored on mutation.
 - Orchestration runs do not archive/restore authorized source snapshots.
 - Review rounds and validation timing are orchestration choices, not hard gates. Child role-agent tool calls are serialized to protect persistent session files.
+- Parallel worker setup/spawn errors abort sibling workers; ordinary non-zero child exits are collected so sibling workers can finish before the batch reports failures.
 
 Unknown config keys are rejected during config loading so typos are visible instead of silently ignored. Before `1.0`, obsolete/legacy config fields are not carried forward; remove them instead of relying on compatibility shims.
 
-This policy is not a confidentiality boundary or OS/container sandbox. Run this extension only on trusted projects or inside an external sandbox when agents may execute untrusted code, access secrets, or run generated scripts. If child CLI discovery fails, set `PI_SIMPLE_SUBAGENTS_PI_CLI=/absolute/path/to/pi` or set `children.piCliPath` in the global config.
+This policy is not a confidentiality boundary or OS/container sandbox. Run this extension only on trusted projects or inside an external sandbox when agents may execute untrusted code, access secrets, or run generated scripts. If child CLI discovery fails, set `PI_SIMPLE_SUBAGENTS_PI_CLI=/absolute/path/to/pi` or set `children.piCliPath` in the global config; both values are trusted executable selection and should not come from untrusted repositories or shells.
 
 ## Compaction policy
 
@@ -195,7 +244,7 @@ Global defaults can live at:
 ~/.pi/agent/pi-simple-subagents/config.json
 ```
 
-Project config overrides global config, except project config is not allowed to set `children.piCliPath` because that value is executed as a child process. Put CLI path overrides in `PI_SIMPLE_SUBAGENTS_PI_CLI` or the global config. Unknown keys are treated as config errors to catch typos. Before `1.0`, legacy config fields are rejected rather than silently accepted; keep configs on the documented schema below.
+Project config overrides global config, except project config is not allowed to set `children.piCliPath` because that value is executed as a child process. Put CLI path overrides in `PI_SIMPLE_SUBAGENTS_PI_CLI` or the global config only when you trust that environment/global profile. Unknown keys are treated as config errors to catch typos. Before `1.0`, legacy config fields are rejected rather than silently accepted; keep configs on the documented schema below.
 
 Example with explicit balanced YOLO defaults (all sections are optional; omit anything you do not want to override):
 
@@ -230,8 +279,8 @@ Config reference:
 | `roles.<role>.model` | role-specific | Model for `orchestrator`, `scout`, `worker`, `reviewer`, or `synthesis`. |
 | `roles.<role>.thinking` | role-specific | Thinking suffix: `off`, `minimal`, `low`, `medium`, `high`, or `xhigh`. |
 | `children.forwardCurrentExtension` | `"auto"` | `"auto"` forwards this extension to child runs when the parent Pi process was started with `-e/--extension`; `"always"` always adds `--extension <this-extension>`; `"never"` never does. This helps temporary extension loading expose `write_run_artifact` and `compact_session` to child roles. |
-| `children.timeoutMs` | `1800000` | Child run timeout in milliseconds. Use `0` to disable. Timed-out runs return `timedOut: true` and exit code `124`. |
-| `children.piCliPath` | unset | Optional Pi CLI command/path override, allowed only in the global config. `PI_SIMPLE_SUBAGENTS_PI_CLI` environment variable takes precedence. Useful for unusual global installs, Windows, and troubleshooting CLI discovery. Do not accept this value from untrusted repos; it is executable trust. |
+| `children.timeoutMs` | `1800000` | Per-child-process timeout in milliseconds. Use `0` to disable. Timed-out child runs return `timedOut: true` and exit code `124`; full multi-phase workflows may exceed this because each phase gets its own child process. |
+| `children.piCliPath` | unset | Optional Pi CLI command/path override, allowed only in the global config. `PI_SIMPLE_SUBAGENTS_PI_CLI` environment variable takes precedence. Useful for unusual global installs, Windows, and troubleshooting CLI discovery. Do not accept this value or the environment override from untrusted repos/shells; it is executable trust. |
 | `references.maxFileBytes` | `1048576` | Maximum bytes read from an `@file` reference. Larger files are truncated with a warning. Use `0` to disable truncation. |
 | `references.allowOutsideCwd` | `false` | Allow `@` references outside the current project directory. Keep `false` to reduce accidental secret exposure. |
 | `references.allowBinary` | `false` | Allow binary-looking `@` files to be decoded as UTF-8. |
@@ -260,6 +309,20 @@ Orchestration runs create:
   accepted-fixes-round-N.md
   validation.md
   final-summary.md
+```
+
+Standalone scout runs create:
+
+```text
+.pi/agent-runs/<run-id>/
+  input-scout-task.md
+  config-effective.json
+  scout-report.md
+  logs/
+  outputs/
+  prompts/
+  sessions/
+  tasks/
 ```
 
 Standalone worker runs create:
@@ -301,6 +364,7 @@ Review-target runs create:
 .pi/agent-runs/<run-id>/
   input-target.md
   config-effective.json
+  extra-review-context.md        # when extraContext/--context is provided
   scout-review-context.md        # when scout is enabled
   review-*.md
   final-summary.md

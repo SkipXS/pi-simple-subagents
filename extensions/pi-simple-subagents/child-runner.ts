@@ -311,6 +311,7 @@ export async function spawnPiRole(input: {
 		let timedOut = false;
 		let stdoutLineTooLarge = false;
 		let artifactErrorMessage: string | undefined;
+		let killFallbackTimer: ReturnType<typeof setTimeout> | undefined;
 		const transcriptCap = { bytes: 0, capped: false };
 		const stderrCap = { bytes: 0, capped: false };
 		const formatStatusText = (action = statusAction) => {
@@ -403,6 +404,7 @@ export async function spawnPiRole(input: {
 			child.kill(signalName);
 		};
 		const abortChild = (reason = "Child run aborted.", options: { timeout?: boolean } = {}) => {
+			if (aborted) return;
 			if (options.timeout) timedOut = true;
 			aborted = true;
 			const line = `${reason}\n`;
@@ -416,10 +418,11 @@ export async function spawnPiRole(input: {
 				return;
 			}
 			signalChildTree("SIGTERM");
-			const killTimer = setTimeout(() => {
+			killFallbackTimer = setTimeout(() => {
 				signalChildTree("SIGKILL");
+				killFallbackTimer = undefined;
 			}, 5000);
-			(killTimer as { unref?: () => void }).unref?.();
+			(killFallbackTimer as { unref?: () => void }).unref?.();
 		};
 		const onAbort = () => abortChild();
 		const timeoutMs = input.config.children.timeoutMs;
@@ -431,6 +434,10 @@ export async function spawnPiRole(input: {
 			if (statusTimer) clearInterval(statusTimer);
 			input.onStatus?.({ key: statusKey, text: formatStatusText("finished") });
 			if (timeoutTimer) clearTimeout(timeoutTimer);
+			if (killFallbackTimer) {
+				clearTimeout(killFallbackTimer);
+				killFallbackTimer = undefined;
+			}
 			if (input.signal) input.signal.removeEventListener("abort", onAbort);
 			buffer += stdoutDecoder.end();
 			const stderrTail = stderrDecoder.end();

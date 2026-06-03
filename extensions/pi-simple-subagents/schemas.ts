@@ -3,11 +3,11 @@ import { Type, type Static } from "typebox";
 import { ROLE_RUN_PURPOSES, WORKER_PURPOSES } from "./constants.ts";
 
 export const RoleRunParams = Type.Object({
-	role: StringEnum(["scout", "worker", "reviewer"] as const, { description: "Role to run" }),
-	purpose: StringEnum(ROLE_RUN_PURPOSES, { description: "Why this role is being run. Use validation for final tests/end-user checks." }),
-	task: Type.String({ minLength: 1, description: "Concrete task for the role. Include artifact paths and constraints." }),
-	round: Type.Optional(Type.Integer({ minimum: 1 })),
-	outputFile: Type.Optional(Type.String({ minLength: 1, description: "Expected handoff artifact filename inside the run dir, e.g. review-round-1.md" })),
+	role: StringEnum(["scout", "worker", "reviewer"] as const, { description: "Role to run inside an orchestration. Allowed purpose combinations: scout=context; worker=implementation/fix/validation; reviewer=review." }),
+	purpose: StringEnum(ROLE_RUN_PURPOSES, { description: "Why this role is being run. Allowed combinations: scout=context; worker=implementation/fix/validation; reviewer=review. Use validation for final tests/end-user checks." }),
+	task: Type.String({ minLength: 1, description: "Concrete task for the role. Include artifact paths, expected output file, constraints, and relevant prior artifacts/context." }),
+	round: Type.Optional(Type.Integer({ minimum: 1, description: "Optional review/fix round number for artifact labels and status display." })),
+	outputFile: Type.Optional(Type.String({ minLength: 1, description: "Expected handoff artifact filename inside the run dir, e.g. scout.md, worker-round-1.md, review-round-1.md, validation.md. Must not use reserved run dirs." })),
 });
 export type RoleRunParams = Static<typeof RoleRunParams>;
 
@@ -19,10 +19,17 @@ export type OrchestrateParams = Static<typeof OrchestrateParams>;
 export const ReviewTargetParams = Type.Object({
 	target: Type.String({ minLength: 1, description: "Inline review scope, @file, @directory, or instruction pointing to what should be reviewed." }),
 	focus: Type.Optional(Type.String({ description: "Optional review focus, e.g. runtime bugs, security, packaging, UX." })),
+	extraContext: Type.Optional(Type.String({ description: "Optional supplemental context for reviewers, inline text or @file, especially a prior scout-report.md. Stored as extra-review-context.md; reviewers must verify it against current files." })),
 	reviewers: Type.Optional(Type.Array(Type.String({ minLength: 1, description: "Reviewer angle/focus." }), { minItems: 1, maxItems: 8 })),
 	includeScout: Type.Optional(Type.Boolean({ description: "Run a scout before reviewers. Default: true.", default: true })),
 });
 export type ReviewTargetParams = Static<typeof ReviewTargetParams>;
+
+export const ScoutAgentParams = Type.Object({
+	task: Type.String({ minLength: 1, description: "Concrete standalone scout/recon task, inline text, @file, or @directory. Use for broad reading/context gathering; the scout writes a compact handoff report and should not implement changes." }),
+	outputFile: Type.Optional(Type.String({ minLength: 1, description: "Expected scout report artifact filename inside the run dir. Default: scout-report.md" })),
+});
+export type ScoutAgentParams = Static<typeof ScoutAgentParams>;
 
 export const WorkerAgentParams = Type.Object({
 	task: Type.String({ minLength: 1, description: "Concrete standalone worker task, inline text, @file, or @directory. The worker may edit project files in YOLO mode." }),
@@ -40,7 +47,7 @@ export const ParallelWorkerTaskParams = Type.Object({
 export type ParallelWorkerTaskParams = Static<typeof ParallelWorkerTaskParams>;
 
 export const ParallelWorkersParams = Type.Object({
-	tasks: Type.Array(ParallelWorkerTaskParams, { minItems: 2, maxItems: 8, description: "Independent worker tasks to run concurrently. Do not use for tasks likely to edit the same files." }),
+	tasks: Type.Array(ParallelWorkerTaskParams, { minItems: 2, maxItems: 8, description: "Independent worker tasks to run concurrently. Do not use for overlapping refactors, shared-file edits, or tasks likely to edit the same files." }),
 });
 export type ParallelWorkersParams = Static<typeof ParallelWorkersParams>;
 
