@@ -166,12 +166,13 @@ Review fanout for an existing target:
 
 The text after the target is treated as focus/instructions. Use explicit `--reviewer` options when you want custom reviewer angles.
 
-The slash command also accepts a small option prefix before the target. Unknown `--...` options are rejected before any review starts so typos do not turn into accidental inline targets. Use `--context` to pass a compact prior scout report or other supplemental context; reviewers are instructed to treat it as orientation and verify it against current files. Each `--context` or `--reviewer` option consumes exactly one token, so multi-word values must be quoted. Unmatched single or double quotes are reported as command syntax errors before any review starts:
+The slash command also accepts a small option prefix before the target. Unknown `--...` options are rejected before any review starts so typos do not turn into accidental inline targets. Use a literal `--` end-of-options sentinel when the target itself starts with hyphens, e.g. `/review -- --fixture docs focus`. Use `--context` to pass a compact prior scout report or other supplemental context; reviewers are instructed to treat it as orientation and verify it against current files. Each `--context` or `--reviewer` option consumes exactly one token, so multi-word values must be quoted. Unmatched single or double quotes are reported as command syntax errors before any review starts:
 
 ```text
-/review [--scout|--no-scout] [--context <inline-or-@file>|--context=<inline-or-@file>] [--reviewer <angle>|--reviewer=<angle>]... @path-or-dir [focus/instructions]
+/review [--scout|--no-scout] [--context <inline-or-@file>|--context=<inline-or-@file>] [--reviewer <angle>|--reviewer=<angle>]... [--] @path-or-dir [focus/instructions]
 /review --context @.pi/agent-runs/<run-id>/scout-report.md --reviewer "security boundaries" --reviewer "packaging UX" @extensions/pi-simple-subagents
 /review --context "prior scout notes with spaces" --reviewer "runtime correctness" @README.md docs focus
+/review -- --fixture docs focus
 ```
 
 or let the model call `review_target` for the full schema (`target`, `focus`, `extraContext`, `reviewers`, `includeScout`, `includeOutput`). This creates a run directory, writes optional supplemental context to `extra-review-context.md`, runs an optional review-specific scout, then starts fresh reviewers with distinct angles in parallel, preserves their configured order for synthesis, and writes a synthesized `final-summary.md`. Custom reviewer fanout is capped at 8 reviewers. If reviewer fanout fails, the extension writes `review-failure-summary.md` before throwing. It does not run a worker; in YOLO mode the extension does not enforce source-write restrictions.
@@ -202,9 +203,9 @@ Role options available to the orchestrator through `run_role_agent`:
 
 | Role | Allowed `purpose` | Session policy | Typical output artifact |
 | --- | --- | --- | --- |
-| `scout` | `context` | Fresh session per scout call | `scout.md` or `scout-review-context.md` |
-| `worker` | `implementation`, `fix`, `validation` | Persistent `sessions/worker.jsonl` per orchestration run | `worker.md`, `accepted-fixes-round-N.md`, `validation.md` |
-| `reviewer` | `review` | Fresh session per review round | `review-round-N.md` |
+| `scout` | `context` | Fresh session per scout call | `scout.md`, then `scout-1.md` if needed, or explicit names like `scout-review-context.md` |
+| `worker` | `implementation`, `fix`, `validation` | Persistent `sessions/worker.jsonl` per orchestration run | `worker.md`, then `worker-1.md` if needed, or explicit names like `accepted-fixes-round-N.md`, `validation.md` |
+| `reviewer` | `review` | Fresh session per review round | `reviewer.md`, then `reviewer-1.md` if needed, or explicit names like `review-round-N.md` |
 
 Child-only tools:
 
@@ -227,6 +228,7 @@ Pi is YOLO by default, and this extension follows that model for source edits an
 - `mark_review_clean` records the orchestrator's synthesized review state; it does not gate validation in YOLO mode.
 - `run_role_agent` calls are serialized by default so the orchestrator's persistent worker session is not shared concurrently. Use `run_parallel_workers` when you intentionally want multiple standalone workers with isolated session files.
 - Run artifacts remain the audit trail: plans, delegations, logs, outputs, review summaries, validation notes, and final summaries.
+- `run_role_agent` default handoff names avoid overwriting existing artifacts in the run directory: the first worker default is `worker.md`, then `worker-1.md`, and similarly for scout/reviewer or round labels. For iterative loops, prefer explicit readable names such as `review-round-1.md`, `accepted-fixes-round-1.md`, `review-round-2.md`, and `validation.md`.
 - Expected child handoff artifacts are now required to exist at their configured relative path under the run directory. Missing artifacts fail the parent workflow instead of silently copying the child chat output, which prevents wrong-path writes such as Windows drive paths accidentally normalized to `/d/...`.
 
 ## Tool policy
@@ -236,7 +238,7 @@ Pi is intentionally YOLO by default, and this extension follows that model for r
 - Role runs do not pass a restrictive `--tools` allowlist; every role gets the normal inherited Pi tool surface.
 - Child runs have a configurable per-child-process timeout (`children.timeoutMs`, default 30 minutes; set `0` to disable). Timeout kills that child process tree where supported and marks `timedOut` in results; multi-phase workflows can run longer than one timeout window because scout, worker, reviewer, and synthesis phases are separate children.
 - Child runs normally discover Pi from the installed `@earendil-works/pi-coding-agent` package `bin`. If your install layout is unusual, set `PI_SIMPLE_SUBAGENTS_PI_CLI=/absolute/path/to/pi` (or `pi.cmd` on Windows) or configure `children.piCliPath` in the global config; the environment variable wins. Treat both as trusted executable overrides. Project config may not set `children.piCliPath` because it is executable trust.
-- Child stdout/stderr/transcript artifacts are capped to avoid unbounded disk/context growth; chat previews remain separately truncated.
+- Child stdout/stderr/transcript artifacts are capped to avoid unbounded disk/context growth; chat previews remain separately truncated. A single child stdout JSONL line is accepted up to the transcript artifact cap (4 MiB) and then fails clearly as oversized output.
 - Plan/target/task `@` file references default to project-local, non-binary, and at most 1 MiB. Configure `references.allowOutsideCwd`, `references.allowBinary`, and `references.maxFileBytes` when you intentionally need broader access.
 - Artifact writes are constrained to the run directory and refuse/fence link-based append/write/copy surprises.
 - Scout/reviewer/orchestrator source edits are not blocked by extension hooks.
@@ -422,7 +424,7 @@ Child transcripts, stderr logs, referenced input files, reference warnings, and 
 
 ## Troubleshooting and failure recovery
 
-- Unknown slash options/fields: `/review` rejects unknown `--...` options; `/work-parallel` rejects unknown JSON keys. Fix the typo and rerun; no child workers/reviewers are started for parser errors.
+- Unknown slash options/fields: `/review` rejects unknown `--...` options before the target; use `/review -- --hyphenated-target` when the target itself starts with hyphens. `/work-parallel` rejects unknown JSON keys. Fix the typo and rerun; no child workers/reviewers are started for parser errors.
 - Config parse/schema errors: Pi reports the config path and key. Remove unknown/legacy keys or move trusted `children.piCliPath` overrides to the global config or `PI_SIMPLE_SUBAGENTS_PI_CLI`.
 - Child CLI discovery failures: set `PI_SIMPLE_SUBAGENTS_PI_CLI=/absolute/path/to/pi` (or `pi.cmd` on Windows), then rerun the workflow.
 - Timeouts/truncated output: inspect `logs/*.stderr.log`, `logs/*.jsonl`, and `outputs/*.md` in the run directory. Increase `children.timeoutMs` or caps only when you trust the workload.

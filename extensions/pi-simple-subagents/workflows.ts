@@ -117,6 +117,10 @@ export function parseReviewTargetCommand(input: string): ReviewTargetParams {
 	let cursor = 0;
 	while (cursor < tokens.length) {
 		const token = tokens[cursor];
+		if (token === "--") {
+			cursor++;
+			break;
+		}
 		if (token === "--no-scout") {
 			includeScout = false;
 			cursor++;
@@ -162,7 +166,7 @@ export function parseReviewTargetCommand(input: string): ReviewTargetParams {
 	if (cursor > 0) {
 		const target = tokens[cursor];
 		if (!target) throw new Error("/review requires a target after options");
-		if (target.startsWith("--")) throw unknownOptionError("/review", target);
+		if (target.startsWith("--") && tokens[cursor - 1] !== "--") throw unknownOptionError("/review", target);
 		const focus = tokens.slice(cursor + 1).join(" ").trim();
 		return {
 			target: quoteTargetIfNeeded(target),

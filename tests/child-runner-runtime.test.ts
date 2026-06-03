@@ -34,7 +34,7 @@ test("pre-aborted child runs do not create artifacts or spawn a child", async ()
 	assert.equal(fs.existsSync(runDir), false);
 });
 
-test("single-line JSONL stdout larger than 1 MiB is parsed instead of reported as no output", async () => {
+test("single-line JSONL stdout below the 4 MiB hard cap is parsed instead of reported as no output", async () => {
 	const cwd = tempProject();
 	const runDir = path.join(cwd, ".pi", "run");
 	const cli = path.join(cwd, "fake-pi.js");

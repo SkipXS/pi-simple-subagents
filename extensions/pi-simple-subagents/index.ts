@@ -101,6 +101,10 @@ function parseStatusLine(text: string, fallback: string): ParsedStatusLine {
 	};
 }
 
+function isTerminalStatusAction(action: string): boolean {
+	return action === "finished" || action === "failed" || action === "timed out" || action === "aborted";
+}
+
 function finishStatusText(existing: string | undefined, fallback: string): string {
 	if (!existing) return `${fallback}: finished`;
 	const parsed = parseStatusLine(existing, fallback);
@@ -151,6 +155,15 @@ function requireExpectedRunArtifact(runDir: string, outputFile: string, result: 
 	return validateOutputArtifactPath(runDir, outputFile);
 }
 
+function defaultRoleOutputFile(runDir: string, label: string, nextSequence: () => number): string {
+	const firstCandidate = `${label}.md`;
+	if (!fs.existsSync(validateOutputArtifactPath(runDir, firstCandidate))) return firstCandidate;
+	for (;;) {
+		const candidate = `${label}-${nextSequence()}.md`;
+		if (!fs.existsSync(validateOutputArtifactPath(runDir, candidate))) return candidate;
+	}
+}
+
 function assertKnownKeys(record: Record<string, unknown>, allowedKeys: readonly string[], label: string): void {
 	const unknown = Object.keys(record).filter((key) => !allowedKeys.includes(key));
 	if (unknown.length > 0) throw new Error(`${label} has unknown field${unknown.length === 1 ? "" : "s"}: ${unknown.join(", ")}`);
@@ -159,13 +172,13 @@ function assertKnownKeys(record: Record<string, unknown>, allowedKeys: readonly 
 function formatSubagentProgress(snapshot: SubagentProgressSnapshot): string {
 	if (snapshot.statuses.length === 0) return ["Subagents: ⠋ working", "- starting"].join("\n");
 	const parsed = snapshot.statuses.map((status) => ({ key: status.key, ...parseStatusLine(status.text, status.key) }));
-	const active = parsed.find((status) => status.action !== "finished");
-	const workingIndicator = active?.spinner ?? (parsed.length > 0 && parsed.every((status) => status.action === "finished") ? "✓" : "⠋");
+	const active = parsed.find((status) => !isTerminalStatusAction(status.action));
+	const workingIndicator = active?.spinner ?? (parsed.length > 0 && parsed.every((status) => isTerminalStatusAction(status.action)) ? "✓" : "⠋");
 	const header = `Subagents: ${workingIndicator} ${active ? "working" : "done"}`;
 	const roleWidth = Math.max(...parsed.map((status) => status.label.length));
 	const statusWidth = Math.max(0, ...parsed.map((status) => status.status.length));
 	const lines = parsed.map((status) => {
-		const marker = status.action === "finished" ? "✓" : "•";
+		const marker = status.action === "finished" ? "✓" : isTerminalStatusAction(status.action) ? "!" : "•";
 		const role = status.label.padEnd(roleWidth);
 		const statusText = status.status ? `${status.status.padEnd(statusWidth)} │ ${status.action}` : status.action;
 		return `- ${marker} ${role} │ ${statusText}`;
@@ -229,6 +242,7 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 	let reviewRuns = persistedState?.reviewRuns ?? (Number(process.env[REVIEW_RUNS_ENV] ?? "0") || 0);
 	let reviewRunsSinceLatestWorker = persistedState?.reviewRunsSinceLatestWorker ?? 0;
 	let latestWorkerRunReviewedClean = persistedState?.latestWorkerRunReviewedClean ?? false;
+	let roleOutputSequence = 0;
 	const persistState = () => {
 		if (!runDir) return undefined;
 		return writeOrchestrationState(runDir, { workerRuns, reviewRuns, reviewRunsSinceLatestWorker, latestWorkerRunReviewedClean });
@@ -350,6 +364,7 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 				"Use run_role_agent from orchestrator after deciding the next workflow step.",
 				"Use purpose=validation for final tests or end-user checks when useful; Pi YOLO policy applies.",
 				"run_role_agent calls are serialized; do not rely on parallel worker execution in a single assistant turn.",
+				"Default output artifacts avoid overwriting existing role artifacts, but use explicit readable outputFile names for iterative loops such as review-round-1.md, accepted-fixes-round-1.md, and validation.md.",
 			],
 			executionMode: "sequential",
 			parameters: RoleRunParams,
@@ -358,7 +373,7 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 				const config = loadConfig(ctx.cwd);
 				const label = `${params.role}${params.round ? `-round-${params.round}` : ""}`;
 				const taskInput = requireNonEmpty(params.task, "role task");
-				const outputFile = params.outputFile?.trim() || `${label}.md`;
+				const outputFile = params.outputFile?.trim() || defaultRoleOutputFile(runDir, label, () => ++roleOutputSequence);
 				const outputArtifactPath = validateOutputArtifactPath(runDir, outputFile);
 				const task = `${taskInput}
 

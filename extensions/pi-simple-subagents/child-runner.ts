@@ -466,7 +466,6 @@ export async function spawnPiRole(input: {
 			if (settled) return;
 			settled = true;
 			if (statusTimer) clearInterval(statusTimer);
-			input.onStatus?.({ key: statusKey, text: formatStatusText("finished") });
 			if (timeoutTimer) clearTimeout(timeoutTimer);
 			if (killFallbackTimer) {
 				clearTimeout(killFallbackTimer);
@@ -494,6 +493,11 @@ export async function spawnPiRole(input: {
 				fullOutput = `${fullOutput}\n\nChild run infrastructure error:\n${artifactErrorMessage}`;
 			}
 			const effectiveExitCode = artifactErrorMessage || stdoutLineTooLarge ? 1 : exitCode === 0 && isFailedStopReason(assistantStopReason) ? 1 : exitCode;
+			const finalStatus = timedOut ? "timed out"
+				: artifactErrorMessage || stdoutLineTooLarge ? "failed"
+					: aborted ? "aborted"
+						: effectiveExitCode !== 0 ? "failed" : "finished";
+			input.onStatus?.({ key: statusKey, text: formatStatusText(finalStatus) });
 			const truncatedOutput = truncateForTool(fullOutput, MAX_TOOL_OUTPUT_BYTES);
 			const truncatedStderr = truncateForTool(stderr, MAX_STDERR_BYTES);
 			resolve({

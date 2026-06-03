@@ -76,6 +76,11 @@ test("parseReviewTargetCommand supports scout, context, and reviewer command opt
 		focus: "docs",
 		extraContext: "@\"reports/old scout.md\"",
 	});
+	assert.deepEqual(parseReviewTargetCommand("--no-scout -- --fixture docs"), {
+		target: "--fixture",
+		focus: "docs",
+		includeScout: false,
+	});
 });
 
 test("parseReviewTargetCommand preserves quoted Windows backslashes", () => {
@@ -211,9 +216,11 @@ test("child runs report timeout accurately", async () => {
 	const config = cloneConfig();
 	config.children.piCliPath = cli;
 	config.children.timeoutMs = 50;
-	const result = await spawnPiRole({ cwd, role: "worker", task: "timeout test", runDir, config });
+	const statuses: Array<{ key: string; text: string | undefined }> = [];
+	const result = await spawnPiRole({ cwd, role: "worker", task: "timeout test", runDir, config, statusKey: "subagent:timeout-worker", statusLabel: "timeout-worker", onStatus: (status) => statuses.push(status) });
 	assert.equal(result.timedOut, true);
 	assert.equal(result.exitCode, 124);
+	assert.match(statuses.at(-1)?.text ?? "", /timeout-worker: .*timed out$/);
 });
 
 test("child runs emit per-subagent status with tool activity and usage metrics", async () => {
@@ -492,6 +499,48 @@ console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", 
 		assert.equal(fs.existsSync(expected), true);
 		assert.equal(result.details.outputPath, expected);
 		assert.match(fs.readFileSync(expected, "utf8"), /child done/);
+	} finally {
+		if (oldRole === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+		else process.env.PI_ORCHESTRATOR_AGENT_ROLE = oldRole;
+		if (oldRunDir === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+		else process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR = oldRunDir;
+		if (oldCli === undefined) delete process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
+		else process.env.PI_SIMPLE_SUBAGENTS_PI_CLI = oldCli;
+	}
+});
+
+test("run_role_agent default output artifact avoids existing artifacts", async () => {
+	const oldRole = process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+	const oldRunDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+	const oldCli = process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
+	try {
+		const cwd = tempProject();
+		const runDir = path.join(cwd, ".pi", "run");
+		const cli = path.join(cwd, "fake-pi.js");
+		fs.writeFileSync(cli, `
+const fs = require("node:fs");
+const path = require("node:path");
+const runDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+const tasksDir = path.join(runDir, "tasks");
+const taskFile = fs.readdirSync(tasksDir).map((name) => path.join(tasksDir, name)).sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)[0];
+const task = fs.readFileSync(taskFile, "utf8");
+const outputFile = /^Expected output artifact: (.+)$/m.exec(task)[1];
+fs.mkdirSync(path.dirname(path.join(runDir, outputFile)), { recursive: true });
+fs.writeFileSync(path.join(runDir, outputFile), outputFile, "utf8");
+console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", provider: "fake", model: "fake-model", content: [{ type: "text", text: outputFile }], stopReason: "stop" } }));
+`, "utf8");
+		process.env.PI_ORCHESTRATOR_AGENT_ROLE = "orchestrator";
+		process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR = runDir;
+		process.env.PI_SIMPLE_SUBAGENTS_PI_CLI = cli;
+		let runRole: { execute: (...args: any[]) => Promise<any> } | undefined;
+		orchestratorAgentsExtension({ registerTool: (tool: { name: string; execute: (...args: any[]) => Promise<any> }) => { if (tool.name === "run_role_agent") runRole = tool; }, registerCommand() {}, sendMessage() {} } as never);
+		assert.ok(runRole);
+		const first = await runRole.execute("id", { role: "worker", purpose: "implementation", task: "first" }, new AbortController().signal, undefined, { cwd } as never);
+		const second = await runRole.execute("id", { role: "worker", purpose: "implementation", task: "second" }, new AbortController().signal, undefined, { cwd } as never);
+		assert.equal(first.details.outputPath, path.join(runDir, "worker.md"));
+		assert.equal(second.details.outputPath, path.join(runDir, "worker-1.md"));
+		assert.equal(fs.readFileSync(path.join(runDir, "worker.md"), "utf8"), "worker.md");
+		assert.equal(fs.readFileSync(path.join(runDir, "worker-1.md"), "utf8"), "worker-1.md");
 	} finally {
 		if (oldRole === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_ROLE;
 		else process.env.PI_ORCHESTRATOR_AGENT_ROLE = oldRole;
