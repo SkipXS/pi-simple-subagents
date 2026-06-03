@@ -357,7 +357,7 @@ export async function runReviewTarget(cwd: string, params: ReviewTargetParams, s
 	onUpdate?.("review-target: synthesis running");
 	const synthesis = await dep.spawnPiRole({
 		cwd,
-		role: "reviewer",
+		role: "synthesis",
 		task: `Synthesize this review-only run.\nTarget source: ${target.source}\nFocus: ${focus}${referenceWarningText}\nRun directory: ${dir}\nRead input-target.md, ${scout ? "scout-review-context.md, " : ""}the review artifacts and output logs below, then write final-summary.md.\n\nReview artifacts and outputs:\n${reviewRecords.map((r, i) => `- Reviewer ${i + 1} (${r.angle}): artifact ${r.expectedPath}; output log ${r.result.outputPath}`).join("\n")}`,
 		runDir: dir,
 		config,

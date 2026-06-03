@@ -176,6 +176,7 @@ Artifacts remain the source of truth after compaction.
 - `orchestrator` uses one persistent session for the run: `sessions/orchestrator.jsonl`.
 - `worker` uses one persistent session for implementation and all fix rounds: `sessions/worker.jsonl`. `run_role_agent` is sequential, so this file is not written by multiple worker processes at the same time.
 - `reviewer` gets a fresh session for every review round: `sessions/reviewer-<timestamp>.jsonl`.
+- `synthesis` gets a fresh session for review synthesis: `sessions/synthesis-<timestamp>.jsonl`.
 - `scout` gets a fresh session for each scout call: `sessions/scout-<timestamp>.jsonl`.
 
 Reviewer context should be passed through curated artifacts (`input-plan.md`, `orchestration.md`, `scout.md`, worker reports, accepted fixes) plus direct inspection of the relevant current files. Lightweight orchestration state is persisted in `orchestration-state.json` for resume/restart continuity.
@@ -196,15 +197,16 @@ Global defaults can live at:
 
 Project config overrides global config, except project config is not allowed to set `children.piCliPath` because that value is executed as a child process. Put CLI path overrides in `PI_SIMPLE_SUBAGENTS_PI_CLI` or the global config. Unknown keys are treated as config errors to catch typos. Before `1.0`, legacy config fields are rejected rather than silently accepted; keep configs on the documented schema below.
 
-Example with explicit YOLO defaults (all sections are optional; omit anything you do not want to override):
+Example with explicit balanced YOLO defaults (all sections are optional; omit anything you do not want to override):
 
 ```json
 {
   "roles": {
-    "orchestrator": { "model": "openai-codex/gpt-5.5", "thinking": "high" },
+    "orchestrator": { "model": "openai-codex/gpt-5.5", "thinking": "medium" },
     "scout": { "model": "openai-codex/gpt-5.3-codex-spark", "thinking": "low" },
     "worker": { "model": "openai-codex/gpt-5.5", "thinking": "medium" },
-    "reviewer": { "model": "openai-codex/gpt-5.5", "thinking": "high" }
+    "reviewer": { "model": "openai-codex/gpt-5.5", "thinking": "low" },
+    "synthesis": { "model": "openai-codex/gpt-5.5", "thinking": "medium" }
   },
   "children": {
     "forwardCurrentExtension": "auto",
@@ -225,7 +227,7 @@ Config reference:
 
 | Key | Default | Description |
 | --- | --- | --- |
-| `roles.<role>.model` | role-specific | Model for `orchestrator`, `scout`, `worker`, or `reviewer`. |
+| `roles.<role>.model` | role-specific | Model for `orchestrator`, `scout`, `worker`, `reviewer`, or `synthesis`. |
 | `roles.<role>.thinking` | role-specific | Thinking suffix: `off`, `minimal`, `low`, `medium`, `high`, or `xhigh`. |
 | `children.forwardCurrentExtension` | `"auto"` | `"auto"` forwards this extension to child runs when the parent Pi process was started with `-e/--extension`; `"always"` always adds `--extension <this-extension>`; `"never"` never does. This helps temporary extension loading expose `write_run_artifact` and `compact_session` to child roles. |
 | `children.timeoutMs` | `1800000` | Child run timeout in milliseconds. Use `0` to disable. Timed-out runs return `timedOut: true` and exit code `124`. |
@@ -329,7 +331,7 @@ While child agents run in interactive Pi, tool calls stream a stable multi-line 
 ```text
 Subagents:
 - ⠋ worker    : ↑1k ↓2k R3k W4.0k $0.123 3.7%/272k (auto) - gpt-5.5 • medium - finished
-- ⠙ reviewer-1: ↑867 ↓103 R31k $0.023 11.8%/272k (auto) - gpt-5.5 • high   - read references.ts
+- ⠙ reviewer-1: ↑867 ↓103 R31k $0.023 11.8%/272k (auto) - gpt-5.5 • low    - read references.ts
 ```
 
 The context percentage is estimated from the latest child response token total and known model-family context windows; child processes do not currently expose Pi's exact parent footer context calculation.

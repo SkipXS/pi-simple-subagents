@@ -43,9 +43,9 @@ export function ensureDir(dir: string): void {
 }
 
 export function resolveArtifactPath(runDir: string, name: string): string {
-	const safeName = name.replace(/^[/\\]+/, "");
-	const target = path.resolve(runDir, safeName);
-	const relative = path.relative(runDir, target);
+	const absoluteRunDir = path.resolve(runDir);
+	const target = path.isAbsolute(name) ? path.resolve(name) : path.resolve(absoluteRunDir, name.replace(/^[/\\]+/, ""));
+	const relative = path.relative(absoluteRunDir, target);
 	if (relative.startsWith("..") || path.isAbsolute(relative)) throw new Error(`Artifact path escapes run dir: ${name}`);
 	return target;
 }
@@ -76,13 +76,11 @@ function assertExistingParentsAreNotSymlinks(runDir: string, target: string): vo
 	}
 }
 
-function ensureArtifactTarget(runDir: string, target: string): void {
-	const absoluteRunDir = path.resolve(runDir);
-	const absoluteTarget = path.resolve(target);
-	const relative = path.relative(absoluteRunDir, absoluteTarget);
-	if (relative.startsWith("..") || path.isAbsolute(relative)) throw new Error(`Artifact path escapes run dir: ${target}`);
-	assertExistingParentsAreNotSymlinks(absoluteRunDir, absoluteTarget);
+function ensureArtifactTarget(runDir: string, target: string): string {
+	const absoluteTarget = resolveArtifactPath(runDir, target);
+	assertExistingParentsAreNotSymlinks(runDir, absoluteTarget);
 	fs.mkdirSync(path.dirname(absoluteTarget), { recursive: true });
+	return absoluteTarget;
 }
 
 const RESERVED_OUTPUT_ARTIFACT_DIRS = new Set(["delegations", "logs", "outputs", "prompts", "sessions", "tasks"]);
@@ -102,13 +100,13 @@ export function validateOutputArtifactPath(runDir: string, name: string): string
 }
 
 function ensureArtifactFileForAppend(runDir: string, target: string): void {
-	ensureArtifactTarget(runDir, target);
-	assertNoExistingLink(target, "append");
+	const resolvedTarget = ensureArtifactTarget(runDir, target);
+	assertNoExistingLink(resolvedTarget, "append");
 	try {
-		fs.writeFileSync(target, "", { encoding: "utf8", flag: "wx" });
+		fs.writeFileSync(resolvedTarget, "", { encoding: "utf8", flag: "wx" });
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-		assertNoExistingLink(target, "append");
+		assertNoExistingLink(resolvedTarget, "append");
 	}
 }
 
@@ -126,23 +124,22 @@ function atomicReplaceFile(target: string, contentOrSource: string, mode: "conte
 }
 
 export function writeArtifact(runDir: string, name: string, content: string): string {
-	const target = resolveArtifactPath(runDir, name);
-	ensureArtifactTarget(runDir, target);
+	const target = ensureArtifactTarget(runDir, name);
 	assertNoExistingLink(target, "replace");
 	atomicReplaceFile(target, content, "content");
 	return target;
 }
 
 export function appendArtifactFile(runDir: string, target: string, content: string): void {
-	ensureArtifactTarget(runDir, target);
-	assertNoExistingLink(target, "append");
-	fs.appendFileSync(target, content, { encoding: "utf8", flag: "a" });
+	const resolvedTarget = ensureArtifactTarget(runDir, target);
+	assertNoExistingLink(resolvedTarget, "append");
+	fs.appendFileSync(resolvedTarget, content, { encoding: "utf8", flag: "a" });
 }
 
 export function copyArtifactFile(runDir: string, source: string, target: string): void {
-	ensureArtifactTarget(runDir, target);
-	assertNoExistingLink(target, "replace");
-	atomicReplaceFile(target, source, "copy");
+	const resolvedTarget = ensureArtifactTarget(runDir, target);
+	assertNoExistingLink(resolvedTarget, "replace");
+	atomicReplaceFile(resolvedTarget, source, "copy");
 }
 
 export function uniqueSuffix(): string {

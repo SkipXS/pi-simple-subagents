@@ -5,7 +5,7 @@ export const RUN_DIR_ENV = "PI_ORCHESTRATOR_AGENT_RUN_DIR";
 export const WORKER_RUNS_ENV = "PI_ORCHESTRATOR_AGENT_WORKER_RUNS";
 export const REVIEW_RUNS_ENV = "PI_ORCHESTRATOR_AGENT_REVIEW_RUNS";
 
-export const ROLE_NAMES = ["orchestrator", "scout", "worker", "reviewer"] as const;
+export const ROLE_NAMES = ["orchestrator", "scout", "worker", "reviewer", "synthesis"] as const;
 
 export type RoleName = typeof ROLE_NAMES[number];
 export type Purpose = typeof ROLE_RUN_PURPOSES[number];
@@ -38,6 +38,7 @@ export const ROLE_PURPOSES: Record<Exclude<RoleName, "orchestrator">, Set<Purpos
 	scout: new Set(["context"]),
 	worker: new Set(["implementation", "fix", "validation"]),
 	reviewer: new Set(["review"]),
+	synthesis: new Set(["review"]),
 };
 
 export function validateRolePurpose(role: Exclude<RoleName, "orchestrator">, purpose: Purpose): void {

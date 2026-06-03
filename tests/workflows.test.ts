@@ -76,6 +76,28 @@ test("child task @ references are quoted for whitespace paths", () => {
 	assert.equal(quoteAtReferencePath("/tmp/pi-task.md"), "@/tmp/pi-task.md");
 });
 
+test("child role prompt is passed via append-system-prompt file", async () => {
+	const cwd = tempProject();
+	const runDir = path.join(cwd, ".pi", "run");
+	const cli = path.join(cwd, "fake-pi.js");
+	fs.writeFileSync(cli, `
+const fs = require("node:fs");
+const path = require("node:path");
+fs.writeFileSync(path.join(process.cwd(), "argv.json"), JSON.stringify(process.argv.slice(2)), "utf8");
+console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", provider: "fake", model: "fake-model", content: [{ type: "text", text: "done" }], stopReason: "stop" } }));
+`, "utf8");
+	const config = cloneConfig();
+	config.children.piCliPath = cli;
+	const result = await spawnPiRole({ cwd, role: "worker", task: "prompt test", runDir, config, systemPrompt: "custom role prompt" });
+	const argv = JSON.parse(fs.readFileSync(path.join(cwd, "argv.json"), "utf8")) as string[];
+	const promptArgIndex = argv.indexOf("--append-system-prompt");
+
+	assert.equal(result.exitCode, 0);
+	assert.equal(argv.includes("--system-prompt"), false);
+	assert.notEqual(promptArgIndex, -1);
+	assert.match(fs.readFileSync(argv[promptArgIndex + 1], "utf8"), /custom role prompt/);
+});
+
 test("current extension forwarding supports temporary -e loading", () => {
 	assert.equal(wasLoadedWithExtensionFlag(["node", "cli", "-e", "./extension.ts"]), true);
 	assert.equal(wasLoadedWithExtensionFlag(["node", "cli", "--extension=./extension.ts"]), true);
@@ -179,6 +201,26 @@ console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", 
 	assert.equal(statuses.some((status) => /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] /u.test(status.text ?? "")), true);
 });
 
+test("child status spinner updates faster than model status cadence", async () => {
+	const cwd = tempProject();
+	const runDir = path.join(cwd, ".pi", "run");
+	const cli = path.join(cwd, "fake-pi.js");
+	fs.writeFileSync(cli, `
+setTimeout(() => {
+	console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", provider: "fake", model: "fake-model", content: [{ type: "text", text: "done" }], stopReason: "stop" } }));
+}, 450);
+`, "utf8");
+	const config = cloneConfig();
+	config.children.piCliPath = cli;
+	const statuses: Array<{ key: string; text: string | undefined }> = [];
+	const result = await spawnPiRole({ cwd, role: "worker", task: "spinner test", runDir, config, statusKey: "subagent:test-worker", statusLabel: "test-worker", onStatus: (status) => statuses.push(status) });
+	const spinnerFrames = new Set(statuses.flatMap((status) => /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/u.exec(status.text ?? "")?.[0] ?? []));
+
+	assert.equal(result.exitCode, 0);
+	assert.ok(statuses.length >= 3, `expected multiple fast spinner updates, got ${statuses.length}: ${statuses.map((status) => status.text).join(" | ")}`);
+	assert.ok(spinnerFrames.size >= 2, `expected spinner to advance frames, got ${[...spinnerFrames].join("")}`);
+});
+
 test("parallel workers abort and await siblings after a child setup/spawn failure", async () => {
 	const cwd = tempProject();
 	const config = cloneConfig();
@@ -223,7 +265,8 @@ test("review target reviewers run in parallel and preserve result order", async 
 
 	assert.equal(maxActiveReviewers, 2);
 	assert.deepEqual(result.reviews.map((review) => review.role), ["reviewer", "reviewer"]);
-	assert.deepEqual(calls.slice(0, 2), ["reviewer:b", "reviewer:a"]);
+	assert.equal(result.synthesis.role, "synthesis");
+	assert.deepEqual(calls, ["reviewer:b", "reviewer:a", "synthesis:synthesis"]);
 });
 
 test("review target caps custom reviewer fanout", async () => {

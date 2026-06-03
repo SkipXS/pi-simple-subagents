@@ -6,7 +6,7 @@ import * as path from "node:path";
 import { loadConfig } from "../extensions/pi-simple-subagents/config.ts";
 import { readReference } from "../extensions/pi-simple-subagents/references.ts";
 import { validateRolePurpose } from "../extensions/pi-simple-subagents/roles.ts";
-import { appendArtifactFile, copyArtifactFile, resolveRoleSessionFile, resolveRunBaseDir, validateOutputArtifactPath, writeArtifact } from "../extensions/pi-simple-subagents/artifacts.ts";
+import { appendArtifactFile, copyArtifactFile, resolveArtifactPath, resolveRoleSessionFile, resolveRunBaseDir, validateOutputArtifactPath, writeArtifact } from "../extensions/pi-simple-subagents/artifacts.ts";
 import { readOrchestrationState } from "../extensions/pi-simple-subagents/state.ts";
 
 function tempProject(): string {
@@ -142,6 +142,22 @@ test("references can intentionally allow outside, binary, and truncate large fil
 	assert.match(large.warnings.join("\n"), /truncated|outside/);
 	assert.equal(binary.source, binaryPath);
 	assert.match(binary.warnings.join("\n"), /binary|non-text/);
+});
+
+test("artifact absolute paths inside the run dir are not rewritten as relative names", () => {
+	const runDir = tempProject();
+	const absoluteLog = path.join(runDir, "logs", "child.jsonl");
+	const outside = path.join(tempProject(), "outside.log");
+
+	assert.equal(resolveArtifactPath(runDir, absoluteLog), absoluteLog);
+	assert.throws(() => resolveArtifactPath(runDir, outside), /escapes run dir/);
+
+	const written = writeArtifact(runDir, absoluteLog, "first\n");
+	appendArtifactFile(runDir, written, "second\n");
+	appendArtifactFile(runDir, "logs/child.jsonl", "third\n");
+
+	assert.equal(written, absoluteLog);
+	assert.equal(fs.readFileSync(absoluteLog, "utf8"), "first\nsecond\nthird\n");
 });
 
 test("artifact writes do not follow existing links outside the run dir", () => {

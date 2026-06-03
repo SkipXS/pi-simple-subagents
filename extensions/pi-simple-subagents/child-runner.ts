@@ -52,7 +52,7 @@ function isFailedStopReason(stopReason: string | undefined): boolean {
 }
 
 const STATUS_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-const STATUS_UPDATE_INTERVAL_MS = 1000;
+const STATUS_SPINNER_INTERVAL_MS = 120;
 
 interface UsageTotals {
 	input: number;
@@ -275,7 +275,7 @@ export async function spawnPiRole(input: {
 	}
 	args.push(
 		"--model", applyThinking(roleConfig.model, roleConfig.thinking),
-		"--system-prompt", promptPath,
+		"--append-system-prompt", promptPath,
 	);
 	args.push("-p", quoteAtReferencePath(taskPath));
 	const env: NodeJS.ProcessEnv = {
@@ -306,7 +306,6 @@ export async function spawnPiRole(input: {
 		let statusFrame = 0;
 		let statusAction = "starting";
 		let lastStatusText = "";
-		let lastStatusEmitAt = 0;
 		let settled = false;
 		let aborted = false;
 		let timedOut = false;
@@ -322,11 +321,8 @@ export async function spawnPiRole(input: {
 		const emitStatus = (options: { force?: boolean; action?: string } = {}) => {
 			if (!input.onStatus) return;
 			const text = formatStatusText(options.action);
-			const now = Date.now();
 			if (!options.force && text === lastStatusText) return;
-			if (!options.force && now - lastStatusEmitAt < STATUS_UPDATE_INTERVAL_MS) return;
 			lastStatusText = text;
-			lastStatusEmitAt = now;
 			input.onStatus({ key: statusKey, text });
 		};
 		const setStatusAction = (action: string) => {
@@ -334,7 +330,7 @@ export async function spawnPiRole(input: {
 			emitStatus();
 		};
 		emitStatus({ force: true });
-		const statusTimer = input.onStatus ? setInterval(emitStatus, STATUS_UPDATE_INTERVAL_MS) : undefined;
+		const statusTimer = input.onStatus ? setInterval(emitStatus, STATUS_SPINNER_INTERVAL_MS) : undefined;
 		(statusTimer as { unref?: () => void } | undefined)?.unref?.();
 		const rememberArtifactError = (context: string, error: unknown) => {
 			if (artifactErrorMessage) return;

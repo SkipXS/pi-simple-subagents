@@ -2,7 +2,7 @@
   "roles": {
     "orchestrator": {
       "model": "openai-codex/gpt-5.5",
-      "thinking": "high"
+      "thinking": "medium"
     },
     "scout": {
       "model": "openai-codex/gpt-5.3-codex-spark",
@@ -14,7 +14,11 @@
     },
     "reviewer": {
       "model": "openai-codex/gpt-5.5",
-      "thinking": "high"
+      "thinking": "low"
+    },
+    "synthesis": {
+      "model": "openai-codex/gpt-5.5",
+      "thinking": "medium"
     }
   },
   "children": {

@@ -40,7 +40,7 @@ export const DEFAULT_CONFIG: Config = {
 	roles: {
 		orchestrator: {
 			model: "openai-codex/gpt-5.5",
-			thinking: "high",
+			thinking: "medium",
 		},
 		scout: {
 			model: "openai-codex/gpt-5.3-codex-spark",
@@ -52,7 +52,11 @@ export const DEFAULT_CONFIG: Config = {
 		},
 		reviewer: {
 			model: "openai-codex/gpt-5.5",
-			thinking: "high",
+			thinking: "low",
+		},
+		synthesis: {
+			model: "openai-codex/gpt-5.5",
+			thinking: "medium",
 		},
 	},
 	children: {
@@ -74,6 +78,7 @@ function cloneConfig(config: Config): Config {
 			scout: { ...config.roles.scout },
 			worker: { ...config.roles.worker },
 			reviewer: { ...config.roles.reviewer },
+			synthesis: { ...config.roles.synthesis },
 		},
 		children: { ...config.children },
 		references: { ...config.references },
@@ -137,8 +142,8 @@ function mergeConfig(base: Config, override: unknown, source = "unknown", option
 
 	if (overrideObject.roles !== undefined) {
 		const roles = expectObject(overrideObject.roles, source, "roles");
-		rejectUnknownKeys(roles, source, "roles", ["orchestrator", "scout", "worker", "reviewer"]);
-		for (const role of ["orchestrator", "scout", "worker", "reviewer"] as const) {
+		rejectUnknownKeys(roles, source, "roles", ["orchestrator", "scout", "worker", "reviewer", "synthesis"]);
+		for (const role of ["orchestrator", "scout", "worker", "reviewer", "synthesis"] as const) {
 			if (roles[role] === undefined) continue;
 			const roleObject = expectObject(roles[role], source, `roles.${role}`);
 			rejectUnknownKeys(roleObject, source, `roles.${role}`, ["model", "thinking"]);
