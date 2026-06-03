@@ -74,6 +74,7 @@ function tokenizeCommand(input: string): string[] {
 		}
 		current += char;
 	}
+	if (quote) throw new Error(`/review has unmatched ${quote === "\"" ? "double" : "single"} quote`);
 	if (current) tokens.push(current);
 	return tokens;
 }

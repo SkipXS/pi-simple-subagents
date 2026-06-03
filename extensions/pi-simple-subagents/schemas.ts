@@ -14,6 +14,7 @@ export type RoleRunParams = Static<typeof RoleRunParams>;
 
 export const OrchestrateParams = Type.Object({
 	plan: Type.String({ minLength: 1, description: "Inline plan text, @path, or short instruction pointing to a plan file." }),
+	includeOutput: Type.Optional(Type.Boolean({ description: "Include the child assistant output inline in the final tool result. Defaults to false; artifacts always contain the full output." })),
 });
 export type OrchestrateParams = Static<typeof OrchestrateParams>;
 
@@ -23,12 +24,14 @@ export const ReviewTargetParams = Type.Object({
 	extraContext: Type.Optional(Type.String({ description: "Optional supplemental context for reviewers, inline text or @file, especially a prior scout-report.md. Stored as extra-review-context.md; reviewers must verify it against current files." })),
 	reviewers: Type.Optional(Type.Array(Type.String({ minLength: 1, description: "Reviewer angle/focus." }), { minItems: 1, maxItems: 8 })),
 	includeScout: Type.Optional(Type.Boolean({ description: "Run a scout before reviewers. Default: true.", default: true })),
+	includeOutput: Type.Optional(Type.Boolean({ description: "Include the synthesis output inline in the final tool result. Defaults to false; artifacts always contain the full output." })),
 });
 export type ReviewTargetParams = Static<typeof ReviewTargetParams>;
 
 export const ScoutAgentParams = Type.Object({
 	task: Type.String({ minLength: 1, description: "Concrete standalone scout/recon task, inline text, @file, or @directory. Use before implementation/review when context, side effects, or non-trivial scope need mapping; the scout writes a compact handoff report and should not implement changes." }),
 	outputFile: Type.Optional(Type.String({ minLength: 1, description: "Expected scout report artifact filename inside the run dir. Default: scout-report.md" })),
+	includeOutput: Type.Optional(Type.Boolean({ description: "Include the child assistant output inline in the final tool result. Defaults to false; artifacts always contain the full output." })),
 });
 export type ScoutAgentParams = Static<typeof ScoutAgentParams>;
 
@@ -36,6 +39,7 @@ export const WorkerAgentParams = Type.Object({
 	task: Type.String({ minLength: 1, description: "Concrete standalone worker task, inline text, @file, or @directory. The worker may edit project files in YOLO mode." }),
 	purpose: Type.Optional(StringEnum(WORKER_PURPOSES, { description: "Why the worker is being run. Default: implementation." })),
 	outputFile: Type.Optional(Type.String({ minLength: 1, description: "Expected worker report artifact filename inside the run dir. Default: worker-report.md" })),
+	includeOutput: Type.Optional(Type.Boolean({ description: "Include the child assistant output inline in the final tool result. Defaults to false; artifacts always contain the full output." })),
 });
 export type WorkerAgentParams = Static<typeof WorkerAgentParams>;
 

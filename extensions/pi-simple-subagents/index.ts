@@ -11,6 +11,7 @@ import {
 	WORKER_RUNS_ENV,
 	parseRoleEnv,
 	validateRolePurpose,
+	type RoleName,
 } from "./roles.ts";
 import {
 	ArtifactParams,
@@ -113,6 +114,35 @@ function requireNonEmpty(value: string, label: string): string {
 	return trimmed;
 }
 
+function parseStartupRole(pi: ExtensionAPI): RoleName | undefined {
+	try {
+		return parseRoleEnv(process.env[ROLE_ENV]);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		const warning = `${message}; loading pi-simple-subagents in root mode instead.`;
+		console.warn(warning);
+		try {
+			pi.sendMessage({ customType: "pi-simple-subagents-config-error", display: true, content: `pi-simple-subagents warning: ${warning}`, details: { env: ROLE_ENV, value: process.env[ROLE_ENV] } });
+		} catch { /* best-effort startup warning */ }
+		return undefined;
+	}
+}
+
+function verboseResultsRequested(includeOutput?: boolean): boolean {
+	if (includeOutput === true) return true;
+	return /^(1|true|yes|on)$/i.test(process.env.PI_SIMPLE_SUBAGENTS_VERBOSE_RESULTS ?? "") || /^(1|true|yes|on)$/i.test(process.env.PI_DEBUG ?? "");
+}
+
+function outputLocationNote(kind: string): string {
+	return `Full ${kind} output is preserved in the artifact paths above. To include it inline, set includeOutput=true on the tool call or PI_SIMPLE_SUBAGENTS_VERBOSE_RESULTS=1.`;
+}
+
+function childSummary(prefix: string, fields: Array<[string, string | number | undefined]>, output: string, options: { kind?: string; includeOutput?: boolean } = {}): string {
+	const lines = [prefix, ...fields.flatMap(([label, value]) => value === undefined || value === "" ? [] : [`${label}: ${value}`])];
+	if (verboseResultsRequested(options.includeOutput)) return `${lines.join("\n")}\n\n${output}`;
+	return `${lines.join("\n")}\n\n${outputLocationNote(options.kind ?? "child")}`;
+}
+
 function assertKnownKeys(record: Record<string, unknown>, allowedKeys: readonly string[], label: string): void {
 	const unknown = Object.keys(record).filter((key) => !allowedKeys.includes(key));
 	if (unknown.length > 0) throw new Error(`${label} has unknown field${unknown.length === 1 ? "" : "s"}: ${unknown.join(", ")}`);
@@ -184,7 +214,7 @@ function createSubagentProgress(options: { onToolUpdate?: ToolProgressOnUpdate; 
 }
 
 export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
-	const role = parseRoleEnv(process.env[ROLE_ENV]);
+	const role = parseStartupRole(pi);
 	const runDir = process.env[RUN_DIR_ENV];
 	const persistedState = runDir ? readOrchestrationState(runDir) : undefined;
 	let workerRuns = persistedState?.workerRuns ?? (Number(process.env[WORKER_RUNS_ENV] ?? "0") || 0);
@@ -212,7 +242,7 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 				});
 				if (result.exitCode !== 0) throwChildRunError("Orchestration failed", result);
 				return {
-					content: [{ type: "text", text: `Orchestration finished.\nRun dir: ${runDir}\nPlan source: ${planSource}\nOutput: ${result.outputPath}\nTranscript: ${result.transcriptPath}\n\n${result.output}` }],
+					content: [{ type: "text", text: childSummary("Orchestration finished.", [["Run dir", runDir], ["Plan source", planSource], ["Output", result.outputPath], ["Transcript", result.transcriptPath]], result.output, { includeOutput: params.includeOutput }) }],
 					details: { runDir, planSource, result },
 				};
 			},
@@ -232,7 +262,7 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 					if (status) progress.status(status);
 				});
 				return {
-					content: [{ type: "text", text: `Review finished.\nRun dir: ${result.runDir}\nTarget source: ${result.targetSource}\nFinal summary: ${result.finalSummaryPath}\n\n${result.synthesis.output}` }],
+					content: [{ type: "text", text: childSummary("Review finished.", [["Run dir", result.runDir], ["Target source", result.targetSource], ["Final summary", result.finalSummaryPath], ["Synthesis transcript", result.synthesis.transcriptPath]], result.synthesis.output, { kind: "synthesis", includeOutput: params.includeOutput }) }],
 					details: result,
 				};
 			},
@@ -252,7 +282,7 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 					if (status) progress.status(status);
 				});
 				return {
-					content: [{ type: "text", text: `Scout finished.\nRun dir: ${result.runDir}\nTask source: ${result.taskSource}\nOutput: ${result.outputArtifactPath}\nTranscript: ${result.result.transcriptPath}\n\n${result.result.output}` }],
+					content: [{ type: "text", text: childSummary("Scout finished.", [["Run dir", result.runDir], ["Task source", result.taskSource], ["Output", result.outputArtifactPath], ["Transcript", result.result.transcriptPath]], result.result.output, { includeOutput: params.includeOutput }) }],
 					details: result,
 				};
 			},
@@ -273,7 +303,7 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 					if (status) progress.status(status);
 				});
 				return {
-					content: [{ type: "text", text: `Worker finished.\nRun dir: ${result.runDir}\nTask source: ${result.taskSource}\nOutput: ${result.outputArtifactPath}\nTranscript: ${result.result.transcriptPath}\n\n${result.result.output}` }],
+					content: [{ type: "text", text: childSummary("Worker finished.", [["Run dir", result.runDir], ["Task source", result.taskSource], ["Output", result.outputArtifactPath], ["Transcript", result.result.transcriptPath]], result.result.output, { includeOutput: params.includeOutput }) }],
 					details: result,
 				};
 			},
@@ -361,7 +391,7 @@ Purpose: ${params.purpose}`;
 				}
 				persistState();
 				return {
-					content: [{ type: "text", text: childResultText(`${params.role} finished`, { ...result, outputPath: outputArtifactPath }) }],
+					content: [{ type: "text", text: childSummary(`${params.role} finished with exit code ${result.exitCode}.`, [["Session", result.sessionFile], ["Output", outputArtifactPath], ["Transcript", result.transcriptPath], ["Stderr", result.stderrPath]], result.output) }],
 					details: { ...result, outputPath: outputArtifactPath, purpose: params.purpose, round: params.round, latestWorkerRunReviewedClean, workerRuns, reviewRuns, reviewRunsSinceLatestWorker },
 				};
 
@@ -454,7 +484,7 @@ Purpose: ${params.purpose}`;
 				pi.sendMessage({
 					customType: "pi-simple-subagents-result",
 					display: true,
-					content: `Orchestration finished.\n\nRun dir: ${runDir}\nOutput: ${result.outputPath}\nTranscript: ${result.transcriptPath}\n\n${result.output}`,
+					content: childSummary("Orchestration finished.", [["Run dir", runDir], ["Output", result.outputPath], ["Transcript", result.transcriptPath]], result.output),
 					details: { runDir, result },
 				});
 			} catch (error) {
@@ -482,7 +512,7 @@ Purpose: ${params.purpose}`;
 				pi.sendMessage({
 					customType: "pi-simple-subagents-scout-result",
 					display: true,
-					content: `Scout finished.\n\nRun dir: ${result.runDir}\nOutput: ${result.outputArtifactPath}\nTranscript: ${result.result.transcriptPath}\n\n${result.result.output}`,
+					content: childSummary("Scout finished.", [["Run dir", result.runDir], ["Output", result.outputArtifactPath], ["Transcript", result.result.transcriptPath]], result.result.output),
 					details: result,
 				});
 			} catch (error) {
@@ -510,7 +540,7 @@ Purpose: ${params.purpose}`;
 				pi.sendMessage({
 					customType: "pi-simple-subagents-worker-result",
 					display: true,
-					content: `Worker finished.\n\nRun dir: ${result.runDir}\nOutput: ${result.outputArtifactPath}\nTranscript: ${result.result.transcriptPath}\n\n${result.result.output}`,
+					content: childSummary("Worker finished.", [["Run dir", result.runDir], ["Output", result.outputArtifactPath], ["Transcript", result.result.transcriptPath]], result.result.output),
 					details: result,
 				});
 			} catch (error) {
@@ -538,7 +568,7 @@ Purpose: ${params.purpose}`;
 				pi.sendMessage({
 					customType: "pi-simple-subagents-review-result",
 					display: true,
-					content: `Review finished.\n\nRun dir: ${result.runDir}\nFinal summary: ${result.finalSummaryPath}\n\n${result.synthesis.output}`,
+					content: childSummary("Review finished.", [["Run dir", result.runDir], ["Final summary", result.finalSummaryPath], ["Synthesis transcript", result.synthesis.transcriptPath]], result.synthesis.output, { kind: "synthesis" }),
 					details: result,
 				});
 			} catch (error) {

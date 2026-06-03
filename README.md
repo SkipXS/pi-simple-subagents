@@ -7,6 +7,33 @@ Small, opinionated Pi extension for plan-driven orchestration with four roles:
 - `worker` is the main implementation/fix/validation role.
 - `reviewer` performs post-implementation or target review.
 
+## Quickstart
+
+1. Install dependencies for a local checkout:
+
+   ```bash
+   npm ci
+   npm run check
+   ```
+
+2. Install the extension into Pi, copy the example config, and reload Pi:
+
+   ```bash
+   pi install /absolute/path/to/pi-simple-subagents
+   mkdir -p .pi/pi-simple-subagents
+   cp /absolute/path/to/pi-simple-subagents/examples/config.json .pi/pi-simple-subagents/config.json
+   ```
+
+   ```text
+   /reload
+   ```
+
+3. Smoke-test one short command and inspect the reported run artifact path:
+
+   ```text
+   /scout Summarize the repository layout and write a compact scout report
+   ```
+
 ## Installation
 
 Requires Node.js `>=22.19.0` and Pi `@earendil-works/pi-coding-agent` `>=0.78.0 <1`. The Pi host API is declared as a peer dependency with that range; runtime libraries used directly by the extension are declared in `dependencies`. Before widening the peer range, smoke-test the package with the candidate Pi version because the extension depends on Pi host APIs for tools, slash commands, UI updates, and session compaction.
@@ -49,14 +76,14 @@ Reload Pi after install/config changes:
 ## Development
 
 ```bash
-npm install
+npm ci
 npm run typecheck
 npm test
 npm run check
 npm pack --dry-run
 ```
 
-`npm run check` runs typecheck plus tests. `prepack` and `prepublishOnly` run the same check automatically before packing or publishing. `npm pack --dry-run` publishes the extension source, examples, README, LICENSE, and package metadata. Tests and `tsconfig.json` are development-only files in this repository.
+Use `npm ci` for reproducible local setup and CI validation from `package-lock.json`; missing `node_modules` will otherwise surface as dependency-resolution errors when tests import Pi packages. `npm run check` runs typecheck plus tests. `prepack` and `prepublishOnly` run the same check automatically before packing or publishing. `npm pack --dry-run` publishes the extension source, examples, README, LICENSE, and package metadata. Tests and `tsconfig.json` are development-only files in this repository.
 
 Release/package smoke checklist:
 
@@ -98,7 +125,7 @@ Standalone scout for context gathering before implementation or review. Prefer a
 /scout Map current parser behavior, affected files, risks, and recommended next steps before implementation
 ```
 
-or let the model call `run_scout_agent` for the full schema (`task`, optional `outputFile`). This creates a fresh run directory, starts one `scout`, and writes/copies a `scout-report.md` by default. It does not start worker/reviewer/orchestrator and is intended to keep broad reading out of the parent context while producing a compact handoff with relevant files, current behavior, risks, and next steps.
+or let the model call `run_scout_agent` for the full schema (`task`, optional `outputFile`, optional `includeOutput`). This creates a fresh run directory, starts one `scout`, and writes/copies a `scout-report.md` by default. It does not start worker/reviewer/orchestrator and is intended to keep broad reading out of the parent context while producing a compact handoff with relevant files, current behavior, risks, and next steps.
 
 Standalone worker for direct implementation/fix/validation work:
 
@@ -108,7 +135,7 @@ Standalone worker for direct implementation/fix/validation work:
 ```
 
 
-or let the model call `run_worker_agent` for the full schema (`task`, optional `purpose`, optional `outputFile`). This creates a fresh run directory, starts one `worker`, and writes/copies a `worker-report.md` by default. It does not start scout/reviewer/orchestrator.
+or let the model call `run_worker_agent` for the full schema (`task`, optional `purpose`, optional `outputFile`, optional `includeOutput`). This creates a fresh run directory, starts one `worker`, and writes/copies a `worker-report.md` by default. It does not start scout/reviewer/orchestrator.
 
 Parallel workers for independent tasks:
 
@@ -120,6 +147,15 @@ Parallel workers for independent tasks:
 
 The slash command accepts JSON only: either an array of task strings, an array of task objects, or an object with a `tasks` array. It requires 2-8 tasks. Object fields are `task` (required non-empty string), `name` (optional string), `purpose` (optional `implementation`, `fix`, or `validation`), and `outputFile` (optional string). Unknown fields such as `output_file`, invalid JSON, wrong task count, unsupported shapes, or invalid fields are reported in the Pi UI and do not start workers.
 
+Common `/work-parallel` JSON pitfalls:
+
+- JSON does not allow trailing commas or comments.
+- Use double quotes for JSON strings and property names; single quotes are not JSON.
+- Escape literal backslashes in Windows paths, e.g. `C:\\Users\\me\\task.md`, or use forward slashes where possible.
+- If your shell/TUI consumes quotes, paste the JSON directly into Pi or wrap/escape it according to your shell.
+- Use `outputFile` exactly, not `output_file`; unknown fields are rejected before workers start.
+- Provide at least two tasks; use `/work` for one standalone worker.
+
 or let the model call `run_parallel_workers` with `tasks: [{ name?, task, purpose?, outputFile? }, ...]`. Each worker gets its own child run directory and `sessions/worker.jsonl`, so their transcripts do not collide. YOLO mode still does not prevent source edit conflicts; use this only when tasks are independent enough that workers are unlikely to edit the same files. Setup/spawn errors abort sibling workers and wait for shutdown; ordinary non-zero child exits are collected so siblings can finish, then `parallel-workers-summary.md` is written and the batch fails.
 
 Review fanout for an existing target:
@@ -130,14 +166,15 @@ Review fanout for an existing target:
 
 The text after the target is treated as focus/instructions. Use explicit `--reviewer` options when you want custom reviewer angles.
 
-The slash command also accepts a small option prefix before the target. Unknown `--...` options are rejected before any review starts so typos do not turn into accidental inline targets. Use `--context` to pass a compact prior scout report or other supplemental context; reviewers are instructed to treat it as orientation and verify it against current files:
+The slash command also accepts a small option prefix before the target. Unknown `--...` options are rejected before any review starts so typos do not turn into accidental inline targets. Use `--context` to pass a compact prior scout report or other supplemental context; reviewers are instructed to treat it as orientation and verify it against current files. Each `--context` or `--reviewer` option consumes exactly one token, so multi-word values must be quoted. Unmatched single or double quotes are reported as command syntax errors before any review starts:
 
 ```text
 /review [--scout|--no-scout] [--context <inline-or-@file>|--context=<inline-or-@file>] [--reviewer <angle>|--reviewer=<angle>]... @path-or-dir [focus/instructions]
 /review --context @.pi/agent-runs/<run-id>/scout-report.md --reviewer "security boundaries" --reviewer "packaging UX" @extensions/pi-simple-subagents
+/review --context "prior scout notes with spaces" --reviewer "runtime correctness" @README.md docs focus
 ```
 
-or let the model call `review_target` for the full schema (`target`, `focus`, `extraContext`, `reviewers`, `includeScout`). This creates a run directory, writes optional supplemental context to `extra-review-context.md`, runs an optional review-specific scout, then starts fresh reviewers with distinct angles in parallel, preserves their configured order for synthesis, and writes a synthesized `final-summary.md`. Custom reviewer fanout is capped at 8 reviewers. If reviewer fanout fails, the extension writes `review-failure-summary.md` before throwing. It does not run a worker; in YOLO mode the extension does not enforce source-write restrictions.
+or let the model call `review_target` for the full schema (`target`, `focus`, `extraContext`, `reviewers`, `includeScout`, `includeOutput`). This creates a run directory, writes optional supplemental context to `extra-review-context.md`, runs an optional review-specific scout, then starts fresh reviewers with distinct angles in parallel, preserves their configured order for synthesis, and writes a synthesized `final-summary.md`. Custom reviewer fanout is capped at 8 reviewers. If reviewer fanout fails, the extension writes `review-failure-summary.md` before throwing. It does not run a worker; in YOLO mode the extension does not enforce source-write restrictions.
 
 ## LLM routing guidance
 
@@ -155,10 +192,10 @@ Root tools/commands:
 
 | Tool | Slash command | Key options | Use when |
 | --- | --- | --- | --- |
-| `orchestrate_plan` | `/orchestrate <plan-or-@file>` | `plan` | Plan-driven implementation should coordinate scout, worker, review, fixes, and validation. |
-| `run_scout_agent` | `/scout <task-or-@target>` | `task`, `outputFile?` | Context gathering for non-trivial, uncertain, cross-file, or side-effect-prone work should be isolated into a compact handoff report. |
-| `review_target` | `/review [options] <target> [focus]` | `target`, `focus?`, `extraContext?`, `reviewers?`, `includeScout?` | Review-only fanout should inspect a target and synthesize findings without running a worker. |
-| `run_worker_agent` | `/work <task-or-@file>` | `task`, `purpose?`, `outputFile?` | Direct implementation, fix, or validation is enough and no full review loop is needed. |
+| `orchestrate_plan` | `/orchestrate <plan-or-@file>` | `plan`, `includeOutput?` | Plan-driven implementation should coordinate scout, worker, review, fixes, and validation. |
+| `run_scout_agent` | `/scout <task-or-@target>` | `task`, `outputFile?`, `includeOutput?` | Context gathering for non-trivial, uncertain, cross-file, or side-effect-prone work should be isolated into a compact handoff report. |
+| `review_target` | `/review [options] <target> [focus]` | `target`, `focus?`, `extraContext?`, `reviewers?`, `includeScout?`, `includeOutput?` | Review-only fanout should inspect a target and synthesize findings without running a worker. |
+| `run_worker_agent` | `/work <task-or-@file>` | `task`, `purpose?`, `outputFile?`, `includeOutput?` | Direct implementation, fix, or validation is enough and no full review loop is needed. |
 | `run_parallel_workers` | `/work-parallel <json>` | `tasks[{name?,task,purpose?,outputFile?}]` | Multiple implementation/fix/validation tasks are independent and unlikely to touch the same files. |
 
 Role options available to the orchestrator through `run_role_agent`:
@@ -179,6 +216,8 @@ Child-only tools:
 | `compact_session` | all child roles | Request Pi compaction while preserving role-specific task/target, scout findings, decisions, changed files, validation state, and artifact paths. |
 
 ## Important workflow guidance
+
+Root command/tool success messages are summary-first by default: run directory, handoff/final artifact paths, transcripts, and a reminder that full child output is in artifacts. This keeps chat results short while preserving auditability. To include child/synthesis output inline for a tool call, pass `includeOutput: true`; for slash commands or debugging, set `PI_SIMPLE_SUBAGENTS_VERBOSE_RESULTS=1` before starting Pi.
 
 Pi is YOLO by default, and this extension follows that model for source edits and tool use. The workflow suggests roles and artifacts, but it does not impose hard source-file, snapshot, validation, review-round, or role-write guardrails. It does include a configurable child process timeout plus reference/artifact safety guardrails to reduce accidental runaway child runs, huge/binary context ingestion, and artifact path/link surprises.
 

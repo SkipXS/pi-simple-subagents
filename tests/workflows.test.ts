@@ -75,6 +75,17 @@ test("parseReviewTargetCommand uses current /review error wording", () => {
 	assert.throws(() => parseReviewTargetCommand("--no-scout"), /\/review requires a target/);
 	assert.throws(() => parseReviewTargetCommand("--noScout @README.md docs"), /\/review unknown option: --noScout/);
 	assert.throws(() => parseReviewTargetCommand("--reviewer security --bad @README.md"), /\/review unknown option: --bad/);
+	assert.throws(() => parseReviewTargetCommand('--reviewer "security @README.md'), /\/review has unmatched double quote/);
+	assert.throws(() => parseReviewTargetCommand("--context 'prior notes @README.md"), /\/review has unmatched single quote/);
+});
+
+test("parseReviewTargetCommand supports quoted multi-word option values", () => {
+	assert.deepEqual(parseReviewTargetCommand("--context 'prior scout notes' --reviewer 'runtime correctness' @README.md docs"), {
+		target: "@README.md",
+		focus: "docs",
+		extraContext: "prior scout notes",
+		reviewers: ["runtime correctness"],
+	});
 });
 
 test("child task @ references are quoted for whitespace paths", () => {
@@ -494,6 +505,32 @@ test("/work-parallel validates object fields before running", async () => {
 		await handler?.('{"tasks":["ok","also ok"],"extra":true}', { cwd: tempProject(), signal: new AbortController().signal, ui: { notify: (message) => notifications.push(message), setStatus() {} } });
 		assert.match(notifications.join("\n"), /unknown field: extra/);
 	} finally {
+		if (oldRole === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+		else process.env.PI_ORCHESTRATOR_AGENT_ROLE = oldRole;
+		if (oldRunDir === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+		else process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR = oldRunDir;
+	}
+});
+
+test("invalid role environment falls back to root registration and warns", () => {
+	const oldRole = process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+	const oldRunDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+	const oldWarn = console.warn;
+	try {
+		process.env.PI_ORCHESTRATOR_AGENT_ROLE = "orchestratorx";
+		delete process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+		const tools: string[] = [];
+		const commands: string[] = [];
+		const messages: Array<{ content?: string }> = [];
+		const warnings: string[] = [];
+		console.warn = (message?: unknown) => { warnings.push(String(message)); };
+		assert.doesNotThrow(() => orchestratorAgentsExtension({ registerTool: (tool: { name: string }) => tools.push(tool.name), registerCommand: (name: string) => commands.push(name), sendMessage(message: { content?: string }) { messages.push(message); } } as never));
+		assert.equal(tools.includes("orchestrate_plan"), true);
+		assert.equal(commands.includes("review"), true);
+		assert.match(warnings.join("\n"), /Invalid PI_ORCHESTRATOR_AGENT_ROLE: orchestratorx/);
+		assert.match(messages.map((message) => message.content ?? "").join("\n"), /root mode/);
+	} finally {
+		console.warn = oldWarn;
 		if (oldRole === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_ROLE;
 		else process.env.PI_ORCHESTRATOR_AGENT_ROLE = oldRole;
 		if (oldRunDir === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
