@@ -115,7 +115,7 @@ or ask naturally and let the model call the tool:
 Use orchestrate_plan for @docs/plan.md
 ```
 
-The orchestrator receives a short prompt plus the plan content/reference, then coordinates scout/worker/reviewer. Worker and reviewer loop while it is useful; there is no default hard review-round cap.
+The orchestrator receives a short prompt plus the plan content/reference, then coordinates scout/worker/reviewer. Before the first worker call it is instructed to break milestones into small work packages; one worker handoff should not be a full milestone or broad plan section. Worker and reviewer loop while it is useful; there is no default hard review-round cap.
 
 Standalone scout for context gathering before implementation or review. Prefer a short scout when the task is not obviously trivial: non-trivial scope, cross-file impact, behavior/API/security/packaging changes, unfamiliar code, ambiguity, or likely side effects. Skip it for clearly isolated, low-risk single-location edits or when the user explicitly asks to proceed directly.
 
@@ -135,7 +135,7 @@ Standalone worker for direct implementation/fix/validation work:
 ```
 
 
-or let the model call `run_worker_agent` for the full schema (`task`, optional `purpose`, optional `outputFile`, optional `includeOutput`). This creates a fresh run directory, starts one `worker`, and requires the worker to write `worker-report.md` by default via `write_run_artifact`. It does not start scout/reviewer/orchestrator.
+or let the model call `run_worker_agent` for the full schema (`task`, optional `purpose`, optional `outputFile`, optional `includeOutput`). This creates a fresh run directory, starts one `worker`, and requires the worker to write `worker-report.md` by default via `write_run_artifact`. Keep worker tasks to one small work package; oversized worker tasks are rejected by `orchestration.maxWorkerTaskBytes` unless that limit is set to `0`. It does not start scout/reviewer/orchestrator.
 
 Parallel workers for independent tasks:
 
@@ -220,7 +220,7 @@ Child-only tools:
 
 Root command/tool success messages are summary-first by default: run directory, handoff/final artifact paths, transcripts, and a reminder that full child output is in artifacts. This keeps chat results short while preserving auditability. To include child/synthesis output inline for a tool call, pass `includeOutput: true`; for slash commands or debugging, set `PI_SIMPLE_SUBAGENTS_VERBOSE_RESULTS=1` before starting Pi.
 
-Pi is YOLO by default, and this extension follows that model for source edits and tool use. The workflow suggests roles and artifacts, but it does not impose hard source-file, snapshot, validation, review-round, or role-write guardrails. It does include a configurable child process timeout plus reference/artifact safety guardrails to reduce accidental runaway child runs, huge/binary context ingestion, and artifact path/link surprises.
+Pi is YOLO by default, and this extension follows that model for source edits and tool use. The workflow suggests roles and artifacts, but it does not impose hard source-file, snapshot, validation, review-round, or role-write guardrails. It does enforce a configurable maximum worker task/handoff size so a whole milestone is less likely to be dumped into the first worker. It also includes a configurable child process timeout plus reference/artifact safety guardrails to reduce accidental runaway child runs, huge/binary context ingestion, and artifact path/link surprises.
 
 - Scout, reviewer, orchestrator, and worker can use the normal Pi tool surface.
 - Any role may run scripts, tests, benchmarks, downloads, browser/user-flow checks, or diagnostics when useful.
@@ -237,6 +237,7 @@ Pi is intentionally YOLO by default, and this extension follows that model for r
 
 - Role runs do not pass a restrictive `--tools` allowlist; every role gets the normal inherited Pi tool surface.
 - Child runs have a configurable per-child-process timeout (`children.timeoutMs`, default 30 minutes; set `0` to disable). Timeout kills that child process tree where supported and marks `timedOut` in results; multi-phase workflows can run longer than one timeout window because scout, worker, reviewer, and synthesis phases are separate children.
+- Worker tasks/handoffs have a configurable maximum size (`orchestration.maxWorkerTaskBytes`, default 16 KiB; set `0` to disable). This is intended to catch accidental delegation of an entire milestone/full plan section to the first worker; split into smaller packages with one deliverable, likely files, acceptance criteria, non-goals, and validation.
 - Child runs normally discover Pi from the installed `@earendil-works/pi-coding-agent` package `bin`. If your install layout is unusual, set `PI_SIMPLE_SUBAGENTS_PI_CLI=/absolute/path/to/pi` (or `pi.cmd` on Windows) or configure `children.piCliPath` in the global config; the environment variable wins. Treat both as trusted executable overrides. Project config may not set `children.piCliPath` because it is executable trust.
 - Child stdout/stderr/transcript artifacts are capped to avoid unbounded disk/context growth; chat previews remain separately truncated. A single child stdout JSONL line is accepted up to the transcript artifact cap (4 MiB) and then fails clearly as oversized output.
 - Plan/target/task `@` file references default to project-local, non-binary, and at most 1 MiB. Configure `references.allowOutsideCwd`, `references.allowBinary`, and `references.maxFileBytes` when you intentionally need broader access.
@@ -305,6 +306,9 @@ Example with explicit balanced YOLO defaults (all sections are optional; omit an
     "forwardCurrentExtension": "auto",
     "timeoutMs": 1800000
   },
+  "orchestration": {
+    "maxWorkerTaskBytes": 16384
+  },
   "references": {
     "maxFileBytes": 1048576,
     "allowOutsideCwd": false,
@@ -325,6 +329,7 @@ Config reference:
 | `children.forwardCurrentExtension` | `"auto"` | `"auto"` forwards this extension to child runs when the parent Pi process was started with `-e/--extension`; `"always"` always adds `--extension <this-extension>`; `"never"` never does. This helps temporary extension loading expose `write_run_artifact` and `compact_session` to child roles. |
 | `children.timeoutMs` | `1800000` | Per-child-process timeout in milliseconds. Use `0` to disable. Timed-out child runs return `timedOut: true` and exit code `124`; full multi-phase workflows may exceed this because each phase gets its own child process. |
 | `children.piCliPath` | unset | Optional Pi CLI command/path override, allowed only in the global config. `PI_SIMPLE_SUBAGENTS_PI_CLI` environment variable takes precedence. Useful for unusual global installs, Windows, and troubleshooting CLI discovery. Do not accept this value or the environment override from untrusted repos/shells; it is executable trust. |
+| `orchestration.maxWorkerTaskBytes` | `16384` | Maximum UTF-8 bytes allowed in one worker task/handoff, including resolved `@file` text for standalone/parallel workers. Use `0` to disable. Oversized tasks fail before spawning so the orchestrator/user can split milestones into smaller work packages. |
 | `references.maxFileBytes` | `1048576` | Maximum bytes read from an `@file` reference. Larger files are truncated with a warning. Use `0` to disable truncation. |
 | `references.allowOutsideCwd` | `false` | Allow `@` references outside the current project directory. Keep `false` to reduce accidental secret exposure. |
 | `references.allowBinary` | `false` | Allow binary-looking `@` files to be decoded as UTF-8. |

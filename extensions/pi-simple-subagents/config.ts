@@ -25,6 +25,10 @@ export interface Config {
 		/** Optional Pi CLI path/command override. Environment PI_SIMPLE_SUBAGENTS_PI_CLI wins. */
 		piCliPath?: string;
 	};
+	orchestration: {
+		/** Maximum bytes allowed in one worker handoff/task. Use 0 to disable. */
+		maxWorkerTaskBytes: number;
+	};
 	references: {
 		/** Maximum bytes read from an @ file reference. Use 0 to disable the cap. */
 		maxFileBytes: number;
@@ -42,6 +46,9 @@ export const DEFAULT_CONFIG: Config = {
 		forwardCurrentExtension: "auto",
 		timeoutMs: 30 * 60 * 1000,
 	},
+	orchestration: {
+		maxWorkerTaskBytes: 16 * 1024,
+	},
 	references: {
 		maxFileBytes: 1024 * 1024,
 		allowOutsideCwd: false,
@@ -54,6 +61,7 @@ function cloneConfig(config: Config): Config {
 	return {
 		roles: Object.fromEntries(ROLE_NAMES.map((role) => [role, { ...config.roles[role] }])) as Record<RoleName, RoleConfig>,
 		children: { ...config.children },
+		orchestration: { ...config.orchestration },
 		references: { ...config.references },
 		artifacts: { ...config.artifacts },
 	};
@@ -110,7 +118,7 @@ function rejectUnknownKeys(object: Record<string, unknown>, source: string, path
 function mergeConfig(base: Config, override: unknown, source = "unknown", options: { allowPiCliPath?: boolean } = {}): Config {
 	if (override === undefined) return cloneConfig(base);
 	const overrideObject = expectObject(override, source, "root");
-	rejectUnknownKeys(overrideObject, source, "root", ["roles", "children", "references", "artifacts"]);
+	rejectUnknownKeys(overrideObject, source, "root", ["roles", "children", "orchestration", "references", "artifacts"]);
 	const next = cloneConfig(base);
 
 	if (overrideObject.roles !== undefined) {
@@ -136,6 +144,12 @@ function mergeConfig(base: Config, override: unknown, source = "unknown", option
 			if (!options.allowPiCliPath) throw configError(source, "children.piCliPath is only allowed in the global config; use PI_SIMPLE_SUBAGENTS_PI_CLI for per-project/testing overrides");
 			next.children.piCliPath = expectString(children.piCliPath, source, "children.piCliPath");
 		}
+	}
+
+	if (overrideObject.orchestration !== undefined) {
+		const orchestration = expectObject(overrideObject.orchestration, source, "orchestration");
+		rejectUnknownKeys(orchestration, source, "orchestration", ["maxWorkerTaskBytes"]);
+		if (orchestration.maxWorkerTaskBytes !== undefined) next.orchestration.maxWorkerTaskBytes = expectNonNegativeInteger(orchestration.maxWorkerTaskBytes, source, "orchestration.maxWorkerTaskBytes");
 	}
 
 	if (overrideObject.references !== undefined) {

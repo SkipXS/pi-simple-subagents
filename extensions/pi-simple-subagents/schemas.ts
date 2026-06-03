@@ -6,7 +6,7 @@ import { DELEGABLE_ROLE_NAMES } from "./role-registry.ts";
 export const RoleRunParams = Type.Object({
 	role: StringEnum(DELEGABLE_ROLE_NAMES, { description: "Role to run inside an orchestration. Allowed purpose combinations: scout=context; worker=implementation/fix/validation; reviewer=review." }),
 	purpose: StringEnum(ROLE_RUN_PURPOSES, { description: "Why this role is being run. Allowed combinations: scout=context; worker=implementation/fix/validation; reviewer=review. Use validation for final tests/end-user checks." }),
-	task: Type.String({ minLength: 1, description: "Concrete task for the role. Include artifact paths, expected output file, constraints, and relevant prior artifacts/context." }),
+	task: Type.String({ minLength: 1, description: "Concrete task for the role. For worker, pass one small work package only—not an entire milestone or full plan section. Include artifact paths, expected output file, likely files, constraints/non-goals, acceptance criteria, validation, and relevant prior artifacts/context." }),
 	round: Type.Optional(Type.Integer({ minimum: 1, description: "Optional review/fix round number for artifact labels and status display." })),
 	outputFile: Type.Optional(Type.String({ minLength: 1, description: "Expected handoff artifact filename inside the run dir, e.g. scout.md, worker-round-1.md, review-round-1.md, validation.md. Defaults avoid overwriting existing role artifacts; explicit names should still be unique and must not use reserved run dirs." })),
 });
@@ -36,7 +36,7 @@ export const ScoutAgentParams = Type.Object({
 export type ScoutAgentParams = Static<typeof ScoutAgentParams>;
 
 export const WorkerAgentParams = Type.Object({
-	task: Type.String({ minLength: 1, description: "Concrete standalone worker task, inline text, @file, or @directory. The worker may edit project files in YOLO mode." }),
+	task: Type.String({ minLength: 1, description: "Concrete standalone worker task, inline text, @file, or @directory. Keep it to one small work package rather than an entire milestone/full plan section. The worker may edit project files in YOLO mode." }),
 	purpose: Type.Optional(StringEnum(WORKER_PURPOSES, { description: "Why the worker is being run. Default: implementation." })),
 	outputFile: Type.Optional(Type.String({ minLength: 1, description: "Expected worker report artifact filename inside the run dir. Default: worker-report.md" })),
 	includeOutput: Type.Optional(Type.Boolean({ description: "Include the child assistant output inline in the final tool result. Defaults to false; artifacts always contain the full output." })),
@@ -45,7 +45,7 @@ export type WorkerAgentParams = Static<typeof WorkerAgentParams>;
 
 export const ParallelWorkerTaskParams = Type.Object({
 	name: Type.Optional(Type.String({ minLength: 1, description: "Short label for this worker, used in artifact paths." })),
-	task: Type.String({ minLength: 1, description: "Concrete worker task, inline text, @file, or @directory. Keep parallel tasks independent to avoid edit conflicts." }),
+	task: Type.String({ minLength: 1, description: "Concrete worker task, inline text, @file, or @directory. Keep each task independent and scoped to one small work package to avoid edit conflicts and overloaded workers." }),
 	purpose: Type.Optional(StringEnum(WORKER_PURPOSES, { description: "Why this worker is being run. Default: implementation." })),
 	outputFile: Type.Optional(Type.String({ minLength: 1, description: "Expected worker report artifact filename inside this worker's run dir. Default: worker-report.md" })),
 });

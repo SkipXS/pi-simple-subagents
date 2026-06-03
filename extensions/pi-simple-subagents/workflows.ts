@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { ensureDir, resolveRunBaseDir, runId, validateOutputArtifactPath, writeArtifact } from "./artifacts.ts";
 import { childResultText, spawnPiRole, throwChildRunError, type ChildRunResult, type ChildStatusUpdate } from "./child-runner.ts";
 import { CONFIG_EFFECTIVE_FILE, DEFAULT_SCOUT_OUTPUT_FILE, DEFAULT_WORKER_OUTPUT_FILE, EXTRA_REVIEW_CONTEXT_FILE, FINAL_SUMMARY_FILE, INPUT_SCOUT_TASK_FILE, INPUT_TARGET_FILE, INPUT_WORKER_TASK_FILE, PARALLEL_WORKERS_FILE, PARALLEL_WORKERS_SUMMARY_FILE, REVIEW_FAILURE_SUMMARY_FILE, SCOUT_REVIEW_CONTEXT_FILE } from "./constants.ts";
-import { loadConfig } from "./config.ts";
+import { loadConfig, type Config } from "./config.ts";
 import { reviewTargetSystemPrompt } from "./prompts.ts";
 import { formatReferenceWarnings, readPlanReference, readReference } from "./references.ts";
 import { DEFAULT_REVIEW_ANGLES } from "./roles.ts";
@@ -94,6 +94,14 @@ function requireNonEmpty(value: string, label: string): string {
 	const trimmed = value.trim();
 	if (!trimmed) throw new Error(`${label} must be a non-empty string`);
 	return trimmed;
+}
+
+export function assertWorkerTaskWithinBudget(taskText: string, source: string, config: Config, label = "worker task"): void {
+	const limit = config.orchestration.maxWorkerTaskBytes;
+	if (limit === 0) return;
+	const bytes = Buffer.byteLength(taskText, "utf8");
+	if (bytes <= limit) return;
+	throw new Error(`${label} is ${bytes} bytes, exceeding orchestration.maxWorkerTaskBytes=${limit}. This usually means an entire milestone, broad plan section, or multiple deliverables were delegated to one worker. Split it into a smaller work package (one concrete deliverable, 1-3 likely files, 3-5 acceptance criteria, explicit non-goals, and one validation check), or set orchestration.maxWorkerTaskBytes=0/increase it intentionally. Task source: ${source}`);
 }
 
 function requireExpectedArtifact(dep: Required<WorkflowDeps>, runDir: string, outputFile: string, result: ChildRunResult, label: string): string {
@@ -244,6 +252,7 @@ async function runWorkerInDir(cwd: string, dir: string, params: WorkerAgentParam
 	ensureDir(dir);
 	const taskInput = requireNonEmpty(params.task, "worker task");
 	const workerTask = dep.readReference(cwd, taskInput, "worker task", config, { allowDirectory: true });
+	assertWorkerTaskWithinBudget(workerTask.text, workerTask.source, config, `${progressLabel} task`);
 	const purpose: WorkerPurpose = params.purpose ?? "implementation";
 	const outputFile = params.outputFile?.trim() || DEFAULT_WORKER_OUTPUT_FILE;
 	const outputArtifactPath = validateOutputArtifactPath(dir, outputFile);
@@ -276,7 +285,8 @@ export async function runParallelWorkers(cwd: string, params: ParallelWorkersPar
 
 	// Validate references/output paths before spawning any children so setup errors do not leave siblings running.
 	for (const [index, task] of params.tasks.entries()) {
-		dep.readReference(cwd, requireNonEmpty(task.task, `worker ${index + 1} task`), `worker ${index + 1} task`, config, { allowDirectory: true });
+		const reference = dep.readReference(cwd, requireNonEmpty(task.task, `worker ${index + 1} task`), `worker ${index + 1} task`, config, { allowDirectory: true });
+		assertWorkerTaskWithinBudget(reference.text, reference.source, config, `worker ${index + 1} task`);
 		const label = safePathLabel(task.name, `worker-${index + 1}`);
 		const workerDir = path.join(dir, `${String(index + 1).padStart(2, "0")}-${label}`);
 		validateOutputArtifactPath(workerDir, task.outputFile?.trim() || DEFAULT_WORKER_OUTPUT_FILE);

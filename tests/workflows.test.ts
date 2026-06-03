@@ -442,6 +442,21 @@ test("worker outputFile validates reserved paths before spawning", async () => {
 	assert.equal(spawned, false);
 });
 
+test("standalone worker rejects oversized tasks before spawning", async () => {
+	const cwd = tempProject();
+	const config = cloneConfig();
+	config.orchestration.maxWorkerTaskBytes = 8;
+	let spawned = false;
+	await assert.rejects(() => runWorkerAgent(cwd, { task: "implement an entire milestone" }, undefined, undefined, {
+		loadConfig: () => config,
+		async spawnPiRole(input) {
+			spawned = true;
+			return fakeCompliantResult(input);
+		},
+	}), /exceeding orchestration\.maxWorkerTaskBytes=8[\s\S]*Split it into a smaller work package/);
+	assert.equal(spawned, false);
+});
+
 test("standalone roles fail when the expected artifact is missing", async () => {
 	const cwd = tempProject();
 	const config = cloneConfig();
@@ -499,6 +514,37 @@ console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", 
 		assert.equal(fs.existsSync(expected), true);
 		assert.equal(result.details.outputPath, expected);
 		assert.match(fs.readFileSync(expected, "utf8"), /child done/);
+	} finally {
+		if (oldRole === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+		else process.env.PI_ORCHESTRATOR_AGENT_ROLE = oldRole;
+		if (oldRunDir === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+		else process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR = oldRunDir;
+		if (oldCli === undefined) delete process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
+		else process.env.PI_SIMPLE_SUBAGENTS_PI_CLI = oldCli;
+	}
+});
+
+test("run_role_agent rejects oversized worker delegations before spawning", async () => {
+	const oldRole = process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+	const oldRunDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+	const oldCli = process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
+	try {
+		const cwd = tempProject();
+		const runDir = path.join(cwd, ".pi", "run");
+		const cli = path.join(cwd, "fake-pi.js");
+		fs.writeFileSync(cli, `throw new Error("should not spawn");\n`, "utf8");
+		const configPath = path.join(cwd, ".pi", "pi-simple-subagents", "config.json");
+		fs.mkdirSync(path.dirname(configPath), { recursive: true });
+		fs.writeFileSync(configPath, JSON.stringify({ orchestration: { maxWorkerTaskBytes: 8 } }), "utf8");
+		process.env.PI_ORCHESTRATOR_AGENT_ROLE = "orchestrator";
+		process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR = runDir;
+		process.env.PI_SIMPLE_SUBAGENTS_PI_CLI = cli;
+		let runRole: { execute: (...args: any[]) => Promise<any> } | undefined;
+		orchestratorAgentsExtension({ registerTool: (tool: { name: string; execute: (...args: any[]) => Promise<any> }) => { if (tool.name === "run_role_agent") runRole = tool; }, registerCommand() {}, sendMessage() {} } as never);
+		const tool = runRole;
+		assert.ok(tool);
+		await assert.rejects(() => tool.execute("id", { role: "worker", purpose: "implementation", task: "implement milestone one" }, new AbortController().signal, undefined, { cwd } as never), /worker delegation task is \d+ bytes, exceeding orchestration\.maxWorkerTaskBytes=8/);
+		assert.equal(fs.existsSync(path.join(runDir, "tasks")), false);
 	} finally {
 		if (oldRole === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_ROLE;
 		else process.env.PI_ORCHESTRATOR_AGENT_ROLE = oldRole;

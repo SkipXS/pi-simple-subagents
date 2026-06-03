@@ -25,6 +25,9 @@
     "forwardCurrentExtension": "auto",
     "timeoutMs": 1800000
   },
+  "orchestration": {
+    "maxWorkerTaskBytes": 16384
+  },
   "references": {
     "maxFileBytes": 1048576,
     "allowOutsideCwd": false,

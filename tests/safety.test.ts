@@ -23,6 +23,7 @@ test("default config keeps YOLO roles but adds child/reference guardrails", () =
 	assert.equal("inheritSkills" in config.children, false);
 	assert.equal(config.children.forwardCurrentExtension, "auto");
 	assert.equal(config.children.timeoutMs, 30 * 60 * 1000);
+	assert.equal(config.orchestration.maxWorkerTaskBytes, 16 * 1024);
 	assert.equal(config.references.maxFileBytes, 1024 * 1024);
 	assert.equal(config.references.allowOutsideCwd, false);
 	assert.equal(config.references.allowBinary, false);
@@ -37,6 +38,7 @@ test("guardrail config keys are parsed and pre-1.0 legacy keys are not accepted"
 	fs.writeFileSync(configPath, JSON.stringify({
 		roles: { worker: { model: "openai-codex/gpt-5.5", thinking: "low" } },
 		children: { timeoutMs: 1 },
+		orchestration: { maxWorkerTaskBytes: 2 },
 		references: { maxFileBytes: 1, allowOutsideCwd: true, allowBinary: true },
 		artifacts: { baseDir: ".pi/custom-runs" },
 	}), "utf8");
@@ -45,6 +47,7 @@ test("guardrail config keys are parsed and pre-1.0 legacy keys are not accepted"
 
 	assert.equal(config.roles.worker.thinking, "low");
 	assert.equal(config.children.timeoutMs, 1);
+	assert.equal(config.orchestration.maxWorkerTaskBytes, 2);
 	assert.equal(config.references.maxFileBytes, 1);
 	assert.equal(config.references.allowOutsideCwd, true);
 	assert.equal(config.references.allowBinary, true);
@@ -82,6 +85,9 @@ test("config rejects unknown keys so typos are visible", () => {
 
 	fs.writeFileSync(configPath, JSON.stringify({ references: { allowBinary: true, maxFileBytez: 1 } }), "utf8");
 	assert.throws(() => loadConfig(cwd), /references contains unknown key: maxFileBytez/);
+
+	fs.writeFileSync(configPath, JSON.stringify({ orchestration: { maxWorkerTaskBytez: 1 } }), "utf8");
+	assert.throws(() => loadConfig(cwd), /orchestration contains unknown key: maxWorkerTaskBytez/);
 });
 
 test("references enforce outside-cwd and binary guardrails by default", () => {

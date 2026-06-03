@@ -35,7 +35,7 @@ import {
 } from "./schemas.ts";
 import { DELEGABLE_ROLE_NAMES } from "./role-registry.ts";
 import { readOrchestrationState, writeOrchestrationState } from "./state.ts";
-import { parseReviewTargetCommand, runOrchestration, runParallelWorkers, runReviewTarget, runScoutAgent, runWorkerAgent } from "./workflows.ts";
+import { assertWorkerTaskWithinBudget, parseReviewTargetCommand, runOrchestration, runParallelWorkers, runReviewTarget, runScoutAgent, runWorkerAgent } from "./workflows.ts";
 
 type ToolProgressOnUpdate = ((update: { content: Array<{ type: "text"; text: string }>; details: { subagentProgress: SubagentProgressSnapshot } }) => void) | undefined;
 type WidgetSetter = (content: string[] | undefined) => void;
@@ -362,6 +362,8 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 			promptSnippet: `Delegate a concrete task to ${delegableRoleText} within the current orchestration run`,
 			promptGuidelines: [
 				"Use run_role_agent from orchestrator after deciding the next workflow step.",
+				"Before the first worker call, split broad milestones into small work packages; never delegate a whole milestone or full plan section to one worker.",
+				"A worker task should normally have one deliverable, 1-3 likely files, 3-5 acceptance criteria, explicit non-goals, and one validation check.",
 				"Use purpose=validation for final tests or end-user checks when useful; Pi YOLO policy applies.",
 				"run_role_agent calls are serialized; do not rely on parallel worker execution in a single assistant turn.",
 				"Default output artifacts avoid overwriting existing role artifacts, but use explicit readable outputFile names for iterative loops such as review-round-1.md, accepted-fixes-round-1.md, and validation.md.",
@@ -373,6 +375,7 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 				const config = loadConfig(ctx.cwd);
 				const label = `${params.role}${params.round ? `-round-${params.round}` : ""}`;
 				const taskInput = requireNonEmpty(params.task, "role task");
+				if (params.role === "worker") assertWorkerTaskWithinBudget(taskInput, "run_role_agent.task", config, "worker delegation task");
 				const outputFile = params.outputFile?.trim() || defaultRoleOutputFile(runDir, label, () => ++roleOutputSequence);
 				const outputArtifactPath = validateOutputArtifactPath(runDir, outputFile);
 				const task = `${taskInput}
