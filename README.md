@@ -80,6 +80,7 @@ npm ci
 npm run typecheck
 npm test
 npm run check
+npm run release:check
 npm pack --dry-run
 ```
 
@@ -88,7 +89,7 @@ Use `npm ci` for reproducible local setup and CI validation from `package-lock.j
 Release/package smoke checklist:
 
 1. `npm run check`
-2. `npm pack --dry-run`
+2. `npm run release:check` (runs checks plus `npm pack --dry-run --ignore-scripts`)
 3. Install or load the checkout in a Pi version satisfying the peer range (`>=0.78.0 <1`).
 4. Reload Pi, then smoke `/orchestrate`, `/scout`, `/work`, `/work-parallel`, `/review`, artifact writing, and (inside a child role session) `compact_session`.
 
@@ -116,6 +117,8 @@ Use orchestrate_plan for @docs/plan.md
 ```
 
 The orchestrator receives a short prompt plus the plan content/reference, then coordinates scout/worker/reviewer. Before the first worker call it is instructed to break milestones into small work packages; one worker handoff should not be a full milestone or broad plan section. Worker and reviewer loop while it is useful; there is no default hard review-round cap.
+
+Each plan/task/target/context field supports at most one `@file` or `@directory` reference. Additional `@...` tokens in the same value are rejected so users do not assume multiple files were loaded when only the first was expanded. Put combined context in one file or use a dedicated option such as `/review --context @prior-scout.md` when available.
 
 Standalone scout for context gathering before implementation or review. Prefer a short scout when the task is not obviously trivial: non-trivial scope, cross-file impact, behavior/API/security/packaging changes, unfamiliar code, ambiguity, or likely side effects. Skip it for clearly isolated, low-risk single-location edits or when the user explicitly asks to proceed directly.
 
@@ -156,7 +159,7 @@ Common `/work-parallel` JSON pitfalls:
 - Use `outputFile` exactly, not `output_file`; unknown fields are rejected before workers start.
 - Provide at least two tasks; use `/work` for one standalone worker.
 
-or let the model call `run_parallel_workers` with `tasks: [{ name?, task, purpose?, outputFile? }, ...]`. Each worker gets its own child run directory and `sessions/worker.jsonl`, so their transcripts do not collide. YOLO mode still does not prevent source edit conflicts; use this only when tasks are independent enough that workers are unlikely to edit the same files. Setup/spawn errors abort sibling workers and wait for shutdown; ordinary non-zero child exits are collected so siblings can finish, then `parallel-workers-summary.md` is written and the batch fails.
+or let the model call `run_parallel_workers` with `tasks: [{ name?, task, purpose?, outputFile? }, ...]`. Each worker gets its own child run directory and `sessions/worker.jsonl`, so their transcripts do not collide. YOLO mode still does not prevent source edit conflicts; use this only when tasks are independent enough that workers are unlikely to edit the same files. Setup/spawn errors abort sibling workers and wait for shutdown; ordinary non-zero child exits are collected so siblings can finish, then `parallel-workers-summary.md` is written and the batch fails. Fanout is still limited by `children.maxConcurrentSubagents` (default `8`); lower it to reduce model cost/API pressure for large batches.
 
 Review fanout for an existing target:
 
@@ -175,7 +178,7 @@ The slash command also accepts a small option prefix before the target. Unknown 
 /review -- --fixture docs focus
 ```
 
-or let the model call `review_target` for the full schema (`target`, `focus`, `extraContext`, `reviewers`, `includeScout`, `includeOutput`). This creates a run directory, writes optional supplemental context to `extra-review-context.md`, runs an optional review-specific scout, then starts fresh reviewers with distinct angles in parallel, preserves their configured order for synthesis, and writes a synthesized `final-summary.md`. Custom reviewer fanout is capped at 8 reviewers. If reviewer fanout fails, the extension writes `review-failure-summary.md` before throwing. It does not run a worker; in YOLO mode the extension does not enforce source-write restrictions.
+or let the model call `review_target` for the full schema (`target`, `focus`, `extraContext`, `reviewers`, `includeScout`, `includeOutput`). This creates a run directory, writes optional supplemental context to `extra-review-context.md`, runs an optional review-specific scout, then starts fresh reviewers with distinct angles, preserves their configured order for synthesis, and writes a synthesized `final-summary.md`. Custom reviewer fanout is capped at 8 reviewers and concurrently scheduled by `children.maxConcurrentSubagents`. If reviewer fanout fails, the extension writes `review-failure-summary.md` before throwing. It does not run a worker; in YOLO mode the extension does not enforce source-write restrictions.
 
 ## LLM routing guidance
 
@@ -220,6 +223,8 @@ Child-only tools:
 
 Root command/tool success messages are summary-first by default: run directory, handoff/final artifact paths, transcripts, and a reminder that full child output is in artifacts. This keeps chat results short while preserving auditability. To include child/synthesis output inline for a tool call, pass `includeOutput: true`; for slash commands or debugging, set `PI_SIMPLE_SUBAGENTS_VERBOSE_RESULTS=1` before starting Pi.
 
+Reviewers and review synthesis use an explicit finding threshold: report an item only when it is likely to produce measurable improvement in correctness, security, reliability, performance/cost, packaging/installability, user-facing behavior, documentation accuracy, or test/maintenance risk. Speculative nice-to-haves, cosmetic cleanup, style-only preferences, and micro-optimizations should be omitted unless they prevent a concrete failure mode or materially reduce measurable cost/risk. This keeps review loops focused on fixes worth doing now instead of accumulating low-value polish.
+
 Pi is YOLO by default, and this extension follows that model for source edits and tool use. The workflow suggests roles and artifacts, but it does not impose hard source-file, snapshot, validation, review-round, or role-write guardrails. It does enforce a configurable maximum worker task/handoff size so a whole milestone is less likely to be dumped into the first worker. It also includes a configurable child process timeout plus reference/artifact safety guardrails to reduce accidental runaway child runs, huge/binary context ingestion, and artifact path/link surprises.
 
 - Scout, reviewer, orchestrator, and worker can use the normal Pi tool surface.
@@ -237,11 +242,12 @@ Pi is intentionally YOLO by default, and this extension follows that model for r
 
 - Role runs do not pass a restrictive `--tools` allowlist; every role gets the normal inherited Pi tool surface.
 - Child runs have a configurable per-child-process timeout (`children.timeoutMs`, default 30 minutes; set `0` to disable). Timeout kills that child process tree where supported and marks `timedOut` in results; multi-phase workflows can run longer than one timeout window because scout, worker, reviewer, and synthesis phases are separate children.
+- Fanout phases have a configurable concurrency cap (`children.maxConcurrentSubagents`, default `8`) applied to parallel workers and review reviewers. This is an operational cost/API-pressure control, not a task-count limit; `/work-parallel` and `/review` still validate their own maximum task/reviewer counts.
 - Worker tasks/handoffs have a configurable maximum size (`orchestration.maxWorkerTaskBytes`, default 16 KiB; set `0` to disable). This is intended to catch accidental delegation of an entire milestone/full plan section to the first worker; split into smaller packages with one deliverable, likely files, acceptance criteria, non-goals, and validation.
-- Child runs normally discover Pi from the installed `@earendil-works/pi-coding-agent` package `bin`. If your install layout is unusual, set `PI_SIMPLE_SUBAGENTS_PI_CLI=/absolute/path/to/pi` (or `pi.cmd` on Windows) or configure `children.piCliPath` in the global config; the environment variable wins. Treat both as trusted executable overrides. Project config may not set `children.piCliPath` because it is executable trust.
+- Child runs normally discover Pi from the installed `@earendil-works/pi-coding-agent` package `bin`. If your install layout is unusual, set `PI_SIMPLE_SUBAGENTS_PI_CLI=/absolute/path/to/pi` (or `pi.cmd` on Windows) or configure `children.piCliPath` in the global config; the environment variable wins. Treat both as trusted executable overrides. Project config may not set `children.piCliPath` because it is executable trust. Path-like overrides are preflighted for existence/regular-file shape before spawn, bare command names are allowed but logged as trusted PATH lookup, and every child writes `logs/<role>-*.invocation.json` with the effective command, args, cwd, configured override source, and warnings.
 - Child stdout/stderr/transcript artifacts are capped to avoid unbounded disk/context growth; chat previews remain separately truncated. A single child stdout JSONL line is accepted up to the transcript artifact cap (4 MiB) and then fails clearly as oversized output.
 - Plan/target/task `@` file references default to project-local, non-binary, and at most 1 MiB. Configure `references.allowOutsideCwd`, `references.allowBinary`, and `references.maxFileBytes` when you intentionally need broader access.
-- Artifact writes are constrained to the run directory and refuse/fence link-based append/write/copy surprises.
+- Artifact writes are constrained to the run directory and refuse/fence link-based append/write/copy surprises. This is an accidental-write guardrail for trusted project directories, not a hardened boundary against malicious concurrent writers replacing paths between validation and write; use an external sandbox for untrusted worktrees.
 - Scout/reviewer/orchestrator source edits are not blocked by extension hooks.
 - Scout/reviewer child runs are not fenced with source snapshots and are not auto-restored on mutation.
 - Orchestration runs do not archive/restore authorized source snapshots.
@@ -304,7 +310,8 @@ Example with explicit balanced YOLO defaults (all sections are optional; omit an
   },
   "children": {
     "forwardCurrentExtension": "auto",
-    "timeoutMs": 1800000
+    "timeoutMs": 1800000,
+    "maxConcurrentSubagents": 8
   },
   "orchestration": {
     "maxWorkerTaskBytes": 16384
@@ -328,7 +335,8 @@ Config reference:
 | `roles.<role>.thinking` | role-specific | Thinking suffix: `off`, `minimal`, `low`, `medium`, `high`, or `xhigh`. |
 | `children.forwardCurrentExtension` | `"auto"` | `"auto"` forwards this extension to child runs when the parent Pi process was started with `-e/--extension`; `"always"` always adds `--extension <this-extension>`; `"never"` never does. This helps temporary extension loading expose `write_run_artifact` and `compact_session` to child roles. |
 | `children.timeoutMs` | `1800000` | Per-child-process timeout in milliseconds. Use `0` to disable. Timed-out child runs return `timedOut: true` and exit code `124`; full multi-phase workflows may exceed this because each phase gets its own child process. |
-| `children.piCliPath` | unset | Optional Pi CLI command/path override, allowed only in the global config. `PI_SIMPLE_SUBAGENTS_PI_CLI` environment variable takes precedence. Useful for unusual global installs, Windows, and troubleshooting CLI discovery. Do not accept this value or the environment override from untrusted repos/shells; it is executable trust. |
+| `children.maxConcurrentSubagents` | `8` | Maximum child processes started concurrently within one fanout phase. Applies to `/work-parallel` workers and `/review` reviewers; lower it to reduce model cost/API pressure. Must be at least `1`. |
+| `children.piCliPath` | unset | Optional Pi CLI command/path override, allowed only in the global config. `PI_SIMPLE_SUBAGENTS_PI_CLI` environment variable takes precedence. Useful for unusual global installs, Windows, and troubleshooting CLI discovery. Prefer an absolute path. Do not accept this value or the environment override from untrusted repos/shells; it is executable trust. |
 | `orchestration.maxWorkerTaskBytes` | `16384` | Maximum UTF-8 bytes allowed in one worker task/handoff, including resolved `@file` text for standalone/parallel workers. Use `0` to disable. Oversized tasks fail before spawning so the orchestrator/user can split milestones into smaller work packages. |
 | `references.maxFileBytes` | `1048576` | Maximum bytes read from an `@file` reference. Larger files are truncated with a warning. Use `0` to disable truncation. |
 | `references.allowOutsideCwd` | `false` | Allow `@` references outside the current project directory. Keep `false` to reduce accidental secret exposure. |
@@ -425,14 +433,36 @@ Review-target runs create:
   tasks/
 ```
 
-Child transcripts, stderr logs, referenced input files, reference warnings, and final outputs are stored under the run directory subject to artifact caps for runaway output. Tool-return previews may still be more concise for chat readability. `artifacts.baseDir` may be inside or outside the current project, but symlinked/junction base paths are rejected to avoid surprising writes elsewhere. Keep the artifact directory ignored/private when targets may contain sensitive data.
+Child transcripts, stderr logs, effective invocation metadata (`logs/<role>-*.invocation.json`), referenced input files, reference warnings, and final outputs are stored under the run directory subject to artifact caps for runaway output. Tool-return previews may still be more concise for chat readability. `artifacts.baseDir` may be inside or outside the current project, but symlinked/junction base paths are rejected to avoid surprising writes elsewhere. Keep the artifact directory ignored/private when targets may contain sensitive data.
+
+### Cleanup and retention
+
+Run artifacts are intentionally durable audit logs and may contain prompts, referenced file content, transcripts, command output, model output, paths, and other sensitive data. The extension does not auto-delete `.pi/agent-runs`. Periodically prune artifacts according to your project policy, for example:
+
+```bash
+# review first
+find .pi/agent-runs -mindepth 1 -maxdepth 1 -type d -mtime +30 -print
+# delete runs older than 30 days after review
+find .pi/agent-runs -mindepth 1 -maxdepth 1 -type d -mtime +30 -exec rm -rf {} +
+```
+
+On Windows PowerShell:
+
+```powershell
+Get-ChildItem .pi/agent-runs -Directory | Where-Object LastWriteTime -lt (Get-Date).AddDays(-30)
+# after review:
+Get-ChildItem .pi/agent-runs -Directory | Where-Object LastWriteTime -lt (Get-Date).AddDays(-30) | Remove-Item -Recurse -Force
+```
+
+If you configure `artifacts.baseDir` outside the project, prune that directory instead. Do not commit artifact directories; keep them ignored/private for security-sensitive repositories.
 
 ## Troubleshooting and failure recovery
 
 - Unknown slash options/fields: `/review` rejects unknown `--...` options before the target; use `/review -- --hyphenated-target` when the target itself starts with hyphens. `/work-parallel` rejects unknown JSON keys. Fix the typo and rerun; no child workers/reviewers are started for parser errors.
 - Config parse/schema errors: Pi reports the config path and key. Remove unknown/legacy keys or move trusted `children.piCliPath` overrides to the global config or `PI_SIMPLE_SUBAGENTS_PI_CLI`.
-- Child CLI discovery failures: set `PI_SIMPLE_SUBAGENTS_PI_CLI=/absolute/path/to/pi` (or `pi.cmd` on Windows), then rerun the workflow.
+- Child CLI discovery failures: set `PI_SIMPLE_SUBAGENTS_PI_CLI=/absolute/path/to/pi` (or `pi.cmd` on Windows), then rerun the workflow. Inspect `logs/<role>-*.invocation.json` and `logs/*.stderr.log` for the effective command/path and warnings about bare PATH lookup or relative overrides.
 - Timeouts/truncated output: inspect `logs/*.stderr.log`, `logs/*.jsonl`, and `outputs/*.md` in the run directory. Increase `children.timeoutMs` or caps only when you trust the workload.
+- Unexpected model/API cost or rate pressure: lower `children.maxConcurrentSubagents` so review and parallel-worker fanout runs fewer child processes at once.
 - Partial parallel failures: `parallel-workers-summary.md` lists completed workers, exit codes, output artifacts, transcripts, and setup/spawn errors.
 - Partial review fanout failures: `review-failure-summary.md` lists failed reviewers plus any completed reviewer artifacts. Fix the cause and rerun `/review`.
 - Artifact ownership/path errors: expected output artifacts must be regular files under the run directory and cannot live in reserved subdirectories (`logs`, `outputs`, `prompts`, `sessions`, `tasks`, `delegations`). Remove accidental directories/symlinks and rerun.

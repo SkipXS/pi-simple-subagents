@@ -29,6 +29,17 @@ test("role registry is the source for config, prompts, and session policy", () =
 	}
 });
 
+test("review prompts gate low-value findings", () => {
+	const runDir = tempProject();
+	const reviewerPrompt = roleSystemPrompt("reviewer", runDir, DEFAULT_CONFIG);
+	const synthesisPrompt = roleSystemPrompt("synthesis", runDir, DEFAULT_CONFIG);
+
+	assert.match(reviewerPrompt, /Finding threshold: report a finding only when/);
+	assert.match(reviewerPrompt, /Do not include speculative nice-to-haves/);
+	assert.match(synthesisPrompt, /omit optional polish, cosmetic cleanup, or micro-optimizations/);
+	assert.match(synthesisPrompt, /practical verification\/measurement/);
+});
+
 test("delegable registry roles match run_role_agent schema and keep synthesis private", () => {
 	assert.deepEqual((RoleRunParams.properties.role as unknown as { enum: string[] }).enum, [...DELEGABLE_ROLE_NAMES]);
 	assert.deepEqual(DELEGABLE_ROLE_NAMES, ["scout", "worker", "reviewer"]);

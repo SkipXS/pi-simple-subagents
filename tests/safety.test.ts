@@ -23,6 +23,7 @@ test("default config keeps YOLO roles but adds child/reference guardrails", () =
 	assert.equal("inheritSkills" in config.children, false);
 	assert.equal(config.children.forwardCurrentExtension, "auto");
 	assert.equal(config.children.timeoutMs, 30 * 60 * 1000);
+	assert.equal(config.children.maxConcurrentSubagents, 8);
 	assert.equal(config.orchestration.maxWorkerTaskBytes, 16 * 1024);
 	assert.equal(config.references.maxFileBytes, 1024 * 1024);
 	assert.equal(config.references.allowOutsideCwd, false);
@@ -37,7 +38,7 @@ test("guardrail config keys are parsed and pre-1.0 legacy keys are not accepted"
 	fs.mkdirSync(path.dirname(configPath), { recursive: true });
 	fs.writeFileSync(configPath, JSON.stringify({
 		roles: { worker: { model: "openai-codex/gpt-5.5", thinking: "low" } },
-		children: { timeoutMs: 1 },
+		children: { timeoutMs: 1, maxConcurrentSubagents: 2 },
 		orchestration: { maxWorkerTaskBytes: 2 },
 		references: { maxFileBytes: 1, allowOutsideCwd: true, allowBinary: true },
 		artifacts: { baseDir: ".pi/custom-runs" },
@@ -47,6 +48,7 @@ test("guardrail config keys are parsed and pre-1.0 legacy keys are not accepted"
 
 	assert.equal(config.roles.worker.thinking, "low");
 	assert.equal(config.children.timeoutMs, 1);
+	assert.equal(config.children.maxConcurrentSubagents, 2);
 	assert.equal(config.orchestration.maxWorkerTaskBytes, 2);
 	assert.equal(config.references.maxFileBytes, 1);
 	assert.equal(config.references.allowOutsideCwd, true);
@@ -67,6 +69,9 @@ test("guardrail config keys are parsed and pre-1.0 legacy keys are not accepted"
 
 	fs.writeFileSync(configPath, JSON.stringify({ children: { inheritSkills: false } }), "utf8");
 	assert.throws(() => loadConfig(cwd), /children contains unknown key: inheritSkills/);
+
+	fs.writeFileSync(configPath, JSON.stringify({ children: { maxConcurrentSubagents: 0 } }), "utf8");
+	assert.throws(() => loadConfig(cwd), /children\.maxConcurrentSubagents must be a positive integer/);
 
 	fs.writeFileSync(configPath, JSON.stringify({ children: { piCliPath: "/tmp/pi" } }), "utf8");
 	assert.throws(() => loadConfig(cwd), /piCliPath is only allowed in the global config/);

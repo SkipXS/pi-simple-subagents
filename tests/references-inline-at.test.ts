@@ -42,3 +42,12 @@ test("leading at-sign references still report missing files", () => {
 
 	assert.throws(() => readReference(cwd, "@scope/package", "task", cloneConfig()), /task reference not found: scope\/package/);
 });
+
+test("multiple inline at-sign references are rejected clearly", () => {
+	const cwd = tempProject();
+	fs.writeFileSync(path.join(cwd, "one.md"), "one", "utf8");
+	fs.writeFileSync(path.join(cwd, "two.md"), "two", "utf8");
+
+	assert.throws(() => readReference(cwd, "@one.md @two.md", "task", cloneConfig()), /exactly one inline @ reference/);
+	assert.throws(() => readReference(cwd, "Use @one.md and @two.md", "task", cloneConfig()), /additional existing reference token: @two\.md/);
+});

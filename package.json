@@ -32,19 +32,21 @@
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-strip-types --test tests/*.test.ts",
     "check": "npm run typecheck && npm test",
+    "release:check": "npm run check && npm pack --dry-run --ignore-scripts",
     "prepack": "npm run check",
     "prepublishOnly": "npm run check"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*",
-    "typebox": "*"
+    "@earendil-works/pi-ai": ">=0.78.0 <1",
+    "@earendil-works/pi-coding-agent": ">=0.78.0 <1"
+  },
+  "dependencies": {
+    "typebox": "^1.1.39"
   },
   "devDependencies": {
     "@earendil-works/pi-ai": "^0.78.0",
     "@earendil-works/pi-coding-agent": "^0.78.0",
     "@types/node": "^24.0.0",
-    "typebox": "^1.1.39",
     "typescript": "^5.9.3"
   },
   "files": [

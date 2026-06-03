@@ -136,6 +136,12 @@ console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", 
 	assert.equal(argv.includes("--system-prompt"), false);
 	assert.notEqual(promptArgIndex, -1);
 	assert.match(fs.readFileSync(argv[promptArgIndex + 1], "utf8"), /custom role prompt/);
+	const invocationLog = fs.readdirSync(path.join(runDir, "logs")).find((file) => file.endsWith(".invocation.json"));
+	assert.ok(invocationLog);
+	const invocation = JSON.parse(fs.readFileSync(path.join(runDir, "logs", invocationLog), "utf8")) as { command: string; args: string[]; warnings: string[] };
+	assert.equal(invocation.command, process.execPath);
+	assert.equal(invocation.args[0], cli);
+	assert.deepEqual(invocation.warnings, []);
 });
 
 test("current extension forwarding supports temporary -e loading", () => {
@@ -337,6 +343,30 @@ test("review target reviewers run in parallel and preserve result order", async 
 	assert.deepEqual(result.reviews.map((review) => review.role), ["reviewer", "reviewer"]);
 	assert.equal(result.synthesis.role, "synthesis");
 	assert.deepEqual(calls, ["reviewer:b", "reviewer:a", "synthesis:synthesis"]);
+});
+
+test("review target honors maxConcurrentSubagents cap", async () => {
+	const cwd = tempProject();
+	const config = cloneConfig();
+	config.artifacts.baseDir = ".pi/runs";
+	config.children.maxConcurrentSubagents = 1;
+	let activeReviewers = 0;
+	let maxActiveReviewers = 0;
+	const result = await runReviewTarget(cwd, { target: "inline target", includeScout: false, reviewers: ["a", "b", "c"] }, undefined, undefined, {
+		loadConfig: () => config,
+		async spawnPiRole(input) {
+			if (input.task.includes("Assigned review angle:")) {
+				activeReviewers++;
+				maxActiveReviewers = Math.max(maxActiveReviewers, activeReviewers);
+				await new Promise((resolve) => setTimeout(resolve, 5));
+				activeReviewers--;
+			}
+			return fakeCompliantResult(input);
+		},
+	});
+
+	assert.equal(maxActiveReviewers, 1);
+	assert.equal(result.reviews.length, 3);
 });
 
 test("review target writes and passes extra context to scout, reviewers, and synthesis", async () => {

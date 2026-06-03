@@ -7,12 +7,19 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ['22.19.0']
+        pi-version: ['0.78.0', '>=0.78.0 <1']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '22.19.0'
+          node-version: ${{ matrix.node-version }}
           cache: npm
       - run: npm ci
+      - name: Install tested Pi host API range entry
+        run: npm install --no-save --save-dev @earendil-works/pi-ai@"${{ matrix.pi-version }}" @earendil-works/pi-coding-agent@"${{ matrix.pi-version }}"
       - run: npm run check
       - run: npm pack --dry-run --ignore-scripts

@@ -23,7 +23,8 @@
   },
   "children": {
     "forwardCurrentExtension": "auto",
-    "timeoutMs": 1800000
+    "timeoutMs": 1800000,
+    "maxConcurrentSubagents": 8
   },
   "orchestration": {
     "maxWorkerTaskBytes": 16384

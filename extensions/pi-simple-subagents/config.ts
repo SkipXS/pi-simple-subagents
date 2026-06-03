@@ -22,6 +22,8 @@ export interface Config {
 		forwardCurrentExtension: ExtensionForwardMode;
 		/** Child process timeout in milliseconds. Use 0 to disable. */
 		timeoutMs: number;
+		/** Maximum child processes started concurrently within one fanout phase. */
+		maxConcurrentSubagents: number;
 		/** Optional Pi CLI path/command override. Environment PI_SIMPLE_SUBAGENTS_PI_CLI wins. */
 		piCliPath?: string;
 	};
@@ -45,6 +47,7 @@ export const DEFAULT_CONFIG: Config = {
 	children: {
 		forwardCurrentExtension: "auto",
 		timeoutMs: 30 * 60 * 1000,
+		maxConcurrentSubagents: 8,
 	},
 	orchestration: {
 		maxWorkerTaskBytes: 16 * 1024,
@@ -88,6 +91,11 @@ function expectBoolean(value: unknown, source: string, pathName: string): boolea
 
 function expectNonNegativeInteger(value: unknown, source: string, pathName: string): number {
 	if (typeof value !== "number" || !Number.isInteger(value) || value < 0) throw configError(source, `${pathName} must be a non-negative integer`);
+	return value;
+}
+
+function expectPositiveInteger(value: unknown, source: string, pathName: string): number {
+	if (typeof value !== "number" || !Number.isInteger(value) || value < 1) throw configError(source, `${pathName} must be a positive integer`);
 	return value;
 }
 
@@ -137,9 +145,10 @@ function mergeConfig(base: Config, override: unknown, source = "unknown", option
 
 	if (overrideObject.children !== undefined) {
 		const children = expectObject(overrideObject.children, source, "children");
-		rejectUnknownKeys(children, source, "children", ["forwardCurrentExtension", "timeoutMs", "piCliPath"]);
+		rejectUnknownKeys(children, source, "children", ["forwardCurrentExtension", "timeoutMs", "maxConcurrentSubagents", "piCliPath"]);
 		if (children.forwardCurrentExtension !== undefined) next.children.forwardCurrentExtension = expectExtensionForwardMode(children.forwardCurrentExtension, source, "children.forwardCurrentExtension");
 		if (children.timeoutMs !== undefined) next.children.timeoutMs = expectNonNegativeInteger(children.timeoutMs, source, "children.timeoutMs");
+		if (children.maxConcurrentSubagents !== undefined) next.children.maxConcurrentSubagents = expectPositiveInteger(children.maxConcurrentSubagents, source, "children.maxConcurrentSubagents");
 		if (children.piCliPath !== undefined) {
 			if (!options.allowPiCliPath) throw configError(source, "children.piCliPath is only allowed in the global config; use PI_SIMPLE_SUBAGENTS_PI_CLI for per-project/testing overrides");
 			next.children.piCliPath = expectString(children.piCliPath, source, "children.piCliPath");

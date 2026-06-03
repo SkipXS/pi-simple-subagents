@@ -83,11 +83,18 @@ test("oversized stdout failure is not masked by later assistant output", async (
 	const cli = path.join(cwd, "fake-pi.js");
 	fs.writeFileSync(cli, `
 process.on("SIGTERM", () => {});
-process.stdout.write("{" + "x".repeat(5 * 1024 * 1024));
-setTimeout(() => {
-  console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "later output masked error" }], stopReason: "stop" } }));
-  process.exit(0);
-}, 50);
+async function writeOversizedLineThenLaterOutput() {
+  process.stdout.write("{");
+  const chunk = "x".repeat(64 * 1024);
+  for (let index = 0; index < 80; index++) {
+    if (!process.stdout.write(chunk)) await new Promise((resolve) => process.stdout.once("drain", resolve));
+  }
+  setTimeout(() => {
+    console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "later output masked error" }], stopReason: "stop" } }));
+    process.exit(0);
+  }, 50);
+}
+writeOversizedLineThenLaterOutput();
 `, "utf8");
 	const config = cloneConfig();
 	config.children.piCliPath = cli;

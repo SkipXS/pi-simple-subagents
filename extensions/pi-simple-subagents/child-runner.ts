@@ -191,6 +191,46 @@ function isJavaScriptEntrypoint(filePath: string): boolean {
 	return /\.[cm]?js$/i.test(filePath);
 }
 
+function isPathLikeCommand(command: string): boolean {
+	return path.isAbsolute(command) || command.startsWith(".") || command.includes("/") || command.includes("\\");
+}
+
+function configuredPiCliPath(config?: Config): { value: string; source: string } | undefined {
+	const envValue = process.env[PI_CLI_PATH_ENV]?.trim();
+	if (envValue) return { value: envValue, source: PI_CLI_PATH_ENV };
+	const configValue = config?.children.piCliPath?.trim();
+	return configValue ? { value: configValue, source: "global children.piCliPath" } : undefined;
+}
+
+function piInvocationWarnings(config: Config | undefined, cwd: string, invocation: { command: string; args: string[] }): string[] {
+	const warnings: string[] = [];
+	const configured = configuredPiCliPath(config);
+	if (configured) {
+		if (!isPathLikeCommand(configured.value)) {
+			warnings.push(`${configured.source} uses bare command ${JSON.stringify(configured.value)}; PATH lookup is trusted executable selection. Prefer an absolute path for reproducible child runs.`);
+		} else if (!path.isAbsolute(configured.value)) {
+			warnings.push(`${configured.source} uses relative path ${JSON.stringify(configured.value)}; prefer an absolute path so child runs cannot be redirected by cwd changes.`);
+		}
+	}
+	if (isPathLikeCommand(invocation.command)) {
+		const commandPath = path.isAbsolute(invocation.command) ? invocation.command : path.resolve(cwd, invocation.command);
+		if (!fs.existsSync(commandPath)) throw new Error(`Pi CLI executable not found: ${commandPath}. Set ${PI_CLI_PATH_ENV} or global children.piCliPath to an existing absolute Pi CLI path.`);
+		const stat = fs.statSync(commandPath);
+		if (!stat.isFile()) throw new Error(`Pi CLI executable is not a regular file: ${commandPath}`);
+		if (process.platform !== "win32" && invocation.command !== process.execPath && (stat.mode & 0o111) === 0) {
+			warnings.push(`Pi CLI path is not marked executable: ${commandPath}. If spawn fails, chmod it or point ${PI_CLI_PATH_ENV} at a runnable wrapper.`);
+		}
+	}
+	const jsEntrypoint = invocation.command === process.execPath && invocation.args[0] && isJavaScriptEntrypoint(invocation.args[0]) ? invocation.args[0] : undefined;
+	if (jsEntrypoint) {
+		const entrypointPath = path.isAbsolute(jsEntrypoint) ? jsEntrypoint : path.resolve(cwd, jsEntrypoint);
+		if (!fs.existsSync(entrypointPath)) throw new Error(`Pi CLI JavaScript entrypoint not found: ${entrypointPath}. Set ${PI_CLI_PATH_ENV} or global children.piCliPath to an existing absolute Pi CLI path.`);
+		const stat = fs.statSync(entrypointPath);
+		if (!stat.isFile()) throw new Error(`Pi CLI JavaScript entrypoint is not a regular file: ${entrypointPath}`);
+	}
+	return warnings;
+}
+
 export function getPiInvocation(args: string[], config?: Config): { command: string; args: string[] } {
 	const cliPath = resolvePiCliPath(config?.children.piCliPath);
 	if (cliPath) {
@@ -307,13 +347,46 @@ export async function spawnPiRole(input: {
 		const stampBase = `${Date.now()}-${uniqueSuffix()}`;
 		const transcriptPath = writeArtifact(input.runDir, `logs/${input.role}-${stampBase}.jsonl`, "");
 		const stderrPath = writeArtifact(input.runDir, `logs/${input.role}-${stampBase}.stderr.log`, "");
-
 		const invocation = getPiInvocation(args, input.config);
+		let invocationWarnings: string[] = [];
+		try {
+			invocationWarnings = piInvocationWarnings(input.config, input.cwd, invocation);
+			writeArtifact(input.runDir, `logs/${input.role}-${stampBase}.invocation.json`, JSON.stringify({
+				role: input.role,
+				cwd: input.cwd,
+				command: invocation.command,
+				args: invocation.args,
+				configuredPiCliPath: configuredPiCliPath(input.config),
+				warnings: invocationWarnings,
+			}, null, 2));
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			writeArtifact(input.runDir, stderrPath, `${message}\n`);
+			const outputPath = writeArtifact(input.runDir, `outputs/${input.role}-${stampBase}.md`, `Child run failed before spawn:\n${message}`);
+			resolve({
+				role: input.role,
+				exitCode: 1,
+				output: `Child run failed before spawn:\n${message}`,
+				stderr: message,
+				sessionFile,
+				transcriptPath,
+				stderrPath,
+				outputPath,
+				outputTruncated: false,
+				stderrTruncated: false,
+				outputBytes: Buffer.byteLength(`Child run failed before spawn:\n${message}`, "utf8"),
+				stderrBytes: Buffer.byteLength(message, "utf8"),
+				timedOut: false,
+				stopReason: "error",
+				errorMessage: message,
+			});
+			return;
+		}
 		const child = spawn(invocation.command, invocation.args, { cwd: input.cwd, env, stdio: ["ignore", "pipe", "pipe"], shell: false, detached: process.platform !== "win32", windowsHide: true });
 		const stdoutDecoder = new StringDecoder("utf8");
 		const stderrDecoder = new StringDecoder("utf8");
 		let buffer = "";
-		let stderr = "";
+		let stderr = invocationWarnings.length > 0 ? `${invocationWarnings.map((warning) => `Pi CLI warning: ${warning}`).join("\n")}\n` : "";
 		let finalOutput = "";
 		let assistantStopReason: string | undefined;
 		let assistantErrorMessage: string | undefined;
@@ -334,6 +407,10 @@ export async function spawnPiRole(input: {
 		let killFallbackTimer: ReturnType<typeof setTimeout> | undefined;
 		const transcriptCap = { bytes: 0, capped: false };
 		const stderrCap = { bytes: 0, capped: false };
+		if (stderr) {
+			appendArtifactFile(input.runDir, stderrPath, stderr);
+			stderrCap.bytes = Buffer.byteLength(stderr, "utf8");
+		}
 		const commitPendingStatusAction = (options: { force?: boolean } = {}) => {
 			const now = Date.now();
 			const actionChanged = pendingStatusAction !== statusAction;

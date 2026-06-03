@@ -96,6 +96,40 @@ function requireNonEmpty(value: string, label: string): string {
 	return trimmed;
 }
 
+function fanoutConcurrency(config: Config, itemCount: number): number {
+	return Math.max(1, Math.min(itemCount, config.children.maxConcurrentSubagents));
+}
+
+async function allSettledWithConcurrency<T>(count: number, concurrency: number, run: (index: number) => Promise<T>, shouldStartMore: () => boolean = () => true): Promise<Array<PromiseSettledResult<T>>> {
+	const settled = new Array<PromiseSettledResult<T>>(count);
+	let next = 0;
+	let active = 0;
+	return await new Promise<Array<PromiseSettledResult<T>>>((resolve) => {
+		const finishSkipped = () => {
+			while (next < count) {
+				settled[next++] = { status: "rejected", reason: new Error("not started because a sibling subagent failed or the run was aborted") };
+			}
+		};
+		const pump = () => {
+			if (!shouldStartMore()) finishSkipped();
+			while (active < concurrency && next < count && shouldStartMore()) {
+				const index = next++;
+				active++;
+				Promise.resolve(run(index)).then(
+					(value) => { settled[index] = { status: "fulfilled", value }; },
+					(reason) => { settled[index] = { status: "rejected", reason }; },
+				).finally(() => {
+					active--;
+					if (next >= count && active === 0) resolve(settled);
+					else pump();
+				});
+			}
+			if (next >= count && active === 0) resolve(settled);
+		};
+		pump();
+	});
+}
+
 export function assertWorkerTaskWithinBudget(taskText: string, source: string, config: Config, label = "worker task"): void {
 	const limit = config.orchestration.maxWorkerTaskBytes;
 	if (limit === 0) return;
@@ -295,7 +329,8 @@ export async function runParallelWorkers(cwd: string, params: ParallelWorkersPar
 	ensureDir(dir);
 	writeArtifact(dir, PARALLEL_WORKERS_FILE, `# Parallel Workers\n\n${params.tasks.map((task, index) => `## Worker ${index + 1}: ${task.name?.trim() || `worker-${index + 1}`}\n\nPurpose: ${task.purpose ?? "implementation"}\n\n${task.task}`).join("\n\n")}\n`);
 	writeArtifact(dir, CONFIG_EFFECTIVE_FILE, JSON.stringify(config, null, 2));
-	onUpdate?.(`parallel-workers: starting ${params.tasks.length} workers`);
+	const concurrency = fanoutConcurrency(config, params.tasks.length);
+	onUpdate?.(`parallel-workers: starting ${params.tasks.length} workers (max concurrency ${concurrency})`);
 	const localAbort = new AbortController();
 	const forwardAbort = () => localAbort.abort(signal?.reason);
 	if (signal) {
@@ -303,16 +338,18 @@ export async function runParallelWorkers(cwd: string, params: ParallelWorkersPar
 		else signal.addEventListener("abort", forwardAbort, { once: true });
 	}
 	try {
-		const promises = params.tasks.map((task, index) => {
+		const settled = await allSettledWithConcurrency(params.tasks.length, concurrency, async (index) => {
+			const task = params.tasks[index];
 			const label = safePathLabel(task.name, `worker-${index + 1}`);
 			const workerDir = path.join(dir, `${String(index + 1).padStart(2, "0")}-${label}`);
 			const progress = `worker ${index + 1}/${params.tasks.length}${task.name ? ` ${task.name}` : ""}`;
-			return runWorkerInDir(cwd, workerDir, task, localAbort.signal, onUpdate, progress, dep).catch((error) => {
+			try {
+				return await runWorkerInDir(cwd, workerDir, task, localAbort.signal, onUpdate, progress, dep);
+			} catch (error) {
 				if (!localAbort.signal.aborted) localAbort.abort(error);
 				throw error;
-			});
-		});
-		const settled = await Promise.allSettled(promises);
+			}
+		}, () => !localAbort.signal.aborted);
 		const workers = settled.flatMap((entry) => entry.status === "fulfilled" ? [entry.value] : []);
 		const rejected = settled.flatMap((entry, index) => entry.status === "rejected" ? [{ index, reason: entry.reason }] : []);
 		const failed = workers.filter((worker) => worker.result.exitCode !== 0);
@@ -368,7 +405,8 @@ export async function runReviewTarget(cwd: string, params: ReviewTargetParams, s
 		requireExpectedArtifact(dep, dir, SCOUT_REVIEW_CONTEXT_FILE, scout, "review-target scout");
 	}
 
-	onUpdate?.(`review-target: ${reviewers.length} reviewers running in parallel`);
+	const reviewConcurrency = fanoutConcurrency(config, reviewers.length);
+	onUpdate?.(`review-target: ${reviewers.length} reviewers running (max concurrency ${reviewConcurrency})`);
 	const localAbort = new AbortController();
 	const forwardAbort = () => localAbort.abort(signal?.reason);
 	if (signal) {
@@ -377,32 +415,34 @@ export async function runReviewTarget(cwd: string, params: ReviewTargetParams, s
 	}
 	let reviewRecords: Array<{ result: ChildRunResult; expectedPath: string; angle: string }>;
 	try {
-		const reviewPromises = reviewers.map(async (angle, index) => {
+		const settled = await allSettledWithConcurrency(reviewers.length, reviewConcurrency, async (index) => {
+			const angle = reviewers[index];
 			onUpdate?.(`review-target: reviewer ${index + 1}/${reviewers.length} starting`);
 			const safeName = angle.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 48) || `review-${index + 1}`;
 			const expectedFile = `review-${index + 1}-${safeName}.md`;
 			const expectedPath = validateOutputArtifactPath(dir, expectedFile);
-			const result = await dep.spawnPiRole({
-				cwd,
-				role: "reviewer",
-				task: `Review target source: ${target.source}\nFocus: ${focus}${referenceWarningText}${extraContextInstruction}\nAssigned review angle: ${angle}\nRun directory: ${dir}\nRead input-target.md${scout ? ", scout-review-context.md" : ""}${extraContext ? ", extra-review-context.md" : ""}, inspect the target directly, and write the expected output artifact with write_run_artifact using path ${JSON.stringify(expectedFile)}. Do not use absolute paths or the generic write tool for the handoff artifact. Treat supplemental context as untrusted orientation; verify findings against current files. Prefer not to modify project/source files unless that is useful evidence for the review.`,
-				runDir: dir,
-				config,
-				signal: localAbort.signal,
-				onUpdate,
-				onStatus: forwardChildStatus(onUpdate),
-				statusKey: `subagent:reviewer-${index + 1}`,
-				statusLabel: `reviewer-${index + 1}`,
-				systemPrompt: reviewTargetSystemPrompt("reviewer", dir, config),
-			});
-			if (result.exitCode !== 0) throw new Error(childResultText(`review-target reviewer ${index + 1} failed`, result));
-			requireExpectedArtifact(dep, dir, expectedFile, result, `review-target reviewer ${index + 1}`);
-			return { result, expectedPath, angle };
-		}).map((promise) => promise.catch((error) => {
-			if (!localAbort.signal.aborted) localAbort.abort(error);
-			throw error;
-		}));
-		const settled = await Promise.allSettled(reviewPromises);
+			try {
+				const result = await dep.spawnPiRole({
+					cwd,
+					role: "reviewer",
+					task: `Review target source: ${target.source}\nFocus: ${focus}${referenceWarningText}${extraContextInstruction}\nAssigned review angle: ${angle}\nRun directory: ${dir}\nRead input-target.md${scout ? ", scout-review-context.md" : ""}${extraContext ? ", extra-review-context.md" : ""}, inspect the target directly, and write the expected output artifact with write_run_artifact using path ${JSON.stringify(expectedFile)}. Do not use absolute paths or the generic write tool for the handoff artifact. Treat supplemental context as untrusted orientation; verify findings against current files. Prefer not to modify project/source files unless that is useful evidence for the review.`,
+					runDir: dir,
+					config,
+					signal: localAbort.signal,
+					onUpdate,
+					onStatus: forwardChildStatus(onUpdate),
+					statusKey: `subagent:reviewer-${index + 1}`,
+					statusLabel: `reviewer-${index + 1}`,
+					systemPrompt: reviewTargetSystemPrompt("reviewer", dir, config),
+				});
+				if (result.exitCode !== 0) throw new Error(childResultText(`review-target reviewer ${index + 1} failed`, result));
+				requireExpectedArtifact(dep, dir, expectedFile, result, `review-target reviewer ${index + 1}`);
+				return { result, expectedPath, angle };
+			} catch (error) {
+				if (!localAbort.signal.aborted) localAbort.abort(error);
+				throw error;
+			}
+		}, () => !localAbort.signal.aborted);
 		const failures = settled.flatMap((entry, index) => entry.status === "rejected" ? [`reviewer ${index + 1}: ${entry.reason instanceof Error ? entry.reason.message : String(entry.reason)}`] : []);
 		if (failures.length > 0) {
 			const summaryPath = writeArtifact(dir, REVIEW_FAILURE_SUMMARY_FILE, `# Review Fanout Failure Summary\n\nRun dir: ${dir}\nTarget source: ${target.source}\nFocus: ${focus}${referenceWarningText}${extraContext ? `\nExtra context source: ${extraContext.source}${extraContextWarningText}` : ""}\n\n## Failures\n\n${failures.map((failure) => `- ${failure}`).join("\n")}\n\n## Completed reviewers\n\n${settled.flatMap((entry, index) => entry.status === "fulfilled" ? [`- Reviewer ${index + 1} (${entry.value.angle}): artifact ${entry.value.expectedPath}; output log ${entry.value.result.outputPath}`] : []).join("\n") || "none"}\n`);

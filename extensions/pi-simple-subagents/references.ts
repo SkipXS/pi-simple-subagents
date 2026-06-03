@@ -5,6 +5,7 @@ import { isPathInside } from "./artifacts.ts";
 
 const LARGE_REFERENCE_WARNING_BYTES = 512 * 1024;
 const BINARY_SAMPLE_BYTES = 4096;
+const INLINE_REFERENCE_PATTERN = /(?:^|\s)@(?:"([^"]+)"|'([^']+)'|([^\s]+))/g;
 
 export interface ReferenceReadResult {
 	text: string;
@@ -62,9 +63,24 @@ export function formatReferenceWarnings(warnings: readonly string[]): string {
 	return `\n\nReference warnings:\n${warnings.map((warning) => `- ${warning}`).join("\n")}\n`;
 }
 
+function inlineReferenceMatches(input: string): RegExpExecArray[] {
+	INLINE_REFERENCE_PATTERN.lastIndex = 0;
+	return Array.from(input.matchAll(INLINE_REFERENCE_PATTERN));
+}
+
+function rejectAdditionalInlineReferences(cwd: string, trimmed: string, firstMatch: RegExpExecArray, label: string): void {
+	for (const match of inlineReferenceMatches(trimmed)) {
+		if (match.index === firstMatch.index) continue;
+		const extraPath = match[1] ?? match[2] ?? match[3];
+		if (!extraPath) continue;
+		const exists = fs.existsSync(path.resolve(cwd, extraPath));
+		throw new Error(`${label} supports exactly one inline @ reference per value; found additional ${exists ? "existing " : ""}reference token: @${extraPath}. Put combined context in one file or pass the extra file through a dedicated option when available.`);
+	}
+}
+
 export function readReference(cwd: string, input: string, label: string, config: Config, options?: { allowDirectory?: boolean; leadingOnly?: boolean }): ReferenceReadResult {
 	const trimmed = input.trim();
-	const atMatch = (options?.leadingOnly ? /^@(?:"([^"]+)"|'([^']+)'|([^\s]+))/.exec(trimmed) : /(?:^|\s)@(?:"([^"]+)"|'([^']+)'|([^\s]+))/.exec(trimmed));
+	const atMatch = options?.leadingOnly ? /^@(?:"([^"]+)"|'([^']+)'|([^\s]+))/.exec(trimmed) : inlineReferenceMatches(trimmed)[0];
 	const pathLike = atMatch?.[1] ?? atMatch?.[2] ?? atMatch?.[3];
 	if (!atMatch || !pathLike) return { text: input, source: `inline ${label}`, warnings: [] };
 
@@ -74,6 +90,7 @@ export function readReference(cwd: string, input: string, label: string, config:
 		if (!options?.leadingOnly && !isLeadingReference) return { text: input, source: `inline ${label}`, warnings: [] };
 		throw new Error(`${label} reference not found: ${pathLike}`);
 	}
+	rejectAdditionalInlineReferences(cwd, trimmed, atMatch, label);
 	const realCwd = fs.realpathSync.native(cwd);
 	const absolutePath = fs.realpathSync.native(requestedPath);
 	const outsideCwd = !isPathInside(realCwd, absolutePath);
