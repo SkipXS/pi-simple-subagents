@@ -11,6 +11,14 @@ Instead of one long agent doing everything, this extension makes the workflow vi
 
 > Pi remains YOLO by default: roles guide behavior and preserve artifacts, but they are not a hard sandbox.
 
+## Safety model: review-only is cooperative
+
+`/review`, `/improve-loop`, scout, reviewer, and synthesis roles are intentionally **not** implemented as a hard read-only sandbox. They are prompted to keep review workflows inspection-only and to write handoff artifacts via `write_run_artifact`, but the extension does not block the normal Pi tool surface. This keeps diagnostics, tests, benchmarks, and repository-specific workflows available to reviewers.
+
+Child Pi processes also inherit the parent process environment by design. That preserves normal Pi/model authentication and developer tooling behavior, but it means environment variables such as API keys, cloud credentials, GitHub tokens, and CI secrets are available to child agents. Pi subscription/OAuth credentials and API keys stored in `~/.pi/agent/auth.json` remain available as long as the child runs as the same user with the same home/config directory.
+
+Environment filtering alone would only reduce accidental forwarding of environment variables; it would not be a security boundary in YOLO mode because child agents can still use the normal tool surface and same-user files. For untrusted targets or commands, run Pi inside an external sandbox/container, separate OS user, or isolated home directory with only the credentials you intend to expose.
+
 ## At a glance
 
 ```mermaid

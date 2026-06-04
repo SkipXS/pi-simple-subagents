@@ -236,15 +236,16 @@ test("Pi CLI discovery resolves the package bin without override", () => {
 	}
 });
 
-test("package uses Pi core packages as peers", () => {
+test("package uses Pi core packages as peers and runtime imports as dependencies", () => {
 	const manifest = JSON.parse(fs.readFileSync(path.join(process.cwd(), "package.json"), "utf8")) as { dependencies?: Record<string, string>; peerDependencies?: Record<string, string>; devDependencies?: Record<string, string> };
-	assert.equal(manifest.dependencies, undefined);
+	assert.deepEqual(manifest.dependencies, {
+		typebox: "^1.1.39",
+	});
 	assert.deepEqual(manifest.peerDependencies, {
 		"@earendil-works/pi-ai": ">=0.78 <1",
 		"@earendil-works/pi-coding-agent": ">=0.78 <1",
-		typebox: "^1.1.39",
 	});
-	assert.ok(manifest.devDependencies?.typebox);
+	assert.equal(manifest.devDependencies?.typebox, undefined);
 });
 
 test("package pi.extensions manifest points at loadable extension modules", async () => {

@@ -36,16 +36,17 @@
     "prepack": "npm run check",
     "prepublishOnly": "npm run check"
   },
+  "dependencies": {
+    "typebox": "^1.1.39"
+  },
   "peerDependencies": {
     "@earendil-works/pi-ai": ">=0.78 <1",
-    "@earendil-works/pi-coding-agent": ">=0.78 <1",
-    "typebox": "^1.1.39"
+    "@earendil-works/pi-coding-agent": ">=0.78 <1"
   },
   "devDependencies": {
     "@earendil-works/pi-ai": "^0.78.0",
     "@earendil-works/pi-coding-agent": "^0.78.0",
     "@types/node": "^24.0.0",
-    "typebox": "^1.1.39",
     "typescript": "^5.9.3"
   },
   "files": [

@@ -406,9 +406,19 @@ Unknown config keys are rejected so typos fail early.
 
 ## Operational guardrails
 
-This extension adds workflow structure and auditability, not a confidentiality or OS sandbox.
+This extension adds workflow structure and auditability, not a confidentiality, read-only, or OS sandbox.
 
-- Role runs inherit the normal Pi tool surface; scout/reviewer/orchestrator source edits are not blocked.
+Review-only workflows are cooperative by design: `/review`, `/improve-loop`, scout, reviewer, and synthesis prompts instruct child agents not to modify target/source/generated project files, but the extension intentionally does not enforce a separate read-only tool policy. The normal Pi tool surface remains available so reviewers can run diagnostics, tests, benchmarks, and repository-specific evidence-gathering commands when useful. Use an external sandbox/container when the target or commands are untrusted.
+
+### Child environment and credentials
+
+Child Pi processes inherit the parent process environment. This is deliberate for compatibility with normal Pi/model authentication and common developer tooling, but it also forwards any ambient secrets present in the parent shell, such as `*_API_KEY`, `*_TOKEN`, `*_SECRET`, cloud credentials, package registry tokens, proxy credentials, and CI variables.
+
+Pi credentials stored in `~/.pi/agent/auth.json` are not environment variables, but they remain available to child processes that run as the same OS user with the same home/config directory. This includes subscription/OAuth credentials created by `/login` and API keys stored through Pi. Keeping `HOME`/`USERPROFILE`/`APPDATA`/`LOCALAPPDATA` available is usually enough for child Pi processes to use those credentials.
+
+Filtering the inherited environment can reduce accidental exposure of shell-provided secrets, but it is not a complete security boundary in this extension's YOLO model: child agents can still use normal tools, read same-user files, run commands, and access network resources unless an external sandbox prevents it. Use a container, separate user, isolated home directory, restricted credential profile, or other OS-level sandbox when reviewing untrusted repositories or prompts.
+
+- Role runs inherit the normal Pi tool surface; scout/reviewer/orchestrator source edits are not blocked by the extension.
 - Child process timeout defaults to 30 minutes (`children.timeoutMs`).
 - Review and parallel-worker fanout concurrency defaults to 8 (`children.maxConcurrentSubagents`).
 - Worker tasks/handoffs have a configurable maximum size (`orchestration.maxWorkerTaskBytes`).
