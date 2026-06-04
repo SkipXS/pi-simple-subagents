@@ -570,6 +570,8 @@ export async function spawnPiRole(input: {
 				fullOutput = `${fullOutput}\n\nChild run infrastructure error:\n${artifactErrorMessage}`;
 			}
 			const effectiveExitCode = artifactErrorMessage || stdoutLineTooLarge ? 1 : exitCode === 0 && isFailedStopReason(assistantStopReason) ? 1 : exitCode;
+			const finalStopReason = timedOut ? "timed_out" : aborted ? "aborted" : stdoutLineTooLarge || artifactErrorMessage ? "error" : assistantStopReason;
+			const finalErrorMessage = timedOut ? `Child run timed out after ${timeoutMs} ms.` : aborted ? "Child run aborted." : artifactErrorMessage ?? assistantErrorMessage;
 			const finalStatus = timedOut ? "timed out"
 				: artifactErrorMessage || stdoutLineTooLarge ? "failed"
 					: aborted ? "aborted"
@@ -591,8 +593,8 @@ export async function spawnPiRole(input: {
 				outputBytes: truncatedOutput.totalBytes,
 				stderrBytes: truncatedStderr.totalBytes,
 				timedOut,
-				stopReason: assistantStopReason,
-				errorMessage: assistantErrorMessage,
+				stopReason: finalStopReason,
+				errorMessage: finalErrorMessage,
 			});
 		};
 		child.stdout.on("data", (chunk: Buffer) => {

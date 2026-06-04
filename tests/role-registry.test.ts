@@ -5,7 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { resolveRoleSessionFile } from "../extensions/pi-simple-subagents/artifacts.ts";
 import { DEFAULT_CONFIG } from "../extensions/pi-simple-subagents/config.ts";
-import { roleSystemPrompt } from "../extensions/pi-simple-subagents/prompts.ts";
+import { reviewTargetSystemPrompt, roleSystemPrompt } from "../extensions/pi-simple-subagents/prompts.ts";
 import { ROLE_METADATA, DELEGABLE_ROLE_NAMES, ROLE_PURPOSE_VALUES, type RoleName } from "../extensions/pi-simple-subagents/role-registry.ts";
 import { RoleRunParams } from "../extensions/pi-simple-subagents/schemas.ts";
 import { validateRolePurpose, type Purpose } from "../extensions/pi-simple-subagents/roles.ts";
@@ -29,15 +29,21 @@ test("role registry is the source for config, prompts, and session policy", () =
 	}
 });
 
-test("review prompts gate low-value findings", () => {
+test("review prompts gate low-value findings and stay read-only by instruction", () => {
 	const runDir = tempProject();
+	const scoutPrompt = roleSystemPrompt("scout", runDir, DEFAULT_CONFIG);
 	const reviewerPrompt = roleSystemPrompt("reviewer", runDir, DEFAULT_CONFIG);
 	const synthesisPrompt = roleSystemPrompt("synthesis", runDir, DEFAULT_CONFIG);
+	const reviewTargetPrompt = reviewTargetSystemPrompt("reviewer", runDir, DEFAULT_CONFIG);
 
+	assert.match(scoutPrompt, /Do not intentionally modify project\/source files/);
+	assert.match(scoutPrompt, /prefer read-only alternatives or explain the risk/);
+	assert.match(reviewerPrompt, /Do not modify project\/source files/);
 	assert.match(reviewerPrompt, /Finding threshold: report a finding only when/);
 	assert.match(reviewerPrompt, /Do not include speculative nice-to-haves/);
 	assert.match(synthesisPrompt, /omit optional polish, cosmetic cleanup, or micro-optimizations/);
 	assert.match(synthesisPrompt, /practical verification\/measurement/);
+	assert.match(reviewTargetPrompt, /do not modify target\/project\/source files/i);
 });
 
 test("delegable registry roles match run_role_agent schema and keep synthesis private", () => {

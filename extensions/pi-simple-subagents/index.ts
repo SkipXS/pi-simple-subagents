@@ -582,7 +582,7 @@ Write the expected output artifact with write_run_artifact using path ${JSON.str
 		const runReviewCommand = async (args: string, ctx: ExtensionCommandContext) => {
 			const target = args.trim();
 			if (!target) {
-				ctx.ui.notify("Usage: /review [--scout|--no-scout] [--context <text-or-@file>] [--reviewer <angle>]... @path-or-dir [focus/instructions]", "warning");
+				ctx.ui.notify("Usage: /review [--scout|--no-scout] [--continue-on-reviewer-failure] [--context <text-or-@file>] [--reviewer <angle>]... @path-or-dir [focus/instructions]", "warning");
 				return;
 			}
 			ctx.ui.notify("Starting review workflow...", "info");
@@ -706,7 +706,7 @@ Write the expected output artifact with write_run_artifact using path ${JSON.str
 		});
 
 		pi.registerCommand("review", {
-			description: "Run scout/reviewer fanout for a target and synthesize improvements. Usage: [--scout|--no-scout] [--context <text-or-@file>] [--reviewer <angle>]... @path-or-dir [focus/instructions]",
+			description: "Run scout/reviewer fanout for a target and synthesize improvements. Usage: [--scout|--no-scout] [--continue-on-reviewer-failure] [--context <text-or-@file>] [--reviewer <angle>]... @path-or-dir [focus/instructions]",
 			handler: runReviewCommand,
 		});
 

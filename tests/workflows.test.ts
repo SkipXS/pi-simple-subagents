@@ -81,6 +81,12 @@ test("parseReviewTargetCommand supports scout, context, and reviewer command opt
 		focus: "docs",
 		includeScout: false,
 	});
+	assert.deepEqual(parseReviewTargetCommand("--continue-on-reviewer-failure --no-scout @README.md docs"), {
+		target: "@README.md",
+		focus: "docs",
+		includeScout: false,
+		continueOnReviewerFailure: true,
+	});
 });
 
 test("parseReviewTargetCommand preserves quoted Windows backslashes", () => {
@@ -176,6 +182,17 @@ test("Pi CLI discovery resolves the package bin without override", () => {
 	}
 });
 
+test("package uses Pi core packages as peers", () => {
+	const manifest = JSON.parse(fs.readFileSync(path.join(process.cwd(), "package.json"), "utf8")) as { dependencies?: Record<string, string>; peerDependencies?: Record<string, string>; devDependencies?: Record<string, string> };
+	assert.equal(manifest.dependencies, undefined);
+	assert.deepEqual(manifest.peerDependencies, {
+		"@earendil-works/pi-ai": "*",
+		"@earendil-works/pi-coding-agent": "*",
+		typebox: "*",
+	});
+	assert.ok(manifest.devDependencies?.typebox);
+});
+
 test("package pi.extensions manifest points at loadable extension modules", async () => {
 	const manifest = JSON.parse(fs.readFileSync(path.join(process.cwd(), "package.json"), "utf8")) as { pi?: { extensions?: unknown } };
 	assert.ok(Array.isArray(manifest.pi?.extensions));
@@ -226,6 +243,8 @@ test("child runs report timeout accurately", async () => {
 	const result = await spawnPiRole({ cwd, role: "worker", task: "timeout test", runDir, config, statusKey: "subagent:timeout-worker", statusLabel: "timeout-worker", onStatus: (status) => statuses.push(status) });
 	assert.equal(result.timedOut, true);
 	assert.equal(result.exitCode, 124);
+	assert.equal(result.stopReason, "timed_out");
+	assert.match(result.errorMessage ?? "", /timed out/);
 	assert.match(statuses.at(-1)?.text ?? "", /timeout-worker: .*timed out$/);
 });
 
@@ -389,6 +408,28 @@ test("review target writes and passes extra context to scout, reviewers, and syn
 	assert.equal(tasks.length, 3);
 	assert.equal(tasks.every((task) => task.includes("extra-review-context.md")), true);
 	assert.equal(tasks.every((task) => task.includes("verify") || task.includes("unverified")), true);
+});
+
+test("review target can synthesize with partial reviewer failures when requested", async () => {
+	const cwd = tempProject();
+	const config = cloneConfig();
+	config.artifacts.baseDir = ".pi/runs";
+	config.children.maxConcurrentSubagents = 1;
+	const tasks: string[] = [];
+	const result = await runReviewTarget(cwd, { target: "inline target", includeScout: false, reviewers: ["fail", "pass"], continueOnReviewerFailure: true }, undefined, undefined, {
+		loadConfig: () => config,
+		async spawnPiRole(input) {
+			tasks.push(input.task);
+			if (input.task.includes("Assigned review angle: fail")) throw new Error("reviewer exploded");
+			return fakeCompliantResult(input);
+		},
+	});
+
+	assert.equal(result.reviews.length, 1);
+	assert.deepEqual(result.reviewFailures, ["reviewer 1: reviewer exploded"]);
+	assert.match(result.reviewFailureSummaryPath ?? "", /review-failure-summary\.md$/);
+	assert.equal(fs.existsSync(result.reviewFailureSummaryPath ?? ""), true);
+	assert.equal(tasks.at(-1)?.includes("Reviewer failures to account for:"), true);
 });
 
 test("review target caps custom reviewer fanout", async () => {

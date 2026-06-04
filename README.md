@@ -90,7 +90,7 @@ Release/package smoke checklist:
 
 1. `npm run check`
 2. `npm run release:check` (runs checks plus `npm pack --dry-run --ignore-scripts`)
-3. Install or load the checkout in a Pi version satisfying the peer range (`>=0.78.0 <1`).
+3. Install or load the checkout in a compatible Pi runtime. Pi core packages (`@earendil-works/pi-ai`, `@earendil-works/pi-coding-agent`, `typebox`) are declared as peers and provided by Pi; local tests install them as dev dependencies.
 4. Reload Pi, then smoke `/orchestrate`, `/scout`, `/work`, `/work-parallel`, `/review`, artifact writing, and (inside a child role session) `compact_session`.
 
 
@@ -172,13 +172,13 @@ The text after the target is treated as focus/instructions. Use explicit `--revi
 The slash command also accepts a small option prefix before the target. Unknown `--...` options are rejected before any review starts so typos do not turn into accidental inline targets. Use a literal `--` end-of-options sentinel when the target itself starts with hyphens, e.g. `/review -- --fixture docs focus`. Use `--context` to pass a compact prior scout report or other supplemental context; reviewers are instructed to treat it as orientation and verify it against current files. Each `--context` or `--reviewer` option consumes exactly one token, so multi-word values must be quoted. Unmatched single or double quotes are reported as command syntax errors before any review starts:
 
 ```text
-/review [--scout|--no-scout] [--context <inline-or-@file>|--context=<inline-or-@file>] [--reviewer <angle>|--reviewer=<angle>]... [--] @path-or-dir [focus/instructions]
+/review [--scout|--no-scout] [--continue-on-reviewer-failure|--fail-on-reviewer-failure] [--context <inline-or-@file>|--context=<inline-or-@file>] [--reviewer <angle>|--reviewer=<angle>]... [--] @path-or-dir [focus/instructions]
 /review --context @.pi/agent-runs/<run-id>/scout-report.md --reviewer "security boundaries" --reviewer "packaging UX" @extensions/pi-simple-subagents
 /review --context "prior scout notes with spaces" --reviewer "runtime correctness" @README.md docs focus
 /review -- --fixture docs focus
 ```
 
-or let the model call `review_target` for the full schema (`target`, `focus`, `extraContext`, `reviewers`, `includeScout`, `includeOutput`). This creates a run directory, writes optional supplemental context to `extra-review-context.md`, runs an optional review-specific scout, then starts fresh reviewers with distinct angles, preserves their configured order for synthesis, and writes a synthesized `final-summary.md`. Custom reviewer fanout is capped at 8 reviewers and concurrently scheduled by `children.maxConcurrentSubagents`. If reviewer fanout fails, the extension writes `review-failure-summary.md` before throwing. It does not run a worker; in YOLO mode the extension does not enforce source-write restrictions.
+or let the model call `review_target` for the full schema (`target`, `focus`, `extraContext`, `reviewers`, `includeScout`, `continueOnReviewerFailure`, `includeOutput`). This creates a run directory, writes optional supplemental context to `extra-review-context.md`, runs an optional review-specific scout, then starts fresh reviewers with distinct angles, preserves their configured order for synthesis, and writes a synthesized `final-summary.md`. Custom reviewer fanout is capped at 8 reviewers and concurrently scheduled by `children.maxConcurrentSubagents`. If reviewer fanout fails, the extension writes `review-failure-summary.md` before throwing by default. Set `continueOnReviewerFailure: true` or use `/review --continue-on-reviewer-failure` to synthesize from successful reviewers when at least one reviewer completed. It does not run a worker; review prompts instruct scout/reviewer/synthesis roles not to modify source files, but YOLO mode still does not enforce that with tool guardrails.
 
 ## LLM routing guidance
 
@@ -198,7 +198,7 @@ Root tools/commands:
 | --- | --- | --- | --- |
 | `orchestrate_plan` | `/orchestrate <plan-or-@file>` | `plan`, `includeOutput?` | Plan-driven implementation should coordinate scout, worker, review, fixes, and validation. |
 | `run_scout_agent` | `/scout <task-or-@target>` | `task`, `outputFile?`, `includeOutput?` | Context gathering for non-trivial, uncertain, cross-file, or side-effect-prone work should be isolated into a compact handoff report. |
-| `review_target` | `/review [options] <target> [focus]` | `target`, `focus?`, `extraContext?`, `reviewers?`, `includeScout?`, `includeOutput?` | Review-only fanout should inspect a target and synthesize findings without running a worker. |
+| `review_target` | `/review [options] <target> [focus]` | `target`, `focus?`, `extraContext?`, `reviewers?`, `includeScout?`, `continueOnReviewerFailure?`, `includeOutput?` | Review-only fanout should inspect a target and synthesize findings without running a worker. |
 | `run_worker_agent` | `/work <task-or-@file>` | `task`, `purpose?`, `outputFile?`, `includeOutput?` | Direct implementation, fix, or validation is enough and no full review loop is needed. |
 | `run_parallel_workers` | `/work-parallel <json>` | `tasks[{name?,task,purpose?,outputFile?}]` | Multiple implementation/fix/validation tasks are independent and unlikely to touch the same files. |
 

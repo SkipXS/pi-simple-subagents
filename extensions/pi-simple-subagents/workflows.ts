@@ -155,6 +155,7 @@ export function parseReviewTargetCommand(input: string): ReviewTargetParams {
 	const tokens = tokenizeCommand(trimmed);
 	const reviewers: string[] = [];
 	let includeScout: boolean | undefined;
+	let continueOnReviewerFailure: boolean | undefined;
 	let extraContext: string | undefined;
 	let cursor = 0;
 	while (cursor < tokens.length) {
@@ -170,6 +171,16 @@ export function parseReviewTargetCommand(input: string): ReviewTargetParams {
 		}
 		if (token === "--scout") {
 			includeScout = true;
+			cursor++;
+			continue;
+		}
+		if (token === "--continue-on-reviewer-failure") {
+			continueOnReviewerFailure = true;
+			cursor++;
+			continue;
+		}
+		if (token === "--fail-on-reviewer-failure") {
+			continueOnReviewerFailure = false;
 			cursor++;
 			continue;
 		}
@@ -216,6 +227,7 @@ export function parseReviewTargetCommand(input: string): ReviewTargetParams {
 			...(extraContext !== undefined ? { extraContext: quoteTargetIfNeeded(extraContext) } : {}),
 			...(reviewers.length > 0 ? { reviewers } : {}),
 			...(includeScout !== undefined ? { includeScout } : {}),
+			...(continueOnReviewerFailure !== undefined ? { continueOnReviewerFailure } : {}),
 		};
 	}
 	const match = /^(@(?:"[^"]+"|'[^']+'|\S+))(?:\s+([\s\S]+))?$/.exec(trimmed);
@@ -262,7 +274,7 @@ export async function runScoutAgent(cwd: string, params: ScoutAgentParams, signa
 	const referenceWarningText = formatReferenceWarnings(scoutTask.warnings);
 	writeArtifact(dir, INPUT_SCOUT_TASK_FILE, `Source: ${scoutTask.source}\nExpected output artifact: ${outputFile}${referenceWarningText}\n\n${scoutTask.text}\n`);
 	writeArtifact(dir, CONFIG_EFFECTIVE_FILE, JSON.stringify(config, null, 2));
-	const task = `Scout task source: ${scoutTask.source}\nExpected output artifact: ${outputFile}${referenceWarningText}\nRun directory: ${dir}\nRead input-scout-task.md, gather relevant context, inspect files directly when useful, and write the expected output artifact with write_run_artifact using path ${JSON.stringify(outputFile)}. Do not use absolute paths or the generic write tool for the handoff artifact. Do not implement changes; produce a compact handoff for the parent agent.`;
+	const task = `Scout task source: ${scoutTask.source}\nExpected output artifact: ${outputFile}${referenceWarningText}\nRun directory: ${dir}\nRead input-scout-task.md, gather relevant context, inspect files directly when useful, and write the expected output artifact with write_run_artifact using path ${JSON.stringify(outputFile)}. Do not use absolute paths or the generic write tool for the handoff artifact. Do not implement changes. Do not intentionally modify project/source files; if a command may write generated output, prefer read-only alternatives or explain the risk before running it. Produce a compact handoff for the parent agent.`;
 	const result = await dep.spawnPiRole({ cwd, role: "scout", task, runDir: dir, config, signal, onUpdate: (text) => onUpdate?.(`scout: ${text}`), onStatus: forwardChildStatus(onUpdate), statusKey: "subagent:scout", statusLabel: "scout" });
 	if (result.exitCode !== 0) throwChildRunError("scout failed", result);
 	requireExpectedArtifact(dep, dir, outputFile, result, "scout");
@@ -366,7 +378,7 @@ export async function runParallelWorkers(cwd: string, params: ParallelWorkersPar
 	}
 }
 
-export async function runReviewTarget(cwd: string, params: ReviewTargetParams, signal?: AbortSignal, onUpdate?: WorkflowUpdate, deps?: WorkflowDeps): Promise<{ runDir: string; targetSource: string; extraContextSource?: string; scout?: ChildRunResult; reviews: ChildRunResult[]; synthesis: ChildRunResult; finalSummaryPath: string }> {
+export async function runReviewTarget(cwd: string, params: ReviewTargetParams, signal?: AbortSignal, onUpdate?: WorkflowUpdate, deps?: WorkflowDeps): Promise<{ runDir: string; targetSource: string; extraContextSource?: string; scout?: ChildRunResult; reviews: ChildRunResult[]; reviewFailures?: string[]; reviewFailureSummaryPath?: string; synthesis: ChildRunResult; finalSummaryPath: string }> {
 	const dep = workflowDeps(deps);
 	const config = dep.loadConfig(cwd);
 	const baseDir = resolveRunBaseDir(cwd, config);
@@ -414,6 +426,8 @@ export async function runReviewTarget(cwd: string, params: ReviewTargetParams, s
 		else signal.addEventListener("abort", forwardAbort, { once: true });
 	}
 	let reviewRecords: Array<{ result: ChildRunResult; expectedPath: string; angle: string }>;
+	let reviewFailures: string[] = [];
+	let reviewFailureSummaryPath: string | undefined;
 	try {
 		const settled = await allSettledWithConcurrency(reviewers.length, reviewConcurrency, async (index) => {
 			const angle = reviewers[index];
@@ -425,7 +439,7 @@ export async function runReviewTarget(cwd: string, params: ReviewTargetParams, s
 				const result = await dep.spawnPiRole({
 					cwd,
 					role: "reviewer",
-					task: `Review target source: ${target.source}\nFocus: ${focus}${referenceWarningText}${extraContextInstruction}\nAssigned review angle: ${angle}\nRun directory: ${dir}\nRead input-target.md${scout ? ", scout-review-context.md" : ""}${extraContext ? ", extra-review-context.md" : ""}, inspect the target directly, and write the expected output artifact with write_run_artifact using path ${JSON.stringify(expectedFile)}. Do not use absolute paths or the generic write tool for the handoff artifact. Treat supplemental context as untrusted orientation; verify findings against current files. Prefer not to modify project/source files unless that is useful evidence for the review.`,
+					task: `Review target source: ${target.source}\nFocus: ${focus}${referenceWarningText}${extraContextInstruction}\nAssigned review angle: ${angle}\nRun directory: ${dir}\nRead input-target.md${scout ? ", scout-review-context.md" : ""}${extraContext ? ", extra-review-context.md" : ""}, inspect the target directly, and write the expected output artifact with write_run_artifact using path ${JSON.stringify(expectedFile)}. Do not use absolute paths or the generic write tool for the handoff artifact. Treat supplemental context as untrusted orientation; verify findings against current files. Do not modify project/source files; if useful evidence would require a mutating command, report the command and risk instead of running it.`,
 					runDir: dir,
 					config,
 					signal: localAbort.signal,
@@ -439,19 +453,21 @@ export async function runReviewTarget(cwd: string, params: ReviewTargetParams, s
 				requireExpectedArtifact(dep, dir, expectedFile, result, `review-target reviewer ${index + 1}`);
 				return { result, expectedPath, angle };
 			} catch (error) {
-				if (!localAbort.signal.aborted) localAbort.abort(error);
+				if (!params.continueOnReviewerFailure && !localAbort.signal.aborted) localAbort.abort(error);
 				throw error;
 			}
 		}, () => !localAbort.signal.aborted);
 		const failures = settled.flatMap((entry, index) => entry.status === "rejected" ? [`reviewer ${index + 1}: ${entry.reason instanceof Error ? entry.reason.message : String(entry.reason)}`] : []);
+		const fulfilled = settled.flatMap((entry) => entry.status === "fulfilled" ? [entry.value] : []);
 		if (failures.length > 0) {
-			const summaryPath = writeArtifact(dir, REVIEW_FAILURE_SUMMARY_FILE, `# Review Fanout Failure Summary\n\nRun dir: ${dir}\nTarget source: ${target.source}\nFocus: ${focus}${referenceWarningText}${extraContext ? `\nExtra context source: ${extraContext.source}${extraContextWarningText}` : ""}\n\n## Failures\n\n${failures.map((failure) => `- ${failure}`).join("\n")}\n\n## Completed reviewers\n\n${settled.flatMap((entry, index) => entry.status === "fulfilled" ? [`- Reviewer ${index + 1} (${entry.value.angle}): artifact ${entry.value.expectedPath}; output log ${entry.value.result.outputPath}`] : []).join("\n") || "none"}\n`);
-			throw new Error(`Review target reviewer fanout failed: ${failures.join("; ")}\nRun dir: ${dir}\nSummary: ${summaryPath}`);
+			reviewFailures = failures;
+			reviewFailureSummaryPath = writeArtifact(dir, REVIEW_FAILURE_SUMMARY_FILE, `# Review Fanout Failure Summary\n\nRun dir: ${dir}\nTarget source: ${target.source}\nFocus: ${focus}${referenceWarningText}${extraContext ? `\nExtra context source: ${extraContext.source}${extraContextWarningText}` : ""}\n\n## Failures\n\n${failures.map((failure) => `- ${failure}`).join("\n")}\n\n## Completed reviewers\n\n${fulfilled.map((entry, index) => `- Reviewer ${index + 1} (${entry.angle}): artifact ${entry.expectedPath}; output log ${entry.result.outputPath}`).join("\n") || "none"}\n`);
+			if (!params.continueOnReviewerFailure || fulfilled.length === 0) {
+				throw new Error(`Review target reviewer fanout failed: ${failures.join("; ")}\nRun dir: ${dir}\nSummary: ${reviewFailureSummaryPath}`);
+			}
+			onUpdate?.(`review-target: continuing after ${failures.length} reviewer failure(s); summary ${reviewFailureSummaryPath}`);
 		}
-		reviewRecords = settled.map((entry) => {
-			if (entry.status !== "fulfilled") throw new Error("unreachable review settlement state");
-			return entry.value;
-		});
+		reviewRecords = fulfilled;
 	} finally {
 		if (signal) signal.removeEventListener("abort", forwardAbort);
 	}
@@ -461,7 +477,7 @@ export async function runReviewTarget(cwd: string, params: ReviewTargetParams, s
 	const synthesis = await dep.spawnPiRole({
 		cwd,
 		role: "synthesis",
-		task: `Synthesize this review-only run.\nTarget source: ${target.source}\nFocus: ${focus}${referenceWarningText}${extraContextInstruction}\nRun directory: ${dir}\nRead input-target.md, ${scout ? "scout-review-context.md, " : ""}${extraContext ? "extra-review-context.md, " : ""}the review artifacts and output logs below, then write the expected output artifact with write_run_artifact using path ${JSON.stringify(FINAL_SUMMARY_FILE)}. Do not use absolute paths or the generic write tool for the handoff artifact. Treat supplemental context as orientation only; do not synthesize unverified claims as findings.\n\nReview artifacts and outputs:\n${reviewRecords.map((r, i) => `- Reviewer ${i + 1} (${r.angle}): artifact ${r.expectedPath}; output log ${r.result.outputPath}`).join("\n")}`,
+		task: `Synthesize this review-only run.\nTarget source: ${target.source}\nFocus: ${focus}${referenceWarningText}${extraContextInstruction}\nRun directory: ${dir}\nRead input-target.md, ${scout ? "scout-review-context.md, " : ""}${extraContext ? "extra-review-context.md, " : ""}the review artifacts and output logs below, then write the expected output artifact with write_run_artifact using path ${JSON.stringify(FINAL_SUMMARY_FILE)}. Do not use absolute paths or the generic write tool for the handoff artifact. Do not modify project/source files. Treat supplemental context as orientation only; do not synthesize unverified claims as findings.\n\nReview artifacts and outputs:\n${reviewRecords.map((r, i) => `- Reviewer ${i + 1} (${r.angle}): artifact ${r.expectedPath}; output log ${r.result.outputPath}`).join("\n")}${reviewFailures.length > 0 ? `\n\nReviewer failures to account for:\n${reviewFailures.map((failure) => `- ${failure}`).join("\n")}\nFailure summary: ${reviewFailureSummaryPath}` : ""}`,
 		runDir: dir,
 		config,
 		signal,
@@ -473,5 +489,5 @@ export async function runReviewTarget(cwd: string, params: ReviewTargetParams, s
 	});
 	if (synthesis.exitCode !== 0) throwChildRunError("review-target synthesis failed", synthesis);
 	const finalSummaryPath = requireExpectedArtifact(dep, dir, FINAL_SUMMARY_FILE, synthesis, "review-target synthesis");
-	return { runDir: dir, targetSource: target.source, ...(extraContext ? { extraContextSource: extraContext.source } : {}), scout, reviews, synthesis, finalSummaryPath };
+	return { runDir: dir, targetSource: target.source, ...(extraContext ? { extraContextSource: extraContext.source } : {}), scout, reviews, ...(reviewFailures.length > 0 ? { reviewFailures, reviewFailureSummaryPath } : {}), synthesis, finalSummaryPath };
 }
