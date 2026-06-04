@@ -29,7 +29,7 @@ Notes:
 
 Use before implementation or review when the task is broad, unfamiliar, cross-file, security-sensitive, behavior-changing, or ambiguous. Scouts write `scout-report.md` by default and should produce a compact handoff rather than source edits.
 
-The corresponding root tool is `run_scout_agent`:
+The corresponding root tool is `run_scout`:
 
 ```ts
 {
@@ -48,7 +48,7 @@ The corresponding root tool is `run_scout_agent`:
 
 Use for one focused implementation, fix, or validation package. Oversized worker tasks are rejected by `orchestration.maxWorkerTaskBytes` unless that limit is set to `0`.
 
-The corresponding root tool is `run_worker_agent`:
+The corresponding root tool is `run_worker`:
 
 ```ts
 {
@@ -120,7 +120,7 @@ Options:
 
 Multi-word `--context` and `--reviewer` values must be quoted. Unknown `--...` options and unmatched quotes fail before any child process starts.
 
-The corresponding root tool is `review_target`:
+The corresponding root tool is `run_reviewers`:
 
 ```ts
 {
@@ -140,11 +140,11 @@ The corresponding root tool is `review_target`:
 
 | Tool | Slash command | Key options | Use when |
 | --- | --- | --- | --- |
-| `orchestrate_plan` | `/orchestrate <plan-or-@file>` | `plan`, `includeOutput?` | Plan-driven work should coordinate scout, worker, review, fixes, and validation. |
-| `run_scout_agent` | `/scout <task-or-@target>` | `task`, `outputFile?`, `includeOutput?` | Context gathering should be isolated into a compact handoff report. |
-| `run_worker_agent` | `/work <task-or-@file>` | `task`, `purpose?`, `outputFile?`, `includeOutput?` | Direct implementation, fix, or validation is enough. |
-| `run_parallel_workers` | `/work-parallel <json>` | `tasks[{name?, task, purpose?, outputFile?}]` | Multiple tasks are independent and unlikely to edit the same files. |
-| `review_target` | `/review [options] <target> [focus]` | `target`, `focus?`, `extraContext?`, `reviewers?`, `includeScout?`, `continueOnReviewerFailure?`, `includeOutput?` | Existing target needs review-only fanout. |
+| `run_orchestrator` | `/orchestrate <plan-or-@file>` | `plan`, `includeOutput?` | Plan-driven work should coordinate scout, worker, review, fixes, and validation. |
+| `run_scout` | `/scout <task-or-@target>` | `task`, `outputFile?`, `includeOutput?` | Context gathering should be isolated into a compact handoff report. |
+| `run_worker` | `/work <task-or-@file>` | `task`, `purpose?`, `outputFile?`, `includeOutput?` | Direct implementation, fix, or validation is enough. |
+| `run_workers_parallel` | `/work-parallel <json>` | `tasks[{name?, task, purpose?, outputFile?}]` | Multiple tasks are independent and unlikely to edit the same files. |
+| `run_reviewers` | `/review [options] <target> [focus]` | `target`, `focus?`, `extraContext?`, `reviewers?`, `includeScout?`, `continueOnReviewerFailure?`, `includeOutput?` | Existing target needs review-only fanout. |
 
 Tool results are summary-first by default. Set `includeOutput: true` for inline child/synthesis output, or set `PI_SIMPLE_SUBAGENTS_VERBOSE_RESULTS=1` before starting Pi for verbose slash-command/debug output.
 
@@ -173,11 +173,11 @@ Tool results are summary-first by default. Set `includeOutput: true` for inline 
 
 The extension exposes prompt guidance on each root tool:
 
-- Prefer `run_scout_agent` before implementation when the task is not obviously trivial.
-- Use `review_target` for review-only work. Keep the review-specific scout enabled unless the user asks to skip it.
-- Use `orchestrate_plan` for plan-driven implementation that benefits from scout/worker/reviewer coordination.
-- Use `run_worker_agent` for direct implementation, fix, or validation tasks that do not need a full orchestration loop.
-- Use `run_parallel_workers` only for clearly independent tasks unlikely to edit the same files.
+- Prefer `run_scout` before implementation when the task is not obviously trivial.
+- Use `run_reviewers` for review-only work. Keep the review-specific scout enabled unless the user asks to skip it.
+- Use `run_orchestrator` for plan-driven implementation that benefits from scout/worker/reviewer coordination.
+- Use `run_worker` for direct implementation, fix, or validation tasks that do not need a full orchestration loop.
+- Use `run_workers_parallel` only for clearly independent tasks unlikely to edit the same files.
 
 ## Run artifacts
 

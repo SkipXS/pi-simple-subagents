@@ -8,7 +8,7 @@ import { pathToFileURL } from "node:url";
 import { getPiInvocation, quoteAtReferencePath, shouldForwardCurrentExtension, spawnPiRole, wasLoadedWithExtensionFlag, type ChildRunResult } from "../extensions/pi-simple-subagents/child-runner.ts";
 import { DEFAULT_CONFIG, type Config } from "../extensions/pi-simple-subagents/config.ts";
 import orchestratorAgentsExtension from "../extensions/pi-simple-subagents/index.ts";
-import { runParallelWorkers, runReviewTarget, runScoutAgent, runWorkerAgent, parseReviewTargetCommand } from "../extensions/pi-simple-subagents/workflows.ts";
+import { runReviewers, runScout, runWorker, runWorkersParallel, parseReviewTargetCommand } from "../extensions/pi-simple-subagents/workflows.ts";
 
 function tempProject(): string {
 	return fs.mkdtempSync(path.join(os.tmpdir(), "pi-simple-subagents-test-"));
@@ -322,7 +322,7 @@ test("parallel workers abort and await siblings after a child setup/spawn failur
 	const config = cloneConfig();
 	config.artifacts.baseDir = ".pi/runs";
 	let secondWorkerAborted = false;
-	await assert.rejects(() => runParallelWorkers(cwd, { tasks: [{ name: "fail", task: "first" }, { name: "wait", task: "second" }] }, undefined, undefined, {
+	await assert.rejects(() => runWorkersParallel(cwd, { tasks: [{ name: "fail", task: "first" }, { name: "wait", task: "second" }] }, undefined, undefined, {
 		loadConfig: () => config,
 		async spawnPiRole(input) {
 			if (input.task.includes("Name: fail")) throw new Error("spawn failed");
@@ -345,7 +345,7 @@ test("review target reviewers run in parallel and preserve result order", async 
 	let activeReviewers = 0;
 	let maxActiveReviewers = 0;
 	const calls: string[] = [];
-	const result = await runReviewTarget(cwd, { target: "inline target", includeScout: false, reviewers: ["b", "a"] }, undefined, undefined, {
+	const result = await runReviewers(cwd, { target: "inline target", includeScout: false, reviewers: ["b", "a"] }, undefined, undefined, {
 		loadConfig: () => config,
 		async spawnPiRole(input) {
 			calls.push(`${input.role}:${input.task.includes("Assigned review angle: b") ? "b" : input.task.includes("Assigned review angle: a") ? "a" : "synthesis"}`);
@@ -372,7 +372,7 @@ test("review target honors maxConcurrentSubagents cap", async () => {
 	config.children.maxConcurrentSubagents = 1;
 	let activeReviewers = 0;
 	let maxActiveReviewers = 0;
-	const result = await runReviewTarget(cwd, { target: "inline target", includeScout: false, reviewers: ["a", "b", "c"] }, undefined, undefined, {
+	const result = await runReviewers(cwd, { target: "inline target", includeScout: false, reviewers: ["a", "b", "c"] }, undefined, undefined, {
 		loadConfig: () => config,
 		async spawnPiRole(input) {
 			if (input.task.includes("Assigned review angle:")) {
@@ -396,7 +396,7 @@ test("review target writes and passes extra context to scout, reviewers, and syn
 	const config = cloneConfig();
 	config.artifacts.baseDir = ".pi/runs";
 	const tasks: string[] = [];
-	const result = await runReviewTarget(cwd, { target: "inline target", extraContext: "@scout-report.md", reviewers: ["runtime bugs"] }, undefined, undefined, {
+	const result = await runReviewers(cwd, { target: "inline target", extraContext: "@scout-report.md", reviewers: ["runtime bugs"] }, undefined, undefined, {
 		loadConfig: () => config,
 		async spawnPiRole(input) {
 			tasks.push(input.task);
@@ -417,7 +417,7 @@ test("review target can synthesize with partial reviewer failures when requested
 	config.artifacts.baseDir = ".pi/runs";
 	config.children.maxConcurrentSubagents = 1;
 	const tasks: string[] = [];
-	const result = await runReviewTarget(cwd, { target: "inline target", includeScout: false, reviewers: ["fail", "pass"], continueOnReviewerFailure: true }, undefined, undefined, {
+	const result = await runReviewers(cwd, { target: "inline target", includeScout: false, reviewers: ["fail", "pass"], continueOnReviewerFailure: true }, undefined, undefined, {
 		loadConfig: () => config,
 		async spawnPiRole(input) {
 			tasks.push(input.task);
@@ -436,7 +436,7 @@ test("review target can synthesize with partial reviewer failures when requested
 test("review target caps custom reviewer fanout", async () => {
 	const cwd = tempProject();
 	const config = cloneConfig();
-	await assert.rejects(() => runReviewTarget(cwd, { target: "inline target", includeScout: false, reviewers: Array.from({ length: 9 }, (_, index) => `reviewer-${index}`) }, undefined, undefined, {
+	await assert.rejects(() => runReviewers(cwd, { target: "inline target", includeScout: false, reviewers: Array.from({ length: 9 }, (_, index) => `reviewer-${index}`) }, undefined, undefined, {
 		loadConfig: () => config,
 		async spawnPiRole(input) {
 			return fakeResult(input.role, input.runDir);
@@ -451,7 +451,7 @@ test("review target rejects non-regular reviewer artifact and writes failure sum
 	let summaryPath = "";
 	await assert.rejects(async () => {
 		try {
-			await runReviewTarget(cwd, { target: "inline target", includeScout: false, reviewers: ["runtime bugs"] }, undefined, undefined, {
+			await runReviewers(cwd, { target: "inline target", includeScout: false, reviewers: ["runtime bugs"] }, undefined, undefined, {
 				loadConfig: () => config,
 				async spawnPiRole(input) {
 					if (input.task.includes("Assigned review angle:")) {
@@ -474,7 +474,7 @@ test("review target rejects non-regular final summary artifact", async () => {
 	const cwd = tempProject();
 	const config = cloneConfig();
 	config.artifacts.baseDir = ".pi/runs";
-	await assert.rejects(() => runReviewTarget(cwd, { target: "inline target", includeScout: false, reviewers: ["runtime bugs"] }, undefined, undefined, {
+	await assert.rejects(() => runReviewers(cwd, { target: "inline target", includeScout: false, reviewers: ["runtime bugs"] }, undefined, undefined, {
 		loadConfig: () => config,
 		async spawnPiRole(input) {
 			if (input.task.includes("Synthesize this review-only run")) {
@@ -490,7 +490,7 @@ test("scout outputFile validates reserved paths before spawning", async () => {
 	const cwd = tempProject();
 	const config = cloneConfig();
 	let spawned = false;
-	await assert.rejects(() => runScoutAgent(cwd, { task: "inline scout task", outputFile: "logs" }, undefined, undefined, {
+	await assert.rejects(() => runScout(cwd, { task: "inline scout task", outputFile: "logs" }, undefined, undefined, {
 		loadConfig: () => config,
 		async spawnPiRole(input) {
 			spawned = true;
@@ -504,7 +504,7 @@ test("worker outputFile validates reserved paths before spawning", async () => {
 	const cwd = tempProject();
 	const config = cloneConfig();
 	let spawned = false;
-	await assert.rejects(() => runWorkerAgent(cwd, { task: "inline task", outputFile: "logs" }, undefined, undefined, {
+	await assert.rejects(() => runWorker(cwd, { task: "inline task", outputFile: "logs" }, undefined, undefined, {
 		loadConfig: () => config,
 		async spawnPiRole(input) {
 			spawned = true;
@@ -519,7 +519,7 @@ test("standalone worker rejects oversized tasks before spawning", async () => {
 	const config = cloneConfig();
 	config.orchestration.maxWorkerTaskBytes = 8;
 	let spawned = false;
-	await assert.rejects(() => runWorkerAgent(cwd, { task: "implement an entire milestone" }, undefined, undefined, {
+	await assert.rejects(() => runWorker(cwd, { task: "implement an entire milestone" }, undefined, undefined, {
 		loadConfig: () => config,
 		async spawnPiRole(input) {
 			spawned = true;
@@ -533,7 +533,7 @@ test("standalone roles fail when the expected artifact is missing", async () => 
 	const cwd = tempProject();
 	const config = cloneConfig();
 	config.artifacts.baseDir = ".pi/runs";
-	await assert.rejects(() => runScoutAgent(cwd, { task: "inline scout task", outputFile: "scout.md" }, undefined, undefined, {
+	await assert.rejects(() => runScout(cwd, { task: "inline scout task", outputFile: "scout.md" }, undefined, undefined, {
 		loadConfig: () => config,
 		async spawnPiRole(input) {
 			fs.mkdirSync(path.join(input.runDir, "..", "wrong-place"), { recursive: true });
@@ -548,7 +548,7 @@ test("parallel workers collect non-zero child exits without aborting siblings", 
 	const config = cloneConfig();
 	config.artifacts.baseDir = ".pi/runs";
 	let secondSawAbort = false;
-	await assert.rejects(() => runParallelWorkers(cwd, { tasks: [{ name: "fail", task: "first" }, { name: "finish", task: "second" }] }, undefined, undefined, {
+	await assert.rejects(() => runWorkersParallel(cwd, { tasks: [{ name: "fail", task: "first" }, { name: "finish", task: "second" }] }, undefined, undefined, {
 		loadConfig: () => config,
 		async spawnPiRole(input) {
 			if (input.task.includes("Name: fail")) return { ...fakeResult(input.role, input.runDir), exitCode: 2 };
@@ -761,7 +761,7 @@ test("invalid role environment falls back to root registration and warns", () =>
 		const warnings: string[] = [];
 		console.warn = (message?: unknown) => { warnings.push(String(message)); };
 		assert.doesNotThrow(() => orchestratorAgentsExtension({ registerTool: (tool: { name: string }) => tools.push(tool.name), registerCommand: (name: string) => commands.push(name), sendMessage(message: { content?: string }) { messages.push(message); } } as never));
-		assert.equal(tools.includes("orchestrate_plan"), true);
+		assert.equal(tools.includes("run_orchestrator"), true);
 		assert.equal(commands.includes("review"), true);
 		assert.match(warnings.join("\n"), /Invalid PI_ORCHESTRATOR_AGENT_ROLE: orchestratorx/);
 		assert.match(messages.map((message) => message.content ?? "").join("\n"), /root mode/);
@@ -783,7 +783,7 @@ test("extension registration is role-gated", () => {
 		const rootTools: string[] = [];
 		const rootCommands: string[] = [];
 		orchestratorAgentsExtension({ registerTool: (tool: { name: string }) => rootTools.push(tool.name), registerCommand: (name: string) => rootCommands.push(name), sendMessage() {} } as never);
-		assert.deepEqual(rootTools.slice(0, 5), ["orchestrate_plan", "review_target", "run_scout_agent", "run_worker_agent", "run_parallel_workers"]);
+		assert.deepEqual(rootTools.slice(0, 5), ["run_orchestrator", "run_reviewers", "run_scout", "run_worker", "run_workers_parallel"]);
 		assert.equal(rootCommands.includes("scout"), true);
 		assert.equal(rootCommands.includes("review"), true);
 

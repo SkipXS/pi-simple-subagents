@@ -12,13 +12,13 @@ export const RoleRunParams = Type.Object({
 });
 export type RoleRunParams = Static<typeof RoleRunParams>;
 
-export const OrchestrateParams = Type.Object({
+export const OrchestratorParams = Type.Object({
 	plan: Type.String({ minLength: 1, description: "Inline plan text, @path, or short instruction pointing to a plan file." }),
 	includeOutput: Type.Optional(Type.Boolean({ description: "Include the child assistant output inline in the final tool result. Defaults to false; artifacts always contain the full output." })),
 });
-export type OrchestrateParams = Static<typeof OrchestrateParams>;
+export type OrchestratorParams = Static<typeof OrchestratorParams>;
 
-export const ReviewTargetParams = Type.Object({
+export const ReviewersParams = Type.Object({
 	target: Type.String({ minLength: 1, description: "Inline review scope, @file, @directory, or instruction pointing to what should be reviewed." }),
 	focus: Type.Optional(Type.String({ description: "Optional review focus, e.g. runtime bugs, security, packaging, UX." })),
 	extraContext: Type.Optional(Type.String({ description: "Optional supplemental context for reviewers, inline text or @file, especially a prior scout-report.md. Stored as extra-review-context.md; reviewers must verify it against current files." })),
@@ -27,35 +27,35 @@ export const ReviewTargetParams = Type.Object({
 	continueOnReviewerFailure: Type.Optional(Type.Boolean({ description: "Continue to synthesis when at least one reviewer succeeds even if other reviewers fail. Default: false." })),
 	includeOutput: Type.Optional(Type.Boolean({ description: "Include the synthesis output inline in the final tool result. Defaults to false; artifacts always contain the full output." })),
 });
-export type ReviewTargetParams = Static<typeof ReviewTargetParams>;
+export type ReviewersParams = Static<typeof ReviewersParams>;
 
-export const ScoutAgentParams = Type.Object({
+export const ScoutParams = Type.Object({
 	task: Type.String({ minLength: 1, description: "Concrete standalone scout/recon task, inline text, @file, or @directory. Use before implementation/review when context, side effects, or non-trivial scope need mapping; the scout writes a compact handoff report and should not implement changes." }),
 	outputFile: Type.Optional(Type.String({ minLength: 1, description: "Expected scout report artifact filename inside the run dir. Default: scout-report.md" })),
 	includeOutput: Type.Optional(Type.Boolean({ description: "Include the child assistant output inline in the final tool result. Defaults to false; artifacts always contain the full output." })),
 });
-export type ScoutAgentParams = Static<typeof ScoutAgentParams>;
+export type ScoutParams = Static<typeof ScoutParams>;
 
-export const WorkerAgentParams = Type.Object({
+export const WorkerParams = Type.Object({
 	task: Type.String({ minLength: 1, description: "Concrete standalone worker task, inline text, @file, or @directory. Keep it to one small work package rather than an entire milestone/full plan section. The worker may edit project files in YOLO mode." }),
 	purpose: Type.Optional(StringEnum(WORKER_PURPOSES, { description: "Why the worker is being run. Default: implementation." })),
 	outputFile: Type.Optional(Type.String({ minLength: 1, description: "Expected worker report artifact filename inside the run dir. Default: worker-report.md" })),
 	includeOutput: Type.Optional(Type.Boolean({ description: "Include the child assistant output inline in the final tool result. Defaults to false; artifacts always contain the full output." })),
 });
-export type WorkerAgentParams = Static<typeof WorkerAgentParams>;
+export type WorkerParams = Static<typeof WorkerParams>;
 
-export const ParallelWorkerTaskParams = Type.Object({
+export const WorkersParallelTaskParams = Type.Object({
 	name: Type.Optional(Type.String({ minLength: 1, description: "Short label for this worker, used in artifact paths." })),
 	task: Type.String({ minLength: 1, description: "Concrete worker task, inline text, @file, or @directory. Keep each task independent and scoped to one small work package to avoid edit conflicts and overloaded workers." }),
 	purpose: Type.Optional(StringEnum(WORKER_PURPOSES, { description: "Why this worker is being run. Default: implementation." })),
 	outputFile: Type.Optional(Type.String({ minLength: 1, description: "Expected worker report artifact filename inside this worker's run dir. Default: worker-report.md" })),
 });
-export type ParallelWorkerTaskParams = Static<typeof ParallelWorkerTaskParams>;
+export type WorkersParallelTaskParams = Static<typeof WorkersParallelTaskParams>;
 
-export const ParallelWorkersParams = Type.Object({
-	tasks: Type.Array(ParallelWorkerTaskParams, { minItems: 2, maxItems: 8, description: "Independent worker tasks to run concurrently. Do not use for overlapping refactors, shared-file edits, or tasks likely to edit the same files." }),
+export const WorkersParallelParams = Type.Object({
+	tasks: Type.Array(WorkersParallelTaskParams, { minItems: 2, maxItems: 8, description: "Independent worker tasks to run concurrently. Do not use for overlapping refactors, shared-file edits, or tasks likely to edit the same files." }),
 });
-export type ParallelWorkersParams = Static<typeof ParallelWorkersParams>;
+export type WorkersParallelParams = Static<typeof WorkersParallelParams>;
 
 export const ArtifactParams = Type.Object({
 	path: Type.String({ minLength: 1, description: "Artifact path relative to the current run directory, e.g. review-round-1.md. For expected role outputs, use the exact filename from the task's Expected output artifact line; absolute paths are rejected." }),

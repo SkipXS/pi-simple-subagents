@@ -15,33 +15,42 @@ Instead of one long agent doing everything, this extension makes the workflow vi
 
 ```mermaid
 flowchart LR
-  User([User / model]) --> Root{Root tool or slash command}
+  User([User / model]) --> Root{Root command or tool}
 
-  Root -->|/orchestrate| Orchestrator
-  Root -->|/scout| Scout
-  Root -->|/work| Worker
-  Root -->|/work-parallel| Workers[Parallel workers]
-  Root -->|/review| ReviewFanout[Review fanout]
+  Root -->|/orchestrate| O[orchestrator]
+  O --> OS[scout when useful]
+  O --> OW[worker package]
+  O --> OR[reviewer round]
+  OR -->|accepted fixes| OW
+  O --> OF[final summary]
 
-  Orchestrator --> Scout
-  Orchestrator --> Worker
-  Worker --> Reviewers[Fresh reviewers]
-  Reviewers --> Synthesis[Review synthesis]
-  Synthesis -->|fix loop when useful| Worker
+  Root -->|/review| RF[review workflow]
+  RF --> RS[optional scout]
+  RF --> RR[reviewer fanout]
+  RR --> SYN[synthesis]
 
-  Scout --> Artifacts[(run artifacts)]
-  Worker --> Artifacts
-  ReviewFanout --> Artifacts
-  Synthesis --> Artifacts
+  Root -->|/scout| S[scout]
+  Root -->|/work| W[worker]
+  Root -->|/work-parallel| WP[workers 1..N]
+
+  OS --> Artifacts[(run artifacts)]
+  OW --> Artifacts
+  OR --> Artifacts
+  OF --> Artifacts
+  RS --> Artifacts
+  SYN --> Artifacts
+  S --> Artifacts
+  W --> Artifacts
+  WP --> Artifacts
 ```
 
 | Command | Tool | Best for |
 | --- | --- | --- |
-| `/orchestrate <plan-or-@file>` | `orchestrate_plan` | Plan-driven work with scout → worker → review/fix loops. |
-| `/scout <task-or-@target>` | `run_scout_agent` | Context gathering before risky, broad, or ambiguous work. |
-| `/work <task-or-@file>` | `run_worker_agent` | One focused implementation, fix, or validation task. |
-| `/work-parallel <json>` | `run_parallel_workers` | 2-8 independent worker tasks. |
-| `/review [options] <target> [focus]` | `review_target` | Review-only fanout for an existing file, directory, or diff. |
+| `/orchestrate <plan-or-@file>` | `run_orchestrator` | Plan-driven work with scout → worker → review/fix loops. |
+| `/scout <task-or-@target>` | `run_scout` | Context gathering before risky, broad, or ambiguous work. |
+| `/work <task-or-@file>` | `run_worker` | One focused implementation, fix, or validation task. |
+| `/work-parallel <json>` | `run_workers_parallel` | 2-8 independent worker tasks. |
+| `/review [options] <target> [focus]` | `run_reviewers` | Review-only fanout for an existing file, directory, or diff. |
 
 ## Quickstart
 
@@ -141,21 +150,28 @@ sequenceDiagram
   participant O as orchestrator
   participant S as scout
   participant W as worker
-  participant R as reviewers
-  participant Y as synthesis
+  participant R as reviewer
   participant A as artifacts
 
   U->>O: /orchestrate plan
-  O->>A: input-plan.md, orchestration.md
-  O->>S: gather context
-  S->>A: scout.md
-  O->>W: focused work package
-  W->>A: worker.md
-  O->>R: review current result
-  R->>A: review-round-N.md
-  O->>Y: synthesize findings
-  Y->>A: final-summary.md or accepted fixes
-  Y-->>W: optional fix loop
+  O->>A: input-plan.md + orchestration.md
+
+  opt context needed
+    O->>S: run_role_agent scout
+    S->>A: scout.md
+  end
+
+  loop work packages and useful fix rounds
+    O->>W: run_role_agent worker
+    W->>A: worker.md / accepted-fixes-round-N.md / validation.md
+    O->>R: run_role_agent reviewer
+    R->>A: review-round-N.md
+    alt fixes worth doing now
+      O->>W: accepted fixes
+    else clean enough
+      O->>A: mark_review_clean + final-summary.md
+    end
+  end
 ```
 
 The orchestrator is prompted to split large milestones into small worker packages. A worker handoff should contain one deliverable, likely files, acceptance criteria, non-goals, and validation.
@@ -166,12 +182,12 @@ Every run writes durable audit artifacts. Keep `.pi/agent-runs` ignored/private 
 
 ```mermaid
 flowchart TB
-  Base[.pi/agent-runs/&lt;run-id&gt;/]
-  Base --> Inputs[input-*.md<br/>config-effective.json]
-  Base --> Logs[logs/<br/>*.stderr.log<br/>*.invocation.json]
-  Base --> Sessions[sessions/<br/>*.jsonl]
-  Base --> Outputs[outputs/]
-  Base --> Reports[scout-report.md<br/>worker-report.md<br/>review-*.md<br/>final-summary.md]
+  Base[".pi/agent-runs/<run-id>/"]
+  Base --> Inputs["input-*.md<br/>config-effective.json"]
+  Base --> Logs["logs/<br/>*.stderr.log<br/>*.invocation.json"]
+  Base --> Sessions["sessions/<br/>*.jsonl"]
+  Base --> Outputs["outputs/"]
+  Base --> Reports["scout-report.md<br/>worker-report.md<br/>review-*.md<br/>final-summary.md"]
 ```
 
 Typical layouts:

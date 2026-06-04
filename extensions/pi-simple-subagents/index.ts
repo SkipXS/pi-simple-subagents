@@ -17,25 +17,25 @@ import {
 	ArtifactParams,
 	CompactSessionParams,
 	MarkReviewCleanParams,
-	OrchestrateParams,
-	ParallelWorkersParams,
-	ReviewTargetParams,
+	OrchestratorParams,
+	WorkersParallelParams,
+	ReviewersParams,
 	RoleRunParams,
-	ScoutAgentParams,
-	WorkerAgentParams,
+	ScoutParams,
+	WorkerParams,
 	type ArtifactParams as ArtifactParamsType,
 	type CompactSessionParams as CompactSessionParamsType,
 	type MarkReviewCleanParams as MarkReviewCleanParamsType,
-	type OrchestrateParams as OrchestrateParamsType,
-	type ParallelWorkersParams as ParallelWorkersParamsType,
-	type ReviewTargetParams as ReviewTargetParamsType,
+	type OrchestratorParams as OrchestratorParamsType,
+	type WorkersParallelParams as WorkersParallelParamsType,
+	type ReviewersParams as ReviewersParamsType,
 	type RoleRunParams as RoleRunParamsType,
-	type ScoutAgentParams as ScoutAgentParamsType,
-	type WorkerAgentParams as WorkerAgentParamsType,
+	type ScoutParams as ScoutParamsType,
+	type WorkerParams as WorkerParamsType,
 } from "./schemas.ts";
 import { DELEGABLE_ROLE_NAMES } from "./role-registry.ts";
 import { readOrchestrationState, writeOrchestrationState } from "./state.ts";
-import { assertWorkerTaskWithinBudget, parseReviewTargetCommand, runOrchestration, runParallelWorkers, runReviewTarget, runScoutAgent, runWorkerAgent } from "./workflows.ts";
+import { assertWorkerTaskWithinBudget, parseReviewTargetCommand, runOrchestrator, runReviewers, runScout, runWorker, runWorkersParallel } from "./workflows.ts";
 
 type ToolProgressOnUpdate = ((update: { content: Array<{ type: "text"; text: string }>; details: { subagentProgress: SubagentProgressSnapshot } }) => void) | undefined;
 type WidgetSetter = (content: string[] | undefined) => void;
@@ -45,32 +45,32 @@ interface SubagentProgressSnapshot {
 	current?: string;
 }
 
-const ORCHESTRATE_PLAN_GUIDELINES = [
-	"Use orchestrate_plan for plan-driven implementation work that benefits from scout/worker/reviewer coordination and review/fix loops.",
-	"Do not use orchestrate_plan for review-only work; use review_target instead.",
+const RUN_ORCHESTRATOR_GUIDELINES = [
+	"Use run_orchestrator for plan-driven implementation work that benefits from scout/worker/reviewer coordination and review/fix loops.",
+	"Do not use run_orchestrator for review-only work; use run_reviewers instead.",
 ];
 
-const REVIEW_TARGET_GUIDELINES = [
-	"Use review_target for review-only work when the user asks to inspect, audit, or suggest improvements without implementing changes.",
-	"Pass a prior scout-report.md or other concise background as review_target.extraContext when available, but reviewers must verify it against current files.",
-	"Keep review_target.includeScout enabled unless the user explicitly asks to skip the review-specific scout.",
+const RUN_REVIEWERS_GUIDELINES = [
+	"Use run_reviewers for review-only work when the user asks to inspect, audit, or suggest improvements without implementing changes.",
+	"Pass a prior scout-report.md or other concise background as run_reviewers.extraContext when available, but reviewers must verify it against current files.",
+	"Keep run_reviewers.includeScout enabled unless the user explicitly asks to skip the review-specific scout.",
 ];
 
-const RUN_SCOUT_AGENT_GUIDELINES = [
-	"Prefer run_scout_agent before implementation when the task is not obviously trivial: non-trivial scope, cross-file impact, behavior/API/security/packaging changes, unfamiliar code, ambiguity, or likely side effects.",
-	"Use run_scout_agent to keep large reading out of the parent context; ask it for a compact handoff with relevant files, current behavior, risks, and recommended next steps.",
+const RUN_SCOUT_GUIDELINES = [
+	"Prefer run_scout before implementation when the task is not obviously trivial: non-trivial scope, cross-file impact, behavior/API/security/packaging changes, unfamiliar code, ambiguity, or likely side effects.",
+	"Use run_scout to keep large reading out of the parent context; ask it for a compact handoff with relevant files, current behavior, risks, and recommended next steps.",
 	"Skip scouting for clearly isolated, low-risk single-location edits or when the user explicitly asks to proceed directly.",
-	"Do not use run_scout_agent for implementation changes; use run_worker_agent or orchestrate_plan for source edits.",
+	"Do not use run_scout for implementation changes; use run_worker or run_orchestrator for source edits.",
 ];
 
-const RUN_WORKER_AGENT_GUIDELINES = [
-	"Use run_worker_agent for direct implementation, fix, or validation tasks that do not need a full orchestrator/reviewer loop.",
-	"Do not use run_worker_agent for review-only work; use review_target instead.",
+const RUN_WORKER_GUIDELINES = [
+	"Use run_worker for direct implementation, fix, or validation tasks that do not need a full orchestrator/reviewer loop.",
+	"Do not use run_worker for review-only work; use run_reviewers instead.",
 ];
 
-const RUN_PARALLEL_WORKERS_GUIDELINES = [
-	"Use run_parallel_workers only for clearly independent tasks unlikely to edit the same files.",
-	"Do not use run_parallel_workers for overlapping refactors, shared-file edits, or tasks that need one worker's result before another starts.",
+const RUN_WORKERS_PARALLEL_GUIDELINES = [
+	"Use run_workers_parallel only for clearly independent tasks unlikely to edit the same files.",
+	"Do not use run_workers_parallel for overlapping refactors, shared-file edits, or tasks that need one worker's result before another starts.",
 ];
 
 const STATUS_SPINNER_PATTERN = /^([⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏])\s+(.+)$/u;
@@ -250,15 +250,15 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 
 	if (!role) {
 		pi.registerTool({
-			name: "orchestrate_plan",
-			label: "Orchestrate Plan",
+			name: "run_orchestrator",
+			label: "Run Orchestrator",
 			description: "Start the simple orchestrator workflow for a plan or @plan-file. The orchestrator coordinates scout, worker, reviewer, loops fixes, and runs validation only after implementation/review.",
 			promptSnippet: "Run the configured orchestrator workflow for a plan or @plan-file",
-			promptGuidelines: ORCHESTRATE_PLAN_GUIDELINES,
-			parameters: OrchestrateParams,
-			async execute(_id, params: OrchestrateParamsType, signal, onUpdate, ctx) {
+			promptGuidelines: RUN_ORCHESTRATOR_GUIDELINES,
+			parameters: OrchestratorParams,
+			async execute(_id, params: OrchestratorParamsType, signal, onUpdate, ctx) {
 				const progress = createSubagentProgress({ onToolUpdate: onUpdate });
-				const { result, runDir, planSource } = await runOrchestration(ctx.cwd, params.plan, signal, (text, status) => {
+				const { result, runDir, planSource } = await runOrchestrator(ctx.cwd, params.plan, signal, (text, status) => {
 					if (text) progress.text(text);
 					if (status) progress.status(status);
 				});
@@ -271,15 +271,15 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 		});
 
 		pi.registerTool({
-			name: "review_target",
-			label: "Review Target",
+			name: "run_reviewers",
+			label: "Run Reviewers",
 			description: "Run a scout plus fresh reviewer fanout for an existing target, optional extra context, then synthesize improvements. YOLO mode does not enforce source-write restrictions.",
 			promptSnippet: "Review an existing file, directory, diff, or extension with reviewer fanout",
-			promptGuidelines: REVIEW_TARGET_GUIDELINES,
-			parameters: ReviewTargetParams,
-			async execute(_id, params: ReviewTargetParamsType, signal, onUpdate, ctx) {
+			promptGuidelines: RUN_REVIEWERS_GUIDELINES,
+			parameters: ReviewersParams,
+			async execute(_id, params: ReviewersParamsType, signal, onUpdate, ctx) {
 				const progress = createSubagentProgress({ onToolUpdate: onUpdate });
-				const result = await runReviewTarget(ctx.cwd, params, signal, (text, status) => {
+				const result = await runReviewers(ctx.cwd, params, signal, (text, status) => {
 					if (text) progress.text(text);
 					if (status) progress.status(status);
 				});
@@ -291,15 +291,15 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 		});
 
 		pi.registerTool({
-			name: "run_scout_agent",
-			label: "Run Scout Agent",
+			name: "run_scout",
+			label: "Run Scout",
 			description: "Run a standalone scout subagent for context gathering before implementation/review and compact handoff without starting a full orchestration or review workflow.",
 			promptSnippet: "Run a standalone scout subagent for non-trivial or uncertain tasks before implementation",
-			promptGuidelines: RUN_SCOUT_AGENT_GUIDELINES,
-			parameters: ScoutAgentParams,
-			async execute(_id, params: ScoutAgentParamsType, signal, onUpdate, ctx) {
+			promptGuidelines: RUN_SCOUT_GUIDELINES,
+			parameters: ScoutParams,
+			async execute(_id, params: ScoutParamsType, signal, onUpdate, ctx) {
 				const progress = createSubagentProgress({ onToolUpdate: onUpdate });
-				const result = await runScoutAgent(ctx.cwd, params, signal, (text, status) => {
+				const result = await runScout(ctx.cwd, params, signal, (text, status) => {
 					if (text) progress.text(text);
 					if (status) progress.status(status);
 				});
@@ -311,16 +311,16 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 		});
 
 		pi.registerTool({
-			name: "run_worker_agent",
-			label: "Run Worker Agent",
+			name: "run_worker",
+			label: "Run Worker",
 			description: "Run a standalone worker subagent for implementation, fixes, or validation without starting a full orchestrator workflow. YOLO mode does not enforce source-write restrictions.",
 			promptSnippet: "Run a standalone worker subagent for implementation, fixes, or validation",
-			promptGuidelines: RUN_WORKER_AGENT_GUIDELINES,
+			promptGuidelines: RUN_WORKER_GUIDELINES,
 			executionMode: "sequential",
-			parameters: WorkerAgentParams,
-			async execute(_id, params: WorkerAgentParamsType, signal, onUpdate, ctx) {
+			parameters: WorkerParams,
+			async execute(_id, params: WorkerParamsType, signal, onUpdate, ctx) {
 				const progress = createSubagentProgress({ onToolUpdate: onUpdate });
-				const result = await runWorkerAgent(ctx.cwd, params, signal, (text, status) => {
+				const result = await runWorker(ctx.cwd, params, signal, (text, status) => {
 					if (text) progress.text(text);
 					if (status) progress.status(status);
 				});
@@ -332,15 +332,15 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 		});
 
 		pi.registerTool({
-			name: "run_parallel_workers",
-			label: "Run Parallel Workers",
+			name: "run_workers_parallel",
+			label: "Run Workers Parallel",
 			description: "Run multiple standalone worker subagents concurrently for independent implementation, fix, or validation tasks. Each worker gets its own run directory and session file; YOLO mode does not prevent source edit conflicts.",
 			promptSnippet: "Run multiple standalone worker subagents concurrently for independent tasks",
-			promptGuidelines: RUN_PARALLEL_WORKERS_GUIDELINES,
-			parameters: ParallelWorkersParams,
-			async execute(_id, params: ParallelWorkersParamsType, signal, onUpdate, ctx) {
+			promptGuidelines: RUN_WORKERS_PARALLEL_GUIDELINES,
+			parameters: WorkersParallelParams,
+			async execute(_id, params: WorkersParallelParamsType, signal, onUpdate, ctx) {
 				const progress = createSubagentProgress({ onToolUpdate: onUpdate });
-				const result = await runParallelWorkers(ctx.cwd, params, signal, (text, status) => {
+				const result = await runWorkersParallel(ctx.cwd, params, signal, (text, status) => {
 					if (text) progress.text(text);
 					if (status) progress.status(status);
 				});
@@ -503,7 +503,7 @@ Write the expected output artifact with write_run_artifact using path ${JSON.str
 			ctx.ui.notify("Starting orchestrator workflow...", "info");
 			const progress = createSubagentProgress({ setWidget: (content) => ctx.ui.setWidget("pi-simple-subagents:orchestrate", content, { placement: "belowEditor" }) });
 			try {
-				const { result, runDir } = await runOrchestration(ctx.cwd, plan, ctx.signal, (text, status) => {
+				const { result, runDir } = await runOrchestrator(ctx.cwd, plan, ctx.signal, (text, status) => {
 					if (text) progress.text(text);
 					if (status) progress.status(status);
 				});
@@ -532,7 +532,7 @@ Write the expected output artifact with write_run_artifact using path ${JSON.str
 			ctx.ui.notify("Starting scout...", "info");
 			const progress = createSubagentProgress({ setWidget: (content) => ctx.ui.setWidget("pi-simple-subagents:scout", content, { placement: "belowEditor" }) });
 			try {
-				const result = await runScoutAgent(ctx.cwd, { task }, ctx.signal, (text, status) => {
+				const result = await runScout(ctx.cwd, { task }, ctx.signal, (text, status) => {
 					if (text) progress.text(text);
 					if (status) progress.status(status);
 				});
@@ -560,7 +560,7 @@ Write the expected output artifact with write_run_artifact using path ${JSON.str
 			ctx.ui.notify("Starting worker...", "info");
 			const progress = createSubagentProgress({ setWidget: (content) => ctx.ui.setWidget("pi-simple-subagents:work", content, { placement: "belowEditor" }) });
 			try {
-				const result = await runWorkerAgent(ctx.cwd, { task }, ctx.signal, (text, status) => {
+				const result = await runWorker(ctx.cwd, { task }, ctx.signal, (text, status) => {
 					if (text) progress.text(text);
 					if (status) progress.status(status);
 				});
@@ -588,7 +588,7 @@ Write the expected output artifact with write_run_artifact using path ${JSON.str
 			ctx.ui.notify("Starting review workflow...", "info");
 			const progress = createSubagentProgress({ setWidget: (content) => ctx.ui.setWidget("pi-simple-subagents:review", content, { placement: "belowEditor" }) });
 			try {
-				const result = await runReviewTarget(ctx.cwd, parseReviewTargetCommand(target), ctx.signal, (text, status) => {
+				const result = await runReviewers(ctx.cwd, parseReviewTargetCommand(target), ctx.signal, (text, status) => {
 					if (text) progress.text(text);
 					if (status) progress.status(status);
 				});
@@ -656,7 +656,7 @@ Write the expected output artifact with write_run_artifact using path ${JSON.str
 					ctx.ui.notify("/work-parallel requires 2-8 tasks", "warning");
 					return;
 				}
-				let tasks: ParallelWorkersParamsType["tasks"];
+				let tasks: WorkersParallelParamsType["tasks"];
 				try {
 					tasks = rawTasks.map((item, index) => {
 						if (typeof item === "string") {
@@ -673,7 +673,7 @@ Write the expected output artifact with write_run_artifact using path ${JSON.str
 						return {
 							...(raw.name !== undefined ? { name: raw.name } : {}),
 							task: raw.task,
-							...(raw.purpose !== undefined ? { purpose: raw.purpose as ParallelWorkersParamsType["tasks"][number]["purpose"] } : {}),
+							...(raw.purpose !== undefined ? { purpose: raw.purpose as WorkersParallelParamsType["tasks"][number]["purpose"] } : {}),
 							...(raw.outputFile !== undefined ? { outputFile: raw.outputFile } : {}),
 						};
 					});
@@ -685,7 +685,7 @@ Write the expected output artifact with write_run_artifact using path ${JSON.str
 				ctx.ui.notify(`Starting ${tasks.length} workers in parallel...`, "info");
 				const progress = createSubagentProgress({ setWidget: (content) => ctx.ui.setWidget("pi-simple-subagents:work-parallel", content, { placement: "belowEditor" }) });
 				try {
-					const result = await runParallelWorkers(ctx.cwd, { tasks }, ctx.signal, (text, status) => {
+					const result = await runWorkersParallel(ctx.cwd, { tasks }, ctx.signal, (text, status) => {
 						if (text) progress.text(text);
 						if (status) progress.status(status);
 					});
