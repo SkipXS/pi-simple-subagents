@@ -29,6 +29,22 @@ export const ReviewersParams = Type.Object({
 });
 export type ReviewersParams = Static<typeof ReviewersParams>;
 
+export const ImproveLoopParams = Type.Object({
+	target: Type.Optional(Type.String({ minLength: 1, description: "Inline review scope, @file, @directory, or instruction pointing to what should be reviewed. Use one of target, plan, or reference." })),
+	plan: Type.Optional(Type.String({ minLength: 1, description: "Alias for target when reviewing a plan/instruction or @plan-file." })),
+	reference: Type.Optional(Type.String({ minLength: 1, description: "Alias for target when reviewing a reference file/directory." })),
+	focus: Type.Optional(Type.String({ description: "Optional review focus, e.g. runtime bugs, security, packaging, UX." })),
+	extraContext: Type.Optional(Type.String({ description: "Optional supplemental context for reviewers, inline text or @file. Stored as extra-review-context.md; reviewers must verify it against current files." })),
+	reviewers: Type.Optional(Type.Array(Type.String({ minLength: 1, description: "Reviewer angle/focus." }), { minItems: 1, maxItems: 8 })),
+	maxRounds: Type.Optional(Type.Integer({ minimum: 1, maximum: 20, default: 5, description: "Hard maximum review-loop rounds. Default: 5." })),
+	minSeverity: Type.Optional(StringEnum(["blocker", "high", "medium", "low", "optional"] as const, { description: "Minimum severity considered actionable for loop continuation. Default: medium." })),
+	autoFix: Type.Optional(Type.Boolean({ default: false, description: "Unsupported in MVP. Must be false/omitted; the loop is review-only and never runs worker auto-fixes." })),
+	includeScout: Type.Optional(Type.Boolean({ description: "Run a scout before each review round. Default: true.", default: true })),
+	continueOnReviewerFailure: Type.Optional(Type.Boolean({ description: "Continue to synthesis when at least one reviewer succeeds even if other reviewers fail. Default: false." })),
+	includeOutput: Type.Optional(Type.Boolean({ description: "Include the final loop summary inline in the final tool result. Defaults to false; artifacts always contain the full output." })),
+});
+export type ImproveLoopParams = Static<typeof ImproveLoopParams>;
+
 export const ScoutParams = Type.Object({
 	task: Type.String({ minLength: 1, description: "Concrete standalone scout/recon task, inline text, @file, or @directory. Use before implementation/review when context, side effects, or non-trivial scope need mapping; the scout writes a compact handoff report and should not implement changes." }),
 	outputFile: Type.Optional(Type.String({ minLength: 1, description: "Expected scout report artifact filename inside the run dir. Default: scout-report.md" })),

@@ -20,6 +20,7 @@ import {
 	OrchestratorParams,
 	WorkersParallelParams,
 	ReviewersParams,
+	ImproveLoopParams,
 	RoleRunParams,
 	ScoutParams,
 	WorkerParams,
@@ -29,13 +30,14 @@ import {
 	type OrchestratorParams as OrchestratorParamsType,
 	type WorkersParallelParams as WorkersParallelParamsType,
 	type ReviewersParams as ReviewersParamsType,
+	type ImproveLoopParams as ImproveLoopParamsType,
 	type RoleRunParams as RoleRunParamsType,
 	type ScoutParams as ScoutParamsType,
 	type WorkerParams as WorkerParamsType,
 } from "./schemas.ts";
 import { DELEGABLE_ROLE_NAMES } from "./role-registry.ts";
 import { readOrchestrationState, writeOrchestrationState } from "./state.ts";
-import { assertWorkerTaskWithinBudget, parseReviewTargetCommand, runOrchestrator, runReviewers, runScout, runWorker, runWorkersParallel } from "./workflows.ts";
+import { assertWorkerTaskWithinBudget, parseImproveLoopCommand, parseReviewTargetCommand, runImproveLoop, runOrchestrator, runReviewers, runScout, runWorker, runWorkersParallel } from "./workflows.ts";
 
 type ToolProgressOnUpdate = ((update: { content: Array<{ type: "text"; text: string }>; details: { subagentProgress: SubagentProgressSnapshot } }) => void) | undefined;
 type WidgetSetter = (content: string[] | undefined) => void;
@@ -54,6 +56,12 @@ const RUN_REVIEWERS_GUIDELINES = [
 	"Use run_reviewers for review-only work when the user asks to inspect, audit, or suggest improvements without implementing changes.",
 	"Pass a prior scout-report.md or other concise background as run_reviewers.extraContext when available, but reviewers must verify it against current files.",
 	"Keep run_reviewers.includeScout enabled unless the user explicitly asks to skip the review-specific scout.",
+];
+
+const RUN_IMPROVE_LOOP_GUIDELINES = [
+	"Use run_improve_loop for a deterministic review-only improvement loop with structured findings and early stop decisions.",
+	"Do not request autoFix=true; MVP improve-loop does not implement worker auto-fixes or add new roles.",
+	"Default maxRounds is 5 and minSeverity is medium; the loop stops early for clean, optional-only, or repeated/no-progress findings.",
 ];
 
 const RUN_SCOUT_GUIDELINES = [
@@ -351,6 +359,26 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 				};
 			},
 		});
+		pi.registerTool({
+			name: "run_improve_loop",
+			label: "Run Improve Loop",
+			description: "Run the MVP controlled improvement loop in review-only mode. Repeats reviewer fanout up to maxRounds (default 5), writes structured findings artifacts, and stops deterministically for clean/optional/repeated/max-round outcomes. autoFix=true is unsupported.",
+			promptSnippet: "Run a deterministic review-only improvement loop for a target, plan, or reference",
+			promptGuidelines: RUN_IMPROVE_LOOP_GUIDELINES,
+			parameters: ImproveLoopParams,
+			async execute(_id, params: ImproveLoopParamsType, signal, onUpdate, ctx) {
+				const progress = createSubagentProgress({ onToolUpdate: onUpdate });
+				const result = await runImproveLoop(ctx.cwd, params, signal, (text, status) => {
+					if (text) progress.text(text);
+					if (status) progress.status(status);
+				});
+				return {
+					content: [{ type: "text", text: childSummary("Improve loop finished.", [["Run dir", result.runDir], ["Target source", result.targetSource], ["Stop reason", result.stopReason], ["Rounds", result.rounds.length], ["Final summary", result.finalSummaryPath], ["Artifact cleanup", result.cleanupSummary]], fs.readFileSync(result.finalSummaryPath, "utf8"), { kind: "improve-loop", includeOutput: params.includeOutput }) }],
+					details: result,
+				};
+			},
+		});
+
 	}
 
 	if (role === "orchestrator" && runDir) {
@@ -551,6 +579,42 @@ Write the expected output artifact with write_run_artifact using path ${JSON.str
 			}
 		};
 
+		const runImproveLoopCommand = async (args: string, ctx: ExtensionCommandContext) => {
+			const input = args.trim();
+			if (!input) {
+				ctx.ui.notify("Usage: /improve-loop [--max-rounds N] [--min-severity blocker|high|medium|low|optional] [--reviewer <angle>] [--context <text-or-@file>] [--no-scout] @path-or-dir [focus/instructions]", "warning");
+				return;
+			}
+			let params: ImproveLoopParamsType;
+			try {
+				params = parseImproveLoopCommand(input);
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				ctx.ui.notify(message, "error");
+				return;
+			}
+			ctx.ui.notify("Starting improve loop (review-only)...", "info");
+			const progress = createSubagentProgress({ setWidget: (content) => ctx.ui.setWidget("pi-simple-subagents:improve-loop", content, { placement: "belowEditor" }) });
+			try {
+				const result = await runImproveLoop(ctx.cwd, params, ctx.signal, (text, status) => {
+					if (text) progress.text(text);
+					if (status) progress.status(status);
+				});
+				pi.sendMessage({
+					customType: "pi-simple-subagents-improve-loop-result",
+					display: true,
+					content: childSummary("Improve loop finished.", [["Run dir", result.runDir], ["Stop reason", result.stopReason], ["Rounds", result.rounds.length], ["Final summary", result.finalSummaryPath], ["Artifact cleanup", result.cleanupSummary]], fs.readFileSync(result.finalSummaryPath, "utf8"), { kind: "improve-loop" }),
+					details: result,
+				});
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				ctx.ui.notify(`Improve loop failed: ${message.split("\n")[0]}`, "error");
+				throw error;
+			} finally {
+				progress.clear();
+			}
+		};
+
 		const runWorkCommand = async (args: string, ctx: ExtensionCommandContext) => {
 			const task = args.trim();
 			if (!task) {
@@ -620,6 +684,11 @@ Write the expected output artifact with write_run_artifact using path ${JSON.str
 		pi.registerCommand("work", {
 			description: "Run a standalone worker subagent. Usage: @task-file, @directory, or inline implementation/fix/validation instructions",
 			handler: runWorkCommand,
+		});
+
+		pi.registerCommand("improve-loop", {
+			description: "Run a deterministic review-only improvement loop. Usage: [--max-rounds N] [--min-severity medium] [--reviewer <angle>] @target [focus]",
+			handler: runImproveLoopCommand,
 		});
 
 		pi.registerCommand("work-parallel", {

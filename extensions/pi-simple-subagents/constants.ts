@@ -12,6 +12,7 @@ export const INPUT_TARGET_FILE = "input-target.md";
 export const EXTRA_REVIEW_CONTEXT_FILE = "extra-review-context.md";
 export const SCOUT_REVIEW_CONTEXT_FILE = "scout-review-context.md";
 export const FINAL_SUMMARY_FILE = "final-summary.md";
+export const IMPROVE_LOOP_SUMMARY_FILE = "improve-loop.md";
 export const REVIEW_FAILURE_SUMMARY_FILE = "review-failure-summary.md";
 export const PARALLEL_WORKERS_FILE = "parallel-workers.md";
 export const PARALLEL_WORKERS_SUMMARY_FILE = "parallel-workers-summary.md";

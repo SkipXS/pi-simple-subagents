@@ -134,6 +134,85 @@ The corresponding root tool is `run_reviewers`:
 }
 ```
 
+### `/improve-loop`
+
+```text
+/improve-loop @extensions/pi-simple-subagents runtime and packaging risks
+/improve-loop --max-rounds 3 --min-severity high --reviewer "runtime correctness" @extensions/pi-simple-subagents
+/improve-loop --no-scout --context @.pi/agent-runs/<run-id>/scout-report.md @README.md docs accuracy
+/improve-loop --plan @docs/plan.md --reviewer "implementation risks"
+```
+
+Use for a controlled improvement loop when you want deterministic review-only rounds, structured findings, and a machine-readable stop decision. The MVP mode is **review-only**: it reuses scout/reviewer/synthesis infrastructure and does not add a role or run worker auto-fixes.
+
+Defaults and control policy:
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `maxRounds` | `5` | Hard maximum review rounds. The loop stops earlier whenever a stop criterion is met. Slash option: `--max-rounds N`. |
+| `minSeverity` | `medium` | Minimum severity considered actionable for continuing the loop. Slash option: `--min-severity blocker|high|medium|low|optional`. |
+| `autoFix` | `false` | Review-only MVP. Tool calls with `autoFix: true` and slash `--auto-fix`/`--autofix` are unsupported/rejected. |
+| `requireEvidence` | `true` | Structured blocker/high/medium findings must include non-empty `evidence` before they are considered actionable for continuation or repeated/no-progress decisions. Evidence-less findings are still preserved in artifacts for manual review. |
+| `stopOnCleanReview` | `true` | Stop when synthesis yields no parsed findings. |
+| `stopOnOnlyOptional` | `true` | Stop when findings are optional/non-actionable or below `minSeverity`. |
+| `stopOnRepeatedFindings` | `true` | Stop when actionable finding fingerprints repeat, indicating no progress in review-only mode. |
+
+Stop criteria are deterministic in this order after each round:
+
+1. Clean review: no structured findings parsed from synthesis.
+2. Only optional/deferred/non-actionable findings: no finding meets `minSeverity` with required evidence.
+3. Repeated/no-progress findings: actionable finding fingerprints match the previous round.
+4. Reviewer or synthesis failure: follows the existing review failure policy; the loop writes `improve-loop.md` with failure context before rethrowing.
+5. Max-round cap reached.
+
+Predictable artifacts in the improve-loop run directory:
+
+| Artifact | Meaning |
+| --- | --- |
+| `input-target.md` | Loaded target/plan/reference and focus. |
+| `improve-loop.md` | Final loop summary, options, stop reason, per-round artifact links, and failure context if any. |
+| `review-loop-round-N.md` | Round summary with nested review run directory, nested `final-summary.md`, actionable count, and synthesized prose. |
+| `findings-round-N.json` | Structured findings with `severity`, `id`, `title`, and optional `category`, `evidence`, `recommendation`; also includes evidence-qualified actionable findings/fingerprints for repetition detection. |
+
+Each round also invokes the existing `/review` workflow in a nested run directory, so nested review artifacts such as `review-*.md`, `scout-review-context.md`, and `final-summary.md` remain available.
+
+Options:
+
+| Slash option | Tool field | Meaning |
+| --- | --- | --- |
+| positional `<target>` | `target` | File, directory, inline target, or instruction to review. |
+| `--target <value>` | `target` | Explicit target field. Use only one of target/plan/reference. |
+| `--plan <value>` | `plan` | Alias for reviewing a plan or `@plan-file`. Use only one of target/plan/reference. |
+| `--reference <value>` | `reference` | Alias for reviewing a reference file/directory. Use only one of target/plan/reference. |
+| trailing text | `focus` | Review focus/instructions. |
+| `--max-rounds <N>` | `maxRounds` | Integer 1-20; invalid values are rejected before child review rounds start. |
+| `--min-severity <severity>` | `minSeverity` | One of `blocker`, `high`, `medium`, `low`, `optional`; invalid values are rejected. |
+| `--reviewer <angle>` / `--reviewer=<angle>` | `reviewers` | Custom reviewer angle; repeatable, max 8. |
+| `--context <inline-or-@file>` / `--context=<...>` | `extraContext` | Supplemental context for reviewers, verified against current target. |
+| `--scout` / `--no-scout` | `includeScout` | Enable or skip review-specific scout in each round. |
+| `--continue-on-reviewer-failure` / `--fail-on-reviewer-failure` | `continueOnReviewerFailure` | Match `/review` fanout failure behavior. |
+| `--auto-fix`, `--autofix` | `autoFix: true` | Unsupported in MVP; rejected. |
+| `--no-auto-fix`, `--no-autofix` | `autoFix: false` | Explicit review-only mode. |
+
+The corresponding root tool is `run_improve_loop`:
+
+```ts
+{
+  target?: string,
+  plan?: string,
+  reference?: string,
+  focus?: string,
+  extraContext?: string,
+  reviewers?: string[],
+  maxRounds?: number,        // default 5, valid 1-20
+  minSeverity?: "blocker" | "high" | "medium" | "low" | "optional", // default "medium"
+  autoFix?: false,           // true is unsupported/rejected
+  includeScout?: boolean,
+  continueOnReviewerFailure?: boolean,
+  includeOutput?: boolean
+}
+```
+
 ## Tool and role details
 
 ### Root tools
@@ -144,7 +223,8 @@ The corresponding root tool is `run_reviewers`:
 | `run_scout` | `/scout <task-or-@target>` | `task`, `outputFile?`, `includeOutput?` | Context gathering should be isolated into a compact handoff report. |
 | `run_worker` | `/work <task-or-@file>` | `task`, `purpose?`, `outputFile?`, `includeOutput?` | Direct implementation, fix, or validation is enough. |
 | `run_workers_parallel` | `/work-parallel <json>` | `tasks[{name?, task, purpose?, outputFile?}]` | Multiple tasks are independent and unlikely to edit the same files. |
-| `run_reviewers` | `/review [options] <target> [focus]` | `target`, `focus?`, `extraContext?`, `reviewers?`, `includeScout?`, `continueOnReviewerFailure?`, `includeOutput?` | Existing target needs review-only fanout. |
+| `run_reviewers` | `/review [options] <target> [focus]` | `target`, `focus?`, `extraContext?`, `reviewers?`, `includeScout?`, `continueOnReviewerFailure?`, `includeOutput?` | Existing target needs one review-only fanout. |
+| `run_improve_loop` | `/improve-loop [options] <target> [focus]` | `target?`, `plan?`, `reference?`, `maxRounds?`, `minSeverity?`, `reviewers?`, `autoFix?: false` | Existing target needs deterministic review-only rounds with structured findings and early stop. |
 
 Tool results are summary-first by default. Set `includeOutput: true` for inline child/synthesis output, or set `PI_SIMPLE_SUBAGENTS_VERBOSE_RESULTS=1` before starting Pi for verbose slash-command/debug output.
 
@@ -174,7 +254,8 @@ Tool results are summary-first by default. Set `includeOutput: true` for inline 
 The extension exposes prompt guidance on each root tool:
 
 - Prefer `run_scout` before implementation when the task is not obviously trivial.
-- Use `run_reviewers` for review-only work. Keep the review-specific scout enabled unless the user asks to skip it.
+- Use `run_reviewers` for one review-only fanout. Keep the review-specific scout enabled unless the user asks to skip it.
+- Use `run_improve_loop` for review-only work that needs deterministic repeated rounds, structured findings, and explicit stop reasons. Do not request `autoFix: true` in MVP.
 - Use `run_orchestrator` for plan-driven implementation that benefits from scout/worker/reviewer coordination.
 - Use `run_worker` for direct implementation, fix, or validation tasks that do not need a full orchestration loop.
 - Use `run_workers_parallel` only for clearly independent tasks unlikely to edit the same files.
@@ -267,6 +348,26 @@ Every run writes durable audit artifacts. Keep the artifact directory ignored/pr
   tasks/
 ```
 
+### Improve loop
+
+```text
+.pi/agent-runs/<run-id>/
+  input-target.md
+  config-effective.json
+  improve-loop.md
+  review-loop-round-1.md
+  findings-round-1.json
+  review-loop-round-N.md
+  findings-round-N.json
+  logs/
+  outputs/
+  prompts/
+  sessions/
+  tasks/
+```
+
+`improve-loop.md` records options, the deterministic stop reason, round counts, nested review run directories, and failure context if reviewer/synthesis failure stops the loop. `findings-round-N.json` is the machine-readable finding record used for severity filtering and repeated/no-progress detection; with `requireEvidence=true`, evidence-less blocker/high/medium findings are preserved but not counted as actionable.
+
 Artifact writes are constrained to the run directory. Expected child handoff artifacts must exist at the configured relative path. Reserved internal directories such as `logs`, `outputs`, `prompts`, `sessions`, `tasks`, and `delegations` cannot be used as child output targets.
 
 ## Configuration reference
@@ -350,7 +451,7 @@ Release smoke checklist:
 2. `npm run release:check`
 3. Install or load the checkout in a compatible Pi runtime.
 4. Reload Pi.
-5. Smoke `/orchestrate`, `/scout`, `/work`, `/work-parallel`, `/review`, artifact writing, and child `compact_session`.
+5. Smoke `/orchestrate`, `/scout`, `/work`, `/work-parallel`, `/review`, `/improve-loop`, artifact writing, and child `compact_session`.
 
 ## Troubleshooting
 
@@ -363,6 +464,8 @@ Release smoke checklist:
 | Unexpected model/API cost | Lower `children.maxConcurrentSubagents`. |
 | Partial parallel failure | Read `parallel-workers-summary.md`. |
 | Partial review fanout failure | Read `review-failure-summary.md`; optionally rerun with `--continue-on-reviewer-failure`. |
+| Improve loop stops earlier than `maxRounds` | Read `improve-loop.md` for `clean_review`, `only_optional_or_deferred`, `repeated_findings_no_progress`, or `review_failed`; inspect `findings-round-N.json` and `review-loop-round-N.md`. Evidence-less blocker/high/medium findings are preserved but do not count as actionable. |
+| Improve loop rejects options | `autoFix=true`/`--auto-fix` is unsupported in MVP; `maxRounds` must be 1-20; `minSeverity` must be `blocker`, `high`, `medium`, `low`, or `optional`. |
 | Artifact path/ownership error | Ensure expected output artifacts are regular files under the run directory and not in reserved dirs. |
 
 ## Cleanup and retention

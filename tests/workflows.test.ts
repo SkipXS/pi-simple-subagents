@@ -9,7 +9,7 @@ import { ACTIVE_RUN_MARKER_FILE } from "../extensions/pi-simple-subagents/artifa
 import { getPiInvocation, quoteAtReferencePath, shouldForwardCurrentExtension, spawnPiRole, wasLoadedWithExtensionFlag, type ChildRunResult } from "../extensions/pi-simple-subagents/child-runner.ts";
 import { DEFAULT_CONFIG, type Config } from "../extensions/pi-simple-subagents/config.ts";
 import orchestratorAgentsExtension from "../extensions/pi-simple-subagents/index.ts";
-import { runReviewers, runScout, runWorker, runWorkersParallel, parseReviewTargetCommand } from "../extensions/pi-simple-subagents/workflows.ts";
+import { extractImproveLoopFindings, runImproveLoop, runReviewers, runScout, runWorker, runWorkersParallel, parseImproveLoopCommand, parseReviewTargetCommand } from "../extensions/pi-simple-subagents/workflows.ts";
 
 function tempProject(): string {
 	return fs.mkdtempSync(path.join(os.tmpdir(), "pi-simple-subagents-test-"));
@@ -496,6 +496,118 @@ test("review target caps custom reviewer fanout", async () => {
 			return fakeResult(input.role, input.runDir);
 		},
 	}), /at most 8 reviewers/);
+});
+
+test("parseImproveLoopCommand supports deterministic review-loop options", () => {
+	assert.deepEqual(parseImproveLoopCommand("--max-rounds 3 --min-severity high --no-scout --reviewer runtime --context @scout.md @README.md packaging"), {
+		target: "@README.md",
+		focus: "packaging",
+		maxRounds: 3,
+		minSeverity: "high",
+		includeScout: false,
+		reviewers: ["runtime"],
+		extraContext: "@scout.md",
+	});
+	assert.throws(() => parseImproveLoopCommand("--max-rounds nope @README.md"), /--max-rounds must be an integer/);
+	assert.throws(() => parseImproveLoopCommand("--min-severity severe @README.md"), /--min-severity must be one of/);
+});
+
+async function runFakeImproveLoop(summaries: string[], params: { maxRounds?: number; minSeverity?: "blocker" | "high" | "medium" | "low" | "optional" } = {}) {
+	const cwd = tempProject();
+	const config = cloneConfig();
+	config.artifacts.baseDir = ".pi/runs";
+	let synthesisRuns = 0;
+	const result = await runImproveLoop(cwd, { target: "inline target", includeScout: false, reviewers: ["runtime"], ...params }, undefined, undefined, {
+		loadConfig: () => config,
+		async spawnPiRole(input) {
+			const result = fakeCompliantResult(input);
+			if (input.role === "synthesis") {
+				const artifact = expectedArtifactFromTask(input.task);
+				assert.ok(artifact);
+				fs.writeFileSync(path.join(input.runDir, artifact), summaries[Math.min(synthesisRuns, summaries.length - 1)], "utf8");
+				synthesisRuns++;
+			}
+			return result;
+		},
+	});
+	return { result, synthesisRuns };
+}
+
+test("improve loop defaults maxRounds to 5 and stops on clean review with predictable artifacts", async () => {
+	const { result, synthesisRuns } = await runFakeImproveLoop(["No findings. Clean review."]);
+	assert.equal(result.maxRounds, 5);
+	assert.equal(result.minSeverity, "medium");
+	assert.equal(result.stopReason, "clean_review");
+	assert.equal(synthesisRuns, 1);
+	assert.equal(fs.existsSync(path.join(result.runDir, "improve-loop.md")), true);
+	assert.equal(fs.existsSync(path.join(result.runDir, "review-loop-round-1.md")), true);
+	assert.equal(fs.existsSync(path.join(result.runDir, "findings-round-1.json")), true);
+});
+
+test("improve loop parses section-based synthesis findings before clean decisions", async () => {
+	const synthesis = `# Review Synthesis
+
+## Blockers
+- Missing auth check in src/api.ts
+  Evidence: src/api.ts:42 accepts unauthenticated requests
+  Recommendation: require the auth guard before dispatch
+
+## Fixes worth doing now
+- **High — Crash on startup**
+  Evidence: app.ts:1 throws when config is missing
+
+## Optional / deferred
+- Polish wording later`;
+	const findings = extractImproveLoopFindings(synthesis);
+	assert.deepEqual(findings.map((finding) => [finding.severity, finding.title, finding.evidence]), [
+		["blocker", "Missing auth check in src/api.ts", "src/api.ts:42 accepts unauthenticated requests"],
+		["high", "Crash on startup", "app.ts:1 throws when config is missing"],
+		["optional", "Polish wording later", undefined],
+	]);
+	const { result } = await runFakeImproveLoop([synthesis], { maxRounds: 2 });
+	assert.equal(result.stopReason, "repeated_findings_no_progress");
+	assert.equal(result.rounds.length, 2);
+});
+
+test("improve loop requires evidence before findings become actionable", async () => {
+	const unsupported = `# Review Synthesis
+
+## Blockers
+- Missing auth check in src/api.ts
+
+## Fixes worth doing now
+- **High — Crash on startup**`;
+	const { result, synthesisRuns } = await runFakeImproveLoop([unsupported], { maxRounds: 5 });
+	assert.equal(result.stopReason, "only_optional_or_deferred");
+	assert.equal(result.rounds.length, 1);
+	assert.equal(synthesisRuns, 1);
+	assert.equal(result.rounds[0].findings.length, 2);
+	assert.equal(result.rounds[0].actionableFindings.length, 0);
+	const findings = JSON.parse(fs.readFileSync(path.join(result.runDir, "findings-round-1.json"), "utf8")) as { requireEvidence: boolean; findings: unknown[]; actionableFindings: unknown[] };
+	assert.equal(findings.requireEvidence, true);
+	assert.equal(findings.findings.length, 2);
+	assert.equal(findings.actionableFindings.length, 0);
+});
+
+test("improve loop stops on repeated actionable findings without auto-fixing", async () => {
+	const repeated = JSON.stringify({ findings: [{ severity: "high", title: "Crash on startup", category: "runtime", evidence: "app.ts:1", recommendation: "Guard null" }] });
+	const { result, synthesisRuns } = await runFakeImproveLoop([repeated], { maxRounds: 5 });
+	assert.equal(result.stopReason, "repeated_findings_no_progress");
+	assert.equal(result.rounds.length, 2);
+	assert.equal(synthesisRuns, 2);
+	const findings = JSON.parse(fs.readFileSync(path.join(result.runDir, "findings-round-1.json"), "utf8")) as { findings: Array<{ severity: string; title: string; category?: string; evidence?: string; recommendation?: string }> };
+	assert.deepEqual(findings.findings[0], { id: "finding-1", severity: "high", title: "Crash on startup", category: "runtime", evidence: "app.ts:1", recommendation: "Guard null" });
+});
+
+test("improve loop enforces max round cap and rejects invalid review-only options", async () => {
+	const first = JSON.stringify({ findings: [{ severity: "medium", title: "A", evidence: "a.ts:1" }] });
+	const second = JSON.stringify({ findings: [{ severity: "medium", title: "B", evidence: "b.ts:1" }] });
+	const { result } = await runFakeImproveLoop([first, second], { maxRounds: 2 });
+	assert.equal(result.stopReason, "max_rounds_reached");
+	assert.equal(result.rounds.length, 2);
+	await assert.rejects(() => runImproveLoop(tempProject(), { target: "inline target", maxRounds: 0 }), /maxRounds must be an integer from 1 to 20/);
+	await assert.rejects(() => runImproveLoop(tempProject(), { target: "inline target", minSeverity: "severe" as never }), /minSeverity must be one of/);
+	await assert.rejects(() => runImproveLoop(tempProject(), { target: "inline target", autoFix: true }), /autoFix=true is unsupported/);
 });
 
 test("review target rejects non-regular reviewer artifact and writes failure summary", async () => {
