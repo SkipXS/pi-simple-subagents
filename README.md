@@ -142,6 +142,8 @@ flowchart TD
 
 ### Common examples
 
+For review workflows, choose reviewer angles/count for the target. Use one focused reviewer for narrow checks, split into multiple reviewers only when distinct independent aspects are worth the extra cost. Without `--reviewer`, the extension uses one adaptive general reviewer.
+
 ```text
 /orchestrate @docs/plan.md
 /scout Map parser behavior, affected files, risks, and next steps

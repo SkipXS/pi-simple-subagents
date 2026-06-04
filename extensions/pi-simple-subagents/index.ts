@@ -54,12 +54,15 @@ const RUN_ORCHESTRATOR_GUIDELINES = [
 
 const RUN_REVIEWERS_GUIDELINES = [
 	"Use run_reviewers for review-only work when the user asks to inspect, audit, or suggest improvements without implementing changes.",
+	"Choose the reviewers array yourself based on the target and user focus: use 1 targeted reviewer for narrow/simple reviews, 2-3 for distinct risk areas, and more only when independent aspects justify the added cost. Do not rely on a fixed default fanout.",
+	"Name reviewer angles concretely, e.g. 'runtime correctness for parser changes' or 'packaging/installability for npm extension'. Avoid broad duplicate reviewers.",
 	"Pass a prior scout-report.md or other concise background as run_reviewers.extraContext when available, but reviewers must verify it against current files.",
 	"Keep run_reviewers.includeScout enabled unless the user explicitly asks to skip the review-specific scout.",
 ];
 
 const RUN_IMPROVE_LOOP_GUIDELINES = [
 	"Use run_improve_loop for a deterministic review-only improvement loop with structured findings and early stop decisions.",
+	"Choose the reviewers array yourself based on the target and user focus: use the smallest number of distinct reviewer angles needed for useful coverage, up to 8.",
 	"Do not request autoFix=true; MVP improve-loop does not implement worker auto-fixes or add new roles.",
 	"Default maxRounds is 5 and minSeverity is medium; the loop stops early for clean, optional-only, or repeated/no-progress findings.",
 ];
@@ -281,8 +284,8 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 		pi.registerTool({
 			name: "run_reviewers",
 			label: "Run Reviewers",
-			description: "Run a scout plus fresh reviewer fanout for an existing target, optional extra context, then synthesize improvements. YOLO mode does not enforce source-write restrictions.",
-			promptSnippet: "Review an existing file, directory, diff, or extension with reviewer fanout",
+			description: "Run a scout plus fresh reviewer fanout for an existing target, optional extra context, then synthesize improvements. The caller/model should choose the reviewer angles and count for the target; if omitted, one adaptive general reviewer is used. YOLO mode does not enforce source-write restrictions.",
+			promptSnippet: "Review an existing file, directory, diff, or extension with model-selected reviewer angles",
 			promptGuidelines: RUN_REVIEWERS_GUIDELINES,
 			parameters: ReviewersParams,
 			async execute(_id, params: ReviewersParamsType, signal, onUpdate, ctx) {
@@ -362,7 +365,7 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 		pi.registerTool({
 			name: "run_improve_loop",
 			label: "Run Improve Loop",
-			description: "Run the MVP controlled improvement loop in review-only mode. Repeats reviewer fanout up to maxRounds (default 5), writes structured findings artifacts, and stops deterministically for clean/optional/repeated/max-round outcomes. autoFix=true is unsupported.",
+			description: "Run the MVP controlled improvement loop in review-only mode. Repeats reviewer fanout up to maxRounds (default 5), writes structured findings artifacts, and stops deterministically for clean/optional/repeated/max-round outcomes. The caller/model should choose reviewer angles/count for the target; if omitted, one adaptive general reviewer is used. autoFix=true is unsupported.",
 			promptSnippet: "Run a deterministic review-only improvement loop for a target, plan, or reference",
 			promptGuidelines: RUN_IMPROVE_LOOP_GUIDELINES,
 			parameters: ImproveLoopParams,

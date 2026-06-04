@@ -420,6 +420,24 @@ test("review target reviewers run in parallel and preserve result order", async 
 	assert.deepEqual(calls, ["reviewer:b", "reviewer:a", "synthesis:synthesis"]);
 });
 
+test("review target defaults to one adaptive reviewer when caller does not choose angles", async () => {
+	const cwd = tempProject();
+	const config = cloneConfig();
+	config.artifacts.baseDir = ".pi/runs";
+	const reviewerTasks: string[] = [];
+	const result = await runReviewers(cwd, { target: "inline target", includeScout: false }, undefined, undefined, {
+		loadConfig: () => config,
+		async spawnPiRole(input) {
+			if (input.role === "reviewer") reviewerTasks.push(input.task);
+			return fakeCompliantResult(input);
+		},
+	});
+
+	assert.equal(result.reviews.length, 1);
+	assert.equal(reviewerTasks.length, 1);
+	assert.match(reviewerTasks[0] ?? "", /Assigned review angle: adaptive general review/i);
+});
+
 test("review target honors maxConcurrentSubagents cap", async () => {
 	const cwd = tempProject();
 	const config = cloneConfig();

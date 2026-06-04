@@ -11,9 +11,7 @@ export const MAX_TOOL_OUTPUT_BYTES = 24 * 1024;
 export const MAX_STDERR_BYTES = 16 * 1024;
 export const MAX_PROGRESS_LINE_BYTES = 500;
 export const DEFAULT_REVIEW_ANGLES = [
-	"correctness, regressions, and runtime failures",
-	"security, role boundaries, and tool-policy bypasses",
-	"API design, UX, packaging, and maintainability",
+	"adaptive general review: choose the most relevant correctness, security, reliability, performance/cost, API/UX, packaging, documentation, and maintainability concerns for the target and focus; avoid unrelated checklist coverage",
 ] as const;
 
 export function isObject(value: unknown): value is Record<string, unknown> {

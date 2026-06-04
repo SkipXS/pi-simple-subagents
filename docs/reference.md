@@ -103,7 +103,7 @@ Setup/spawn errors abort sibling workers and wait for shutdown. Ordinary non-zer
 /review -- --fixture docs focus
 ```
 
-Use for review-only fanout. By default a review-specific scout runs first, then fresh reviewers inspect the target, and synthesis writes `final-summary.md`.
+Use for review-only fanout. By default a review-specific scout runs first, then fresh reviewers inspect the target, and synthesis writes `final-summary.md`. The caller/model should choose the reviewer angles and count for the requested target; use the smallest number of distinct reviewers that covers the real risks. If no reviewer is provided, the extension runs one adaptive general reviewer rather than a fixed three-reviewer checklist.
 
 Options:
 
@@ -112,7 +112,7 @@ Options:
 | `--scout` / `--no-scout` | Enable or skip the review-specific scout. |
 | `--context <inline-or-@file>` | Add compact prior context such as a scout report. |
 | `--context=<inline-or-@file>` | Same as above. |
-| `--reviewer <angle>` | Add a custom reviewer angle; repeatable, max 8. |
+| `--reviewer <angle>` | Add a reviewer angle; repeatable, max 8. Use one for narrow reviews, 2-3 for distinct risk areas, and more only when independent aspects justify the cost. |
 | `--reviewer=<angle>` | Same as above. |
 | `--continue-on-reviewer-failure` | Synthesize from successful reviewers when at least one completed. |
 | `--fail-on-reviewer-failure` | Fail the review if any reviewer fails. |
@@ -187,7 +187,7 @@ Options:
 | trailing text | `focus` | Review focus/instructions. |
 | `--max-rounds <N>` | `maxRounds` | Integer 1-20; invalid values are rejected before child review rounds start. |
 | `--min-severity <severity>` | `minSeverity` | One of `blocker`, `high`, `medium`, `low`, `optional`; invalid values are rejected. |
-| `--reviewer <angle>` / `--reviewer=<angle>` | `reviewers` | Custom reviewer angle; repeatable, max 8. |
+| `--reviewer <angle>` / `--reviewer=<angle>` | `reviewers` | Reviewer angle; repeatable, max 8. The caller/model should choose the number of distinct angles needed for the target. |
 | `--context <inline-or-@file>` / `--context=<...>` | `extraContext` | Supplemental context for reviewers, verified against current target. |
 | `--scout` / `--no-scout` | `includeScout` | Enable or skip review-specific scout in each round. |
 | `--continue-on-reviewer-failure` / `--fail-on-reviewer-failure` | `continueOnReviewerFailure` | Match `/review` fanout failure behavior. |
@@ -254,7 +254,7 @@ Tool results are summary-first by default. Set `includeOutput: true` for inline 
 The extension exposes prompt guidance on each root tool:
 
 - Prefer `run_scout` before implementation when the task is not obviously trivial.
-- Use `run_reviewers` for one review-only fanout. Keep the review-specific scout enabled unless the user asks to skip it.
+- Use `run_reviewers` for one review-only fanout. Choose `reviewers` explicitly based on the target/focus when calling the tool: one targeted reviewer for narrow work, multiple reviewers only for distinct independent aspects. Keep the review-specific scout enabled unless the user asks to skip it.
 - Use `run_improve_loop` for review-only work that needs deterministic repeated rounds, structured findings, and explicit stop reasons. Do not request `autoFix: true` in MVP.
 - Use `run_orchestrator` for plan-driven implementation that benefits from scout/worker/reviewer coordination.
 - Use `run_worker` for direct implementation, fix, or validation tasks that do not need a full orchestration loop.
