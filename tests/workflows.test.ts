@@ -5,6 +5,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
+import { ACTIVE_RUN_MARKER_FILE } from "../extensions/pi-simple-subagents/artifacts.ts";
 import { getPiInvocation, quoteAtReferencePath, shouldForwardCurrentExtension, spawnPiRole, wasLoadedWithExtensionFlag, type ChildRunResult } from "../extensions/pi-simple-subagents/child-runner.ts";
 import { DEFAULT_CONFIG, type Config } from "../extensions/pi-simple-subagents/config.ts";
 import orchestratorAgentsExtension from "../extensions/pi-simple-subagents/index.ts";
@@ -160,10 +161,63 @@ test("current extension forwarding supports temporary -e loading", () => {
 	assert.equal(shouldForwardCurrentExtension("never", ["node", "cli", "-e", "./extension.ts"]), false);
 });
 
-test("Pi CLI discovery supports config override", () => {
-	const config = cloneConfig();
-	config.children.piCliPath = "/custom/pi";
-	assert.deepEqual(getPiInvocation(["--version"], config), { command: "/custom/pi", args: ["--version"] });
+test("Pi CLI discovery supports absolute existing config override", () => {
+	const oldEnv = process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
+	try {
+		delete process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
+		const cwd = tempProject();
+		const cli = path.join(cwd, "custom-pi.js");
+		fs.writeFileSync(cli, "", "utf8");
+		const config = cloneConfig();
+		config.children.piCliPath = cli;
+		assert.deepEqual(getPiInvocation(["--version"], config), { command: process.execPath, args: [cli, "--version"] });
+	} finally {
+		if (oldEnv === undefined) delete process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
+		else process.env.PI_SIMPLE_SUBAGENTS_PI_CLI = oldEnv;
+	}
+});
+
+test("Pi CLI override rejects bare commands, relative paths, missing paths, and directories", () => {
+	const oldEnv = process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
+	try {
+		delete process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
+		const cwd = tempProject();
+		const config = cloneConfig();
+
+		config.children.piCliPath = "pi";
+		assert.throws(() => getPiInvocation(["--version"], config), /absolute path/);
+
+		config.children.piCliPath = ".\/pi";
+		assert.throws(() => getPiInvocation(["--version"], config), /absolute path/);
+
+		config.children.piCliPath = path.join(cwd, "missing-pi.js");
+		assert.throws(() => getPiInvocation(["--version"], config), /does not exist/);
+
+		config.children.piCliPath = cwd;
+		assert.throws(() => getPiInvocation(["--version"], config), /not a regular file/);
+	} finally {
+		if (oldEnv === undefined) delete process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
+		else process.env.PI_SIMPLE_SUBAGENTS_PI_CLI = oldEnv;
+	}
+});
+
+test("Pi CLI environment override rejects unsafe commands and accepts absolute files", () => {
+	const oldEnv = process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
+	try {
+		const config = cloneConfig();
+		delete config.children.piCliPath;
+		process.env.PI_SIMPLE_SUBAGENTS_PI_CLI = "pi";
+		assert.throws(() => getPiInvocation(["--version"], config), /PI_SIMPLE_SUBAGENTS_PI_CLI must be an absolute path/);
+
+		const cwd = tempProject();
+		const cli = path.join(cwd, "env-pi.js");
+		fs.writeFileSync(cli, "", "utf8");
+		process.env.PI_SIMPLE_SUBAGENTS_PI_CLI = cli;
+		assert.deepEqual(getPiInvocation(["--version"], config), { command: process.execPath, args: [cli, "--version"] });
+	} finally {
+		if (oldEnv === undefined) delete process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
+		else process.env.PI_SIMPLE_SUBAGENTS_PI_CLI = oldEnv;
+	}
 });
 
 test("Pi CLI discovery resolves the package bin without override", () => {
@@ -186,9 +240,9 @@ test("package uses Pi core packages as peers", () => {
 	const manifest = JSON.parse(fs.readFileSync(path.join(process.cwd(), "package.json"), "utf8")) as { dependencies?: Record<string, string>; peerDependencies?: Record<string, string>; devDependencies?: Record<string, string> };
 	assert.equal(manifest.dependencies, undefined);
 	assert.deepEqual(manifest.peerDependencies, {
-		"@earendil-works/pi-ai": "*",
-		"@earendil-works/pi-coding-agent": "*",
-		typebox: "*",
+		"@earendil-works/pi-ai": ">=0.78 <1",
+		"@earendil-works/pi-coding-agent": ">=0.78 <1",
+		typebox: "^1.1.39",
 	});
 	assert.ok(manifest.devDependencies?.typebox);
 });
@@ -514,6 +568,34 @@ test("worker outputFile validates reserved paths before spawning", async () => {
 	assert.equal(spawned, false);
 });
 
+test("worker surfaces artifact cleanup summary when cleanup is configured", async () => {
+	const cwd = tempProject();
+	const config = cloneConfig();
+	config.artifacts.baseDir = ".pi/runs";
+	config.artifacts.cleanup.maxAgeMs = 1;
+	const baseDir = path.join(cwd, ".pi", "runs");
+	const oldRun = path.join(baseDir, "old-run");
+	fs.mkdirSync(oldRun, { recursive: true });
+	fs.writeFileSync(path.join(oldRun, "config-effective.json"), "{}", "utf8");
+	fs.writeFileSync(path.join(oldRun, "payload.txt"), "old", "utf8");
+	const oldDate = new Date(Date.now() - 60_000);
+	fs.utimesSync(path.join(oldRun, "config-effective.json"), oldDate, oldDate);
+	fs.utimesSync(path.join(oldRun, "payload.txt"), oldDate, oldDate);
+	fs.utimesSync(oldRun, oldDate, oldDate);
+
+	const result = await runWorker(cwd, { task: "inline task" }, undefined, undefined, {
+		loadConfig: () => config,
+		async spawnPiRole(input) {
+			return fakeCompliantResult(input);
+		},
+	});
+
+	assert.match(result.cleanupSummary ?? "", /deleted 1 run/);
+	assert.equal(fs.existsSync(oldRun), false);
+	assert.equal(fs.existsSync(result.runDir), true);
+	assert.equal(fs.existsSync(path.join(result.runDir, ACTIVE_RUN_MARKER_FILE)), false);
+});
+
 test("standalone worker rejects oversized tasks before spawning", async () => {
 	const cwd = tempProject();
 	const config = cloneConfig();
@@ -557,6 +639,41 @@ test("parallel workers collect non-zero child exits without aborting siblings", 
 		},
 	}), /Parallel workers failed: fail exit 2/);
 	assert.equal(secondSawAbort, false);
+});
+
+test("parallel workers read task references once during preflight and launch prepared content", async () => {
+	const cwd = tempProject();
+	const firstPath = path.join(cwd, "first-task.md");
+	const secondPath = path.join(cwd, "second-task.md");
+	fs.writeFileSync(firstPath, "first prepared task", "utf8");
+	fs.writeFileSync(secondPath, "second prepared task", "utf8");
+	const config = cloneConfig();
+	config.artifacts.baseDir = ".pi/runs";
+	const reads = new Map<string, number>();
+	const spawnedTasks: string[] = [];
+
+	const result = await runWorkersParallel(cwd, { tasks: [
+		{ name: "first", task: "@first-task.md" },
+		{ name: "second", task: "@second-task.md" },
+	] }, undefined, undefined, {
+		loadConfig: () => config,
+		readReference(_cwd, input) {
+			reads.set(input, (reads.get(input) ?? 0) + 1);
+			const filePath = path.join(cwd, input.startsWith("@") ? input.slice(1) : input);
+			return { source: filePath, text: fs.readFileSync(filePath, "utf8"), warnings: [] };
+		},
+		async spawnPiRole(input) {
+			spawnedTasks.push(input.task);
+			return fakeCompliantResult(input);
+		},
+	});
+
+	assert.equal(reads.get("@first-task.md"), 1);
+	assert.equal(reads.get("@second-task.md"), 1);
+	assert.equal(result.workers.length, 2);
+	assert.match(fs.readFileSync(path.join(result.workers[0].runDir, "input-worker-task.md"), "utf8"), /first prepared task/);
+	assert.match(fs.readFileSync(path.join(result.workers[1].runDir, "input-worker-task.md"), "utf8"), /second prepared task/);
+	assert.equal(spawnedTasks.every((task) => task.includes("Read input-worker-task.md")), true);
 });
 
 test("run_role_agent requires the default output artifact", async () => {

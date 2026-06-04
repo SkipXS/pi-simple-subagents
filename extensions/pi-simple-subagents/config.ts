@@ -39,6 +39,12 @@ export interface Config {
 	};
 	artifacts: {
 		baseDir: string;
+		cleanup: {
+			/** Delete completed extension-owned run dirs older than this many milliseconds. Use 0 to disable. */
+			maxAgeMs: number;
+			/** Keep total extension-owned run artifact bytes under this quota. Use 0 to disable. */
+			maxTotalBytes: number;
+		};
 	};
 }
 
@@ -57,7 +63,7 @@ export const DEFAULT_CONFIG: Config = {
 		allowOutsideCwd: false,
 		allowBinary: false,
 	},
-	artifacts: { baseDir: ".pi/agent-runs" },
+	artifacts: { baseDir: ".pi/agent-runs", cleanup: { maxAgeMs: 0, maxTotalBytes: 0 } },
 };
 
 function cloneConfig(config: Config): Config {
@@ -66,7 +72,7 @@ function cloneConfig(config: Config): Config {
 		children: { ...config.children },
 		orchestration: { ...config.orchestration },
 		references: { ...config.references },
-		artifacts: { ...config.artifacts },
+		artifacts: { ...config.artifacts, cleanup: { ...config.artifacts.cleanup } },
 	};
 }
 
@@ -117,6 +123,14 @@ function expectExtensionForwardMode(value: unknown, source: string, pathName: st
 	return mode as ExtensionForwardMode;
 }
 
+function expectExistingRegularFilePath(value: unknown, source: string, pathName: string): string {
+	const filePath = expectString(value, source, pathName);
+	if (!path.isAbsolute(filePath)) throw configError(source, `${pathName} must be an absolute path to an existing regular file`);
+	if (!fs.existsSync(filePath)) throw configError(source, `${pathName} does not exist: ${filePath}`);
+	if (!fs.statSync(filePath).isFile()) throw configError(source, `${pathName} is not a regular file: ${filePath}`);
+	return filePath;
+}
+
 function rejectUnknownKeys(object: Record<string, unknown>, source: string, pathName: string, allowed: readonly string[]): void {
 	const accepted = new Set(allowed);
 	const unknown = Object.keys(object).filter((key) => !accepted.has(key));
@@ -151,7 +165,7 @@ function mergeConfig(base: Config, override: unknown, source = "unknown", option
 		if (children.maxConcurrentSubagents !== undefined) next.children.maxConcurrentSubagents = expectPositiveInteger(children.maxConcurrentSubagents, source, "children.maxConcurrentSubagents");
 		if (children.piCliPath !== undefined) {
 			if (!options.allowPiCliPath) throw configError(source, "children.piCliPath is only allowed in the global config; use PI_SIMPLE_SUBAGENTS_PI_CLI for per-project/testing overrides");
-			next.children.piCliPath = expectString(children.piCliPath, source, "children.piCliPath");
+			next.children.piCliPath = expectExistingRegularFilePath(children.piCliPath, source, "children.piCliPath");
 		}
 	}
 
@@ -171,8 +185,14 @@ function mergeConfig(base: Config, override: unknown, source = "unknown", option
 
 	if (overrideObject.artifacts !== undefined) {
 		const artifacts = expectObject(overrideObject.artifacts, source, "artifacts");
-		rejectUnknownKeys(artifacts, source, "artifacts", ["baseDir"]);
+		rejectUnknownKeys(artifacts, source, "artifacts", ["baseDir", "cleanup"]);
 		if (artifacts.baseDir !== undefined) next.artifacts.baseDir = expectString(artifacts.baseDir, source, "artifacts.baseDir");
+		if (artifacts.cleanup !== undefined) {
+			const cleanup = expectObject(artifacts.cleanup, source, "artifacts.cleanup");
+			rejectUnknownKeys(cleanup, source, "artifacts.cleanup", ["maxAgeMs", "maxTotalBytes"]);
+			if (cleanup.maxAgeMs !== undefined) next.artifacts.cleanup.maxAgeMs = expectNonNegativeInteger(cleanup.maxAgeMs, source, "artifacts.cleanup.maxAgeMs");
+			if (cleanup.maxTotalBytes !== undefined) next.artifacts.cleanup.maxTotalBytes = expectNonNegativeInteger(cleanup.maxTotalBytes, source, "artifacts.cleanup.maxTotalBytes");
+		}
 	}
 
 	return next;

@@ -3,6 +3,8 @@ import * as path from "node:path";
 import type { Config } from "./config.ts";
 import { roleById, type RoleName } from "./role-registry.ts";
 
+export const ACTIVE_RUN_MARKER_FILE = ".pi-simple-subagents-active-run";
+
 export function runId(): string {
 	const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\..+/, "");
 	return `${stamp}-${Math.random().toString(36).slice(2, 8)}`;
@@ -151,4 +153,135 @@ export function resolveRoleSessionFile(runDir: string, role: RoleName): string {
 	const sessionFile = resolveArtifactPath(runDir, fileName);
 	ensureArtifactFileForAppend(runDir, sessionFile);
 	return sessionFile;
+}
+
+export interface ArtifactCleanupResult {
+	configured: boolean;
+	baseDir: string;
+	deletedRuns: number;
+	deletedBytes: number;
+	skippedRuns: number;
+	errors: string[];
+}
+
+interface CleanupCandidate {
+	path: string;
+	mtimeMs: number;
+	sizeBytes: number;
+}
+
+function artifactCleanupConfigured(config: Config): boolean {
+	return config.artifacts.cleanup.maxAgeMs > 0 || config.artifacts.cleanup.maxTotalBytes > 0;
+}
+
+function directorySizeBytes(dir: string): number {
+	let total = 0;
+	for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+		const target = path.join(dir, entry.name);
+		const stat = fs.lstatSync(target);
+		if (stat.isSymbolicLink()) continue;
+		if (stat.isDirectory()) total += directorySizeBytes(target);
+		else if (stat.isFile()) total += stat.size;
+	}
+	return total;
+}
+
+function isExtensionRunDir(dir: string): boolean {
+	try {
+		const stat = fs.lstatSync(dir);
+		return stat.isDirectory() && !stat.isSymbolicLink() && fs.existsSync(path.join(dir, "config-effective.json"));
+	} catch {
+		return false;
+	}
+}
+
+export function markRunActive(runDir: string): string {
+	ensureDir(runDir);
+	return writeArtifact(runDir, ACTIVE_RUN_MARKER_FILE, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }, null, 2));
+}
+
+export function clearRunActive(runDir: string): void {
+	try {
+		fs.rmSync(resolveArtifactPath(runDir, ACTIVE_RUN_MARKER_FILE), { force: true });
+	} catch {
+		// Best-effort lifecycle marker cleanup; stale markers fail safe by preserving runs.
+	}
+}
+
+function isRunActive(dir: string): boolean {
+	try {
+		const marker = path.join(dir, ACTIVE_RUN_MARKER_FILE);
+		return fs.lstatSync(marker).isFile();
+	} catch {
+		return false;
+	}
+}
+
+function cleanupCandidates(baseDir: string, activeRunDir: string | undefined, errors: string[]): CleanupCandidate[] {
+	const active = activeRunDir ? path.resolve(activeRunDir) : undefined;
+	const candidates: CleanupCandidate[] = [];
+	for (const entry of fs.readdirSync(baseDir, { withFileTypes: true })) {
+		const target = path.join(baseDir, entry.name);
+		if (active && path.resolve(target) === active) continue;
+		if (!entry.isDirectory() || !isExtensionRunDir(target) || isRunActive(target)) continue;
+		try {
+			const stat = fs.statSync(target);
+			candidates.push({ path: target, mtimeMs: stat.mtimeMs, sizeBytes: directorySizeBytes(target) });
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			errors.push(`${target}: ${message}`);
+		}
+	}
+	return candidates.sort((a, b) => a.mtimeMs - b.mtimeMs || a.path.localeCompare(b.path));
+}
+
+export function cleanupRunArtifacts(baseDir: string, config: Config, activeRunDir?: string, nowMs = Date.now()): ArtifactCleanupResult | undefined {
+	if (!artifactCleanupConfigured(config)) return undefined;
+	const result: ArtifactCleanupResult = { configured: true, baseDir, deletedRuns: 0, deletedBytes: 0, skippedRuns: 0, errors: [] };
+	if (!fs.existsSync(baseDir)) return result;
+	const absoluteBase = path.resolve(baseDir);
+	const active = activeRunDir ? path.resolve(activeRunDir) : undefined;
+	if (active && !isPathInside(absoluteBase, active)) throw new Error(`Active run dir is outside artifact base dir: ${activeRunDir}`);
+	const removeCandidate = (candidate: CleanupCandidate) => {
+		try {
+			fs.rmSync(candidate.path, { recursive: true, force: true });
+			result.deletedRuns++;
+			result.deletedBytes += candidate.sizeBytes;
+			return true;
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			result.errors.push(`${candidate.path}: ${message}`);
+			return false;
+		}
+	};
+	let candidates = cleanupCandidates(absoluteBase, active, result.errors);
+	if (config.artifacts.cleanup.maxAgeMs > 0) {
+		const cutoff = nowMs - config.artifacts.cleanup.maxAgeMs;
+		for (const candidate of candidates) {
+			if (candidate.mtimeMs < cutoff) removeCandidate(candidate);
+		}
+		candidates = cleanupCandidates(absoluteBase, active, result.errors);
+	}
+	if (config.artifacts.cleanup.maxTotalBytes > 0) {
+		let activeBytes = 0;
+		if (active && fs.existsSync(active)) {
+			try { activeBytes = directorySizeBytes(active); }
+			catch (error) { result.errors.push(`${active}: ${error instanceof Error ? error.message : String(error)}`); }
+		}
+		let totalBytes = activeBytes + candidates.reduce((sum, candidate) => sum + candidate.sizeBytes, 0);
+		for (const candidate of candidates) {
+			if (totalBytes <= config.artifacts.cleanup.maxTotalBytes) break;
+			if (removeCandidate(candidate)) totalBytes -= candidate.sizeBytes;
+		}
+	}
+	result.skippedRuns = cleanupCandidates(absoluteBase, active, result.errors).length;
+	return result;
+}
+
+export function formatArtifactCleanupResult(cleanup: ArtifactCleanupResult | undefined): string | undefined {
+	if (!cleanup) return undefined;
+	const parts = [`deleted ${cleanup.deletedRuns} run${cleanup.deletedRuns === 1 ? "" : "s"}`, `${cleanup.deletedBytes} bytes`];
+	if (cleanup.skippedRuns) parts.push(`${cleanup.skippedRuns} retained`);
+	if (cleanup.errors.length > 0) parts.push(`${cleanup.errors.length} error${cleanup.errors.length === 1 ? "" : "s"}`);
+	return parts.join(", ");
 }

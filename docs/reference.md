@@ -292,12 +292,14 @@ Project config overrides global config, except project config is not allowed to 
 | `children.forwardCurrentExtension` | `"auto"` | Forward this extension to child runs when loaded with `-e/--extension`. Use `always` or `never` to force behavior. |
 | `children.timeoutMs` | `1800000` | Per-child-process timeout in ms; `0` disables it. |
 | `children.maxConcurrentSubagents` | `8` | Concurrency cap for parallel workers and review reviewers. |
-| `children.piCliPath` | unset | Trusted Pi CLI path/command override. Global config or env var only. |
+| `children.piCliPath` | unset | Trusted Pi CLI override. Global config or env var only; must be an absolute path to an existing regular file. |
 | `orchestration.maxWorkerTaskBytes` | `16384` | Max UTF-8 bytes for one worker handoff; `0` disables the limit. |
 | `references.maxFileBytes` | `1048576` | Max bytes loaded from one `@file`; `0` disables truncation. |
 | `references.allowOutsideCwd` | `false` | Allow references outside the current project. |
 | `references.allowBinary` | `false` | Allow binary-looking files to be decoded as UTF-8. |
 | `artifacts.baseDir` | `.pi/agent-runs` | Run artifact directory. Existing parent components must not be symlinks/junctions. |
+| `artifacts.cleanup.maxAgeMs` | `0` | Delete extension-owned run directories older than this many milliseconds; `0` disables age cleanup. |
+| `artifacts.cleanup.maxTotalBytes` | `0` | Delete oldest extension-owned run directories until total run-artifact bytes fit under this quota; `0` disables size cleanup. |
 
 Unknown config keys are rejected so typos fail early.
 
@@ -365,7 +367,33 @@ Release smoke checklist:
 
 ## Cleanup and retention
 
-Run artifacts are intentionally durable and may contain sensitive data. The extension does not auto-delete `.pi/agent-runs`.
+Run artifacts are intentionally durable and may contain sensitive data. By default the extension does not auto-delete `.pi/agent-runs` because both cleanup knobs default to `0`.
+
+Optional automatic cleanup can be enabled in config:
+
+```json
+{
+  "artifacts": {
+    "cleanup": {
+      "maxAgeMs": 2592000000,
+      "maxTotalBytes": 1073741824
+    }
+  }
+}
+```
+
+Behavior and safety constraints:
+
+- Cleanup runs at the start of root workflows after the new active run directory is created and marked active.
+- The current active run and other concurrently active runs are always excluded, even if they are older than `maxAgeMs` or larger than `maxTotalBytes`.
+- Active runs are identified by the `.pi-simple-subagents-active-run` marker file, which is created when a root workflow starts and removed when it finishes where practical. If a process crashes, a stale marker fails safe by preserving that run for manual cleanup.
+- Only immediate child directories under the configured `artifacts.baseDir` that look like this extension's run directories are eligible. A directory must contain `config-effective.json`; unrelated/foreign directories are left alone.
+- Symlink entries are not followed for size accounting and are not considered owned run directories.
+- Age cleanup deletes eligible runs whose directory mtime is older than `Date.now() - artifacts.cleanup.maxAgeMs`.
+- Size cleanup computes total bytes for eligible owned runs plus the active run, then deletes the oldest non-active eligible runs until the quota is met or no more eligible runs remain.
+- When cleanup is configured, command/tool summaries include an `Artifact cleanup` line with deleted run count, deleted bytes, retained runs, and error count when applicable. No cleanup line is shown when both cleanup knobs are `0`.
+
+Manual cleanup is still fine when you prefer to review first:
 
 ```bash
 # review old runs first
@@ -382,7 +410,7 @@ Get-ChildItem .pi/agent-runs -Directory | Where-Object LastWriteTime -lt (Get-Da
 Get-ChildItem .pi/agent-runs -Directory | Where-Object LastWriteTime -lt (Get-Date).AddDays(-30) | Remove-Item -Recurse -Force
 ```
 
-If `artifacts.baseDir` points outside the project, prune that directory instead.
+If `artifacts.baseDir` points outside the project, prune or configure cleanup for that directory instead.
 
 ## Status display
 

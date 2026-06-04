@@ -23,6 +23,24 @@ const PI_CLI_PATH_ENV = "PI_SIMPLE_SUBAGENTS_PI_CLI";
 const MAX_TRANSCRIPT_ARTIFACT_BYTES = 4 * 1024 * 1024;
 const MAX_STDERR_ARTIFACT_BYTES = 1024 * 1024;
 const MAX_PENDING_STDOUT_LINE_BYTES = MAX_TRANSCRIPT_ARTIFACT_BYTES;
+let platformOverrideForTests: NodeJS.Platform | undefined;
+let taskkillOverrideForTests: { command: string; argsPrefix?: string[] } | undefined;
+
+export function setChildRunnerPlatformForTests(platform: NodeJS.Platform | undefined): void {
+	platformOverrideForTests = platform;
+}
+
+export function setChildRunnerTaskkillForTests(invocation: { command: string; argsPrefix?: string[] } | undefined): void {
+	taskkillOverrideForTests = invocation;
+}
+
+function runtimePlatform(): NodeJS.Platform {
+	return platformOverrideForTests ?? process.platform;
+}
+
+function taskkillInvocation(): { command: string; argsPrefix: string[] } {
+	return { command: taskkillOverrideForTests?.command ?? "taskkill", argsPrefix: taskkillOverrideForTests?.argsPrefix ?? [] };
+}
 
 export interface ChildStatusUpdate {
 	key: string;
@@ -176,9 +194,25 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null;
 }
 
+function validatePiCliOverride(cliPath: string, source: string): string {
+	if (!path.isAbsolute(cliPath)) {
+		throw new Error(`${source} must be an absolute path to an existing regular Pi CLI file; got ${JSON.stringify(cliPath)}`);
+	}
+	if (!fs.existsSync(cliPath)) {
+		throw new Error(`${source} does not exist: ${cliPath}`);
+	}
+	const stat = fs.statSync(cliPath);
+	if (!stat.isFile()) {
+		throw new Error(`${source} is not a regular file: ${cliPath}`);
+	}
+	return cliPath;
+}
+
 function resolvePiCliPath(overridePath?: string): string | undefined {
-	const configured = process.env[PI_CLI_PATH_ENV]?.trim() || overridePath?.trim();
-	if (configured) return configured;
+	const envValue = process.env[PI_CLI_PATH_ENV]?.trim();
+	if (envValue) return validatePiCliOverride(envValue, PI_CLI_PATH_ENV);
+	const configValue = overridePath?.trim();
+	if (configValue) return validatePiCliOverride(configValue, "global children.piCliPath");
 	try {
 		const packageEntrypoint = fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"));
 		return findPiCliFromPackageEntrypoint(packageEntrypoint);
@@ -217,7 +251,7 @@ function piInvocationWarnings(config: Config | undefined, cwd: string, invocatio
 		if (!fs.existsSync(commandPath)) throw new Error(`Pi CLI executable not found: ${commandPath}. Set ${PI_CLI_PATH_ENV} or global children.piCliPath to an existing absolute Pi CLI path.`);
 		const stat = fs.statSync(commandPath);
 		if (!stat.isFile()) throw new Error(`Pi CLI executable is not a regular file: ${commandPath}`);
-		if (process.platform !== "win32" && invocation.command !== process.execPath && (stat.mode & 0o111) === 0) {
+		if (runtimePlatform() !== "win32" && invocation.command !== process.execPath && (stat.mode & 0o111) === 0) {
 			warnings.push(`Pi CLI path is not marked executable: ${commandPath}. If spawn fails, chmod it or point ${PI_CLI_PATH_ENV} at a runnable wrapper.`);
 		}
 	}
@@ -246,7 +280,7 @@ export function getPiInvocation(args: string[], config?: Config): { command: str
 	const execName = path.basename(process.execPath).toLowerCase();
 	const isGenericRuntime = /^(node|bun)(\.exe)?$/.test(execName);
 	if (!isGenericRuntime) return { command: process.execPath, args };
-	return { command: process.platform === "win32" ? "pi.cmd" : "pi", args };
+	return { command: runtimePlatform() === "win32" ? "pi.cmd" : "pi", args };
 }
 
 export function quoteAtReferencePath(filePath: string): string {
@@ -347,9 +381,10 @@ export async function spawnPiRole(input: {
 		const stampBase = `${Date.now()}-${uniqueSuffix()}`;
 		const transcriptPath = writeArtifact(input.runDir, `logs/${input.role}-${stampBase}.jsonl`, "");
 		const stderrPath = writeArtifact(input.runDir, `logs/${input.role}-${stampBase}.stderr.log`, "");
-		const invocation = getPiInvocation(args, input.config);
+		let invocation: { command: string; args: string[] };
 		let invocationWarnings: string[] = [];
 		try {
+			invocation = getPiInvocation(args, input.config);
 			invocationWarnings = piInvocationWarnings(input.config, input.cwd, invocation);
 			writeArtifact(input.runDir, `logs/${input.role}-${stampBase}.invocation.json`, JSON.stringify({
 				role: input.role,
@@ -382,7 +417,7 @@ export async function spawnPiRole(input: {
 			});
 			return;
 		}
-		const child = spawn(invocation.command, invocation.args, { cwd: input.cwd, env, stdio: ["ignore", "pipe", "pipe"], shell: false, detached: process.platform !== "win32", windowsHide: true });
+		const child = spawn(invocation.command, invocation.args, { cwd: input.cwd, env, stdio: ["ignore", "pipe", "pipe"], shell: false, detached: runtimePlatform() !== "win32", windowsHide: true });
 		const stdoutDecoder = new StringDecoder("utf8");
 		const stderrDecoder = new StringDecoder("utf8");
 		let buffer = "";
@@ -504,7 +539,7 @@ export async function spawnPiRole(input: {
 			} catch { /* ignore non-json */ }
 		};
 		const signalChildTree = (signalName: NodeJS.Signals) => {
-			if (process.platform !== "win32" && child.pid) {
+			if (runtimePlatform() !== "win32" && child.pid) {
 				try {
 					process.kill(-child.pid, signalName);
 					return;
@@ -522,8 +557,9 @@ export async function spawnPiRole(input: {
 			const artifactLine = stderr.endsWith("\n") || stderr.length === 0 ? line : `\n${line}`;
 			stderr = appendBoundedTail(stderr, artifactLine, MAX_STDERR_BYTES);
 			safeAppendCappedArtifactFile(stderrPath, artifactLine, stderrCap, MAX_STDERR_ARTIFACT_BYTES, "stderr");
-			if (process.platform === "win32" && child.pid) {
-				const killer = spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], { stdio: "ignore", windowsHide: true });
+			if (runtimePlatform() === "win32" && child.pid) {
+				const taskkill = taskkillInvocation();
+				const killer = spawn(taskkill.command, [...taskkill.argsPrefix, "/pid", String(child.pid), "/t", "/f"], { stdio: "ignore", windowsHide: true });
 				killer.on("error", () => child.kill());
 				killer.on("close", (code) => { if (code !== 0) child.kill(); });
 				return;

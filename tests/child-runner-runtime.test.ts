@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { spawnPiRole } from "../extensions/pi-simple-subagents/child-runner.ts";
+import { setChildRunnerPlatformForTests, setChildRunnerTaskkillForTests, spawnPiRole } from "../extensions/pi-simple-subagents/child-runner.ts";
 import { DEFAULT_CONFIG, type Config } from "../extensions/pi-simple-subagents/config.ts";
 
 function tempProject(): string {
@@ -106,4 +106,42 @@ writeOversizedLineThenLaterOutput();
 	assert.equal(result.stopReason, "error");
 	assert.match(result.output, /JSONL line exceeded \d+ bytes/i);
 	assert.equal(result.output.includes("later output masked error"), false);
+});
+
+test("timeout on Windows uses taskkill cleanup path and still finalizes artifacts", async () => {
+	const cwd = tempProject();
+	const runDir = path.join(cwd, ".pi", "run");
+	const taskkillLog = path.join(cwd, "taskkill-args.json");
+	const taskkillRecorder = path.join(cwd, "taskkill-recorder.js");
+	fs.writeFileSync(taskkillRecorder, `require("node:fs").writeFileSync(process.argv[2], JSON.stringify(process.argv.slice(3)));\n`, "utf8");
+	const cli = path.join(cwd, "fake-pi.js");
+	fs.writeFileSync(cli, `
+console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "started" }], stopReason: "stop" } }));
+setTimeout(() => process.exit(0), 250);
+`, "utf8");
+	try {
+		setChildRunnerPlatformForTests("win32");
+		setChildRunnerTaskkillForTests({ command: process.execPath, argsPrefix: [taskkillRecorder, taskkillLog] });
+		const config = cloneConfig();
+		config.children.piCliPath = cli;
+		config.children.timeoutMs = 50;
+
+		const result = await spawnPiRole({ cwd, role: "worker", task: "timeout taskkill", runDir, config });
+
+		assert.equal(result.timedOut, true);
+		assert.equal(result.exitCode, 124);
+		assert.equal(result.stopReason, "timed_out");
+		assert.match(result.stderr, /Child run timed out after 50 ms/);
+		assert.equal(fs.existsSync(result.outputPath), true);
+		assert.equal(fs.existsSync(result.transcriptPath), true);
+		assert.equal(fs.existsSync(result.stderrPath), true);
+		const taskkillArgs = JSON.parse(fs.readFileSync(taskkillLog, "utf8")) as string[];
+		assert.equal(taskkillArgs[0]?.toLowerCase(), "/pid");
+		assert.match(taskkillArgs[1] ?? "", /^\d+$/);
+		assert.equal(taskkillArgs[2]?.toLowerCase(), "/t");
+		assert.equal(taskkillArgs[3]?.toLowerCase(), "/f");
+	} finally {
+		setChildRunnerPlatformForTests(undefined);
+		setChildRunnerTaskkillForTests(undefined);
+	}
 });

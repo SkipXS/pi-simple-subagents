@@ -258,14 +258,14 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 			parameters: OrchestratorParams,
 			async execute(_id, params: OrchestratorParamsType, signal, onUpdate, ctx) {
 				const progress = createSubagentProgress({ onToolUpdate: onUpdate });
-				const { result, runDir, planSource } = await runOrchestrator(ctx.cwd, params.plan, signal, (text, status) => {
+				const { result, runDir, planSource, cleanupSummary } = await runOrchestrator(ctx.cwd, params.plan, signal, (text, status) => {
 					if (text) progress.text(text);
 					if (status) progress.status(status);
 				});
 				if (result.exitCode !== 0) throwChildRunError("Orchestration failed", result);
 				return {
-					content: [{ type: "text", text: childSummary("Orchestration finished.", [["Run dir", runDir], ["Plan source", planSource], ["Output", result.outputPath], ["Transcript", result.transcriptPath]], result.output, { includeOutput: params.includeOutput }) }],
-					details: { runDir, planSource, result },
+					content: [{ type: "text", text: childSummary("Orchestration finished.", [["Run dir", runDir], ["Plan source", planSource], ["Output", result.outputPath], ["Transcript", result.transcriptPath], ["Artifact cleanup", cleanupSummary]], result.output, { includeOutput: params.includeOutput }) }],
+					details: { runDir, planSource, result, cleanupSummary },
 				};
 			},
 		});
@@ -284,7 +284,7 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 					if (status) progress.status(status);
 				});
 				return {
-					content: [{ type: "text", text: childSummary("Review finished.", [["Run dir", result.runDir], ["Target source", result.targetSource], ["Final summary", result.finalSummaryPath], ["Synthesis transcript", result.synthesis.transcriptPath]], result.synthesis.output, { kind: "synthesis", includeOutput: params.includeOutput }) }],
+					content: [{ type: "text", text: childSummary("Review finished.", [["Run dir", result.runDir], ["Target source", result.targetSource], ["Final summary", result.finalSummaryPath], ["Synthesis transcript", result.synthesis.transcriptPath], ["Artifact cleanup", result.cleanupSummary]], result.synthesis.output, { kind: "synthesis", includeOutput: params.includeOutput }) }],
 					details: result,
 				};
 			},
@@ -304,7 +304,7 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 					if (status) progress.status(status);
 				});
 				return {
-					content: [{ type: "text", text: childSummary("Scout finished.", [["Run dir", result.runDir], ["Task source", result.taskSource], ["Output", result.outputArtifactPath], ["Transcript", result.result.transcriptPath]], result.result.output, { includeOutput: params.includeOutput }) }],
+					content: [{ type: "text", text: childSummary("Scout finished.", [["Run dir", result.runDir], ["Task source", result.taskSource], ["Output", result.outputArtifactPath], ["Transcript", result.result.transcriptPath], ["Artifact cleanup", result.cleanupSummary]], result.result.output, { includeOutput: params.includeOutput }) }],
 					details: result,
 				};
 			},
@@ -325,7 +325,7 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 					if (status) progress.status(status);
 				});
 				return {
-					content: [{ type: "text", text: childSummary("Worker finished.", [["Run dir", result.runDir], ["Task source", result.taskSource], ["Output", result.outputArtifactPath], ["Transcript", result.result.transcriptPath]], result.result.output, { includeOutput: params.includeOutput }) }],
+					content: [{ type: "text", text: childSummary("Worker finished.", [["Run dir", result.runDir], ["Task source", result.taskSource], ["Output", result.outputArtifactPath], ["Transcript", result.result.transcriptPath], ["Artifact cleanup", result.cleanupSummary]], result.result.output, { includeOutput: params.includeOutput }) }],
 					details: result,
 				};
 			},
@@ -346,7 +346,7 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 				});
 				const summary = result.workers.map((worker, index) => `${index + 1}. ${worker.name}: output ${worker.outputArtifactPath}; transcript ${worker.result.transcriptPath}`).join("\n");
 				return {
-					content: [{ type: "text", text: `Parallel workers finished.\nRun dir: ${result.runDir}\nWorkers: ${result.workers.length}\n\n${summary}` }],
+					content: [{ type: "text", text: `Parallel workers finished.\nRun dir: ${result.runDir}\nWorkers: ${result.workers.length}${result.cleanupSummary ? `\nArtifact cleanup: ${result.cleanupSummary}` : ""}\n\n${summary}` }],
 					details: result,
 				};
 			},
@@ -503,7 +503,7 @@ Write the expected output artifact with write_run_artifact using path ${JSON.str
 			ctx.ui.notify("Starting orchestrator workflow...", "info");
 			const progress = createSubagentProgress({ setWidget: (content) => ctx.ui.setWidget("pi-simple-subagents:orchestrate", content, { placement: "belowEditor" }) });
 			try {
-				const { result, runDir } = await runOrchestrator(ctx.cwd, plan, ctx.signal, (text, status) => {
+				const { result, runDir, cleanupSummary } = await runOrchestrator(ctx.cwd, plan, ctx.signal, (text, status) => {
 					if (text) progress.text(text);
 					if (status) progress.status(status);
 				});
@@ -511,8 +511,8 @@ Write the expected output artifact with write_run_artifact using path ${JSON.str
 				pi.sendMessage({
 					customType: "pi-simple-subagents-result",
 					display: true,
-					content: childSummary("Orchestration finished.", [["Run dir", runDir], ["Output", result.outputPath], ["Transcript", result.transcriptPath]], result.output),
-					details: { runDir, result },
+					content: childSummary("Orchestration finished.", [["Run dir", runDir], ["Output", result.outputPath], ["Transcript", result.transcriptPath], ["Artifact cleanup", cleanupSummary]], result.output),
+					details: { runDir, result, cleanupSummary },
 				});
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
@@ -539,7 +539,7 @@ Write the expected output artifact with write_run_artifact using path ${JSON.str
 				pi.sendMessage({
 					customType: "pi-simple-subagents-scout-result",
 					display: true,
-					content: childSummary("Scout finished.", [["Run dir", result.runDir], ["Output", result.outputArtifactPath], ["Transcript", result.result.transcriptPath]], result.result.output),
+					content: childSummary("Scout finished.", [["Run dir", result.runDir], ["Output", result.outputArtifactPath], ["Transcript", result.result.transcriptPath], ["Artifact cleanup", result.cleanupSummary]], result.result.output),
 					details: result,
 				});
 			} catch (error) {
@@ -567,7 +567,7 @@ Write the expected output artifact with write_run_artifact using path ${JSON.str
 				pi.sendMessage({
 					customType: "pi-simple-subagents-worker-result",
 					display: true,
-					content: childSummary("Worker finished.", [["Run dir", result.runDir], ["Output", result.outputArtifactPath], ["Transcript", result.result.transcriptPath]], result.result.output),
+					content: childSummary("Worker finished.", [["Run dir", result.runDir], ["Output", result.outputArtifactPath], ["Transcript", result.result.transcriptPath], ["Artifact cleanup", result.cleanupSummary]], result.result.output),
 					details: result,
 				});
 			} catch (error) {
@@ -595,7 +595,7 @@ Write the expected output artifact with write_run_artifact using path ${JSON.str
 				pi.sendMessage({
 					customType: "pi-simple-subagents-review-result",
 					display: true,
-					content: childSummary("Review finished.", [["Run dir", result.runDir], ["Final summary", result.finalSummaryPath], ["Synthesis transcript", result.synthesis.transcriptPath]], result.synthesis.output, { kind: "synthesis" }),
+					content: childSummary("Review finished.", [["Run dir", result.runDir], ["Final summary", result.finalSummaryPath], ["Synthesis transcript", result.synthesis.transcriptPath], ["Artifact cleanup", result.cleanupSummary]], result.synthesis.output, { kind: "synthesis" }),
 					details: result,
 				});
 			} catch (error) {
@@ -692,7 +692,7 @@ Write the expected output artifact with write_run_artifact using path ${JSON.str
 					pi.sendMessage({
 						customType: "pi-simple-subagents-parallel-workers-result",
 						display: true,
-						content: `Parallel workers finished.\n\nRun dir: ${result.runDir}\nWorkers: ${result.workers.length}\n\n${result.workers.map((worker, index) => `${index + 1}. ${worker.name}: ${worker.outputArtifactPath}`).join("\n")}`,
+						content: `Parallel workers finished.\n\nRun dir: ${result.runDir}\nWorkers: ${result.workers.length}${result.cleanupSummary ? `\nArtifact cleanup: ${result.cleanupSummary}` : ""}\n\n${result.workers.map((worker, index) => `${index + 1}. ${worker.name}: ${worker.outputArtifactPath}`).join("\n")}`,
 						details: result,
 					});
 				} catch (error) {

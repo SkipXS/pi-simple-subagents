@@ -6,7 +6,7 @@ import * as path from "node:path";
 import { loadConfig } from "../extensions/pi-simple-subagents/config.ts";
 import { readReference } from "../extensions/pi-simple-subagents/references.ts";
 import { validateRolePurpose } from "../extensions/pi-simple-subagents/roles.ts";
-import { appendArtifactFile, copyArtifactFile, resolveArtifactPath, resolveRoleSessionFile, resolveRunBaseDir, validateOutputArtifactPath, writeArtifact } from "../extensions/pi-simple-subagents/artifacts.ts";
+import { ACTIVE_RUN_MARKER_FILE, appendArtifactFile, cleanupRunArtifacts, clearRunActive, copyArtifactFile, markRunActive, resolveArtifactPath, resolveRoleSessionFile, resolveRunBaseDir, validateOutputArtifactPath, writeArtifact } from "../extensions/pi-simple-subagents/artifacts.ts";
 import { readOrchestrationState } from "../extensions/pi-simple-subagents/state.ts";
 
 function tempProject(): string {
@@ -29,6 +29,8 @@ test("default config keeps YOLO roles but adds child/reference guardrails", () =
 	assert.equal(config.references.allowOutsideCwd, false);
 	assert.equal(config.references.allowBinary, false);
 	assert.equal("allowOutsideCwd" in config.artifacts, false);
+	assert.equal(config.artifacts.cleanup.maxAgeMs, 0);
+	assert.equal(config.artifacts.cleanup.maxTotalBytes, 0);
 	for (const role of Object.values(config.roles)) assert.equal("tools" in role, false);
 });
 
@@ -41,7 +43,7 @@ test("guardrail config keys are parsed and pre-1.0 legacy keys are not accepted"
 		children: { timeoutMs: 1, maxConcurrentSubagents: 2 },
 		orchestration: { maxWorkerTaskBytes: 2 },
 		references: { maxFileBytes: 1, allowOutsideCwd: true, allowBinary: true },
-		artifacts: { baseDir: ".pi/custom-runs" },
+		artifacts: { baseDir: ".pi/custom-runs", cleanup: { maxAgeMs: 1000, maxTotalBytes: 2048 } },
 	}), "utf8");
 
 	const config = loadConfig(cwd);
@@ -54,6 +56,8 @@ test("guardrail config keys are parsed and pre-1.0 legacy keys are not accepted"
 	assert.equal(config.references.allowOutsideCwd, true);
 	assert.equal(config.references.allowBinary, true);
 	assert.equal(config.artifacts.baseDir, ".pi/custom-runs");
+	assert.equal(config.artifacts.cleanup.maxAgeMs, 1000);
+	assert.equal(config.artifacts.cleanup.maxTotalBytes, 2048);
 
 	fs.writeFileSync(configPath, JSON.stringify({ workflow: {} }), "utf8");
 	assert.throws(() => loadConfig(cwd), /root contains unknown key: workflow/);
@@ -231,6 +235,112 @@ test("artifact base dir rejects symlinks and junctions", (t) => {
 	}
 	const config = loadConfig(cwd);
 	assert.throws(() => resolveRunBaseDir(cwd, config), /symbolic link|junction/);
+});
+
+function makeOwnedRun(baseDir: string, name: string, contentBytes: number, mtimeMs: number): string {
+	const dir = path.join(baseDir, name);
+	fs.mkdirSync(dir, { recursive: true });
+	fs.writeFileSync(path.join(dir, "config-effective.json"), "{}", "utf8");
+	fs.writeFileSync(path.join(dir, "payload.txt"), "x".repeat(contentBytes), "utf8");
+	const date = new Date(mtimeMs);
+	fs.utimesSync(path.join(dir, "config-effective.json"), date, date);
+	fs.utimesSync(path.join(dir, "payload.txt"), date, date);
+	fs.utimesSync(dir, date, date);
+	return dir;
+}
+
+test("artifact cleanup is disabled by default", () => {
+	const baseDir = tempProject();
+	const oldRun = makeOwnedRun(baseDir, "old-run", 10, 1000);
+	const config = loadConfig(tempProject());
+	const result = cleanupRunArtifacts(baseDir, config, undefined, 10_000);
+
+	assert.equal(result, undefined);
+	assert.equal(fs.existsSync(oldRun), true);
+});
+
+test("artifact cleanup deletes old owned runs while preserving current and foreign dirs", () => {
+	const baseDir = tempProject();
+	const oldRun = makeOwnedRun(baseDir, "old-run", 10, 1000);
+	const activeRun = makeOwnedRun(baseDir, "active-run", 10, 1000);
+	const freshRun = makeOwnedRun(baseDir, "fresh-run", 10, 9000);
+	const foreignDir = path.join(baseDir, "foreign-dir");
+	fs.mkdirSync(foreignDir);
+	fs.writeFileSync(path.join(foreignDir, "payload.txt"), "foreign", "utf8");
+	const config = loadConfig(tempProject());
+	config.artifacts.cleanup.maxAgeMs = 5000;
+
+	const result = cleanupRunArtifacts(baseDir, config, activeRun, 10_000);
+
+	assert.equal(result?.deletedRuns, 1);
+	assert.equal(fs.existsSync(oldRun), false);
+	assert.equal(fs.existsSync(activeRun), true);
+	assert.equal(fs.existsSync(freshRun), true);
+	assert.equal(fs.existsSync(foreignDir), true);
+});
+
+test("artifact cleanup enforces total size by deleting oldest non-active runs", () => {
+	const baseDir = tempProject();
+	const oldest = makeOwnedRun(baseDir, "001-oldest", 50, 1000);
+	const middle = makeOwnedRun(baseDir, "002-middle", 50, 2000);
+	const newest = makeOwnedRun(baseDir, "003-newest", 50, 3000);
+	const activeRun = makeOwnedRun(baseDir, "004-active", 100, 4000);
+	const config = loadConfig(tempProject());
+	config.artifacts.cleanup.maxTotalBytes = 175;
+
+	const result = cleanupRunArtifacts(baseDir, config, activeRun, 10_000);
+
+	assert.ok((result?.deletedRuns ?? 0) >= 2);
+	assert.equal(fs.existsSync(oldest), false);
+	assert.equal(fs.existsSync(middle), false);
+	assert.equal(fs.existsSync(newest), true);
+	assert.equal(fs.existsSync(activeRun), true);
+});
+
+test("artifact cleanup preserves other marked active runs during age cleanup", () => {
+	const baseDir = tempProject();
+	const oldInactive = makeOwnedRun(baseDir, "old-inactive", 10, 1000);
+	const otherActive = makeOwnedRun(baseDir, "other-active", 10, 1000);
+	const currentRun = makeOwnedRun(baseDir, "current", 10, 1000);
+	markRunActive(otherActive);
+	const config = loadConfig(tempProject());
+	config.artifacts.cleanup.maxAgeMs = 5000;
+
+	const result = cleanupRunArtifacts(baseDir, config, currentRun, 10_000);
+
+	assert.equal(result?.deletedRuns, 1);
+	assert.equal(fs.existsSync(oldInactive), false);
+	assert.equal(fs.existsSync(otherActive), true);
+	assert.equal(fs.existsSync(path.join(otherActive, ACTIVE_RUN_MARKER_FILE)), true);
+	assert.equal(fs.existsSync(currentRun), true);
+});
+
+test("artifact cleanup preserves other marked active runs during size cleanup", () => {
+	const baseDir = tempProject();
+	const oldInactive = makeOwnedRun(baseDir, "001-old-inactive", 50, 1000);
+	const otherActive = makeOwnedRun(baseDir, "002-other-active", 50, 2000);
+	const newest = makeOwnedRun(baseDir, "003-newest", 50, 3000);
+	const currentRun = makeOwnedRun(baseDir, "004-current", 50, 4000);
+	markRunActive(otherActive);
+	const config = loadConfig(tempProject());
+	config.artifacts.cleanup.maxTotalBytes = 125;
+
+	const result = cleanupRunArtifacts(baseDir, config, currentRun, 10_000);
+
+	assert.ok((result?.deletedRuns ?? 0) >= 1);
+	assert.equal(fs.existsSync(oldInactive), false);
+	assert.equal(fs.existsSync(otherActive), true);
+	assert.equal(fs.existsSync(newest), true);
+	assert.equal(fs.existsSync(currentRun), true);
+});
+
+test("active run markers are created and cleared", () => {
+	const runDir = makeOwnedRun(tempProject(), "run", 1, 1000);
+	const marker = markRunActive(runDir);
+	assert.equal(marker, path.join(runDir, ACTIVE_RUN_MARKER_FILE));
+	assert.equal(fs.existsSync(marker), true);
+	clearRunActive(runDir);
+	assert.equal(fs.existsSync(marker), false);
 });
 
 test("role and purpose combinations are validated", () => {
