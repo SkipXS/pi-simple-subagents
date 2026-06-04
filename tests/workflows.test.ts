@@ -213,6 +213,7 @@ test("package tarball dry-run contains only release files", () => {
 	assert.deepEqual(files, [
 		"LICENSE",
 		"README.md",
+		"docs/reference.md",
 		"examples/config.json",
 		"extensions/pi-simple-subagents/artifacts.ts",
 		"extensions/pi-simple-subagents/child-runner.ts",

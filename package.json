@@ -51,6 +51,7 @@
   "files": [
     "extensions/",
     "examples/",
+    "docs/",
     "README.md",
     "LICENSE"
   ]
