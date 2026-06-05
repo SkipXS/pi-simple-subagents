@@ -86,6 +86,17 @@ function safePathLabel(value: string | undefined, fallback: string): string {
 	return (value ?? fallback).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 48) || fallback;
 }
 
+function compactStatusDescription(value: string, maxLength = 72): string {
+	const normalized = value.trim().replace(/\s+/g, " ");
+	if (normalized.length <= maxLength) return normalized;
+	return `${normalized.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
+}
+
+function promptSummary(text: string, fallback: string, maxLength = 72): string {
+	const firstLine = text.split(/\r?\n/).map((line) => line.trim()).find((line) => line.length > 0) ?? fallback;
+	return compactStatusDescription(firstLine, maxLength);
+}
+
 function forwardChildStatus(onUpdate: WorkflowUpdate | undefined): (status: ChildStatusUpdate) => void {
 	return (status) => onUpdate?.("", status);
 }
@@ -280,7 +291,7 @@ ${planText}
 `);
 		writeArtifact(dir, CONFIG_EFFECTIVE_FILE, JSON.stringify(config, null, 2));
 		const task = formatRunTask(planText, planSource, dir, warnings);
-		const result = await dep.spawnPiRole({ cwd, role: "orchestrator", task, runDir: dir, config, signal, onUpdate, onStatus: forwardChildStatus(onUpdate), statusKey: "subagent:orchestrator", statusLabel: "orchestrator" });
+		const result = await dep.spawnPiRole({ cwd, role: "orchestrator", task, runDir: dir, config, signal, onUpdate, onStatus: forwardChildStatus(onUpdate), statusKey: "subagent:orchestrator", statusLabel: "orchestrator", statusDescription: compactStatusDescription(`coordinate plan: ${planSource}`) });
 		return { result, runDir: dir, planSource, ...cleanupRecord };
 	} finally {
 		clearRunActive(dir);
@@ -321,7 +332,7 @@ export async function runScout(cwd: string, params: ScoutParams, signal?: AbortS
 		writeArtifact(dir, INPUT_SCOUT_TASK_FILE, `Source: ${scoutTask.source}\nExpected output artifact: ${outputFile}${referenceWarningText}\n\n${scoutTask.text}\n`);
 		writeArtifact(dir, CONFIG_EFFECTIVE_FILE, JSON.stringify(config, null, 2));
 		const task = `Scout task source: ${scoutTask.source}\nExpected output artifact: ${outputFile}${referenceWarningText}\nRun directory: ${dir}\nRead input-scout-task.md, gather relevant context, inspect files directly when useful, and write the expected output artifact with write_run_artifact using path ${JSON.stringify(outputFile)}. Do not use absolute paths or the generic write tool for the handoff artifact. Do not implement changes. Do not intentionally modify project/source files; if a command may write generated output, prefer read-only alternatives or explain the risk before running it. Produce a compact handoff for the parent agent.`;
-		const result = await dep.spawnPiRole({ cwd, role: "scout", task, runDir: dir, config, signal, onUpdate: (text) => onUpdate?.(`scout: ${text}`), onStatus: forwardChildStatus(onUpdate), statusKey: "subagent:scout", statusLabel: "scout" });
+		const result = await dep.spawnPiRole({ cwd, role: "scout", task, runDir: dir, config, signal, onUpdate: (text) => onUpdate?.(`scout: ${text}`), onStatus: forwardChildStatus(onUpdate), statusKey: "subagent:scout", statusLabel: "scout", statusDescription: promptSummary(scoutTask.text, `scout ${scoutTask.source}`) });
 		if (result.exitCode !== 0) throwChildRunError("scout failed", result);
 		requireExpectedArtifact(dep, dir, outputFile, result, "scout");
 		return { runDir: dir, taskSource: scoutTask.source, result: { ...result, outputPath: outputArtifactPath }, outputArtifactPath, ...cleanupRecord };
@@ -371,7 +382,7 @@ async function runWorkerInDir(cwd: string, dir: string, params: WorkerParams | W
 	writeArtifact(dir, INPUT_WORKER_TASK_FILE, `Source: ${workerTask.source}\nName: ${workerTask.name}\nPurpose: ${workerTask.purpose}\nExpected output artifact: ${workerTask.outputFile}${referenceWarningText}\n\n${workerTask.text}\n`);
 	writeArtifact(dir, CONFIG_EFFECTIVE_FILE, JSON.stringify(config, null, 2));
 	const task = `Worker task source: ${workerTask.source}\nName: ${workerTask.name}\nPurpose: ${workerTask.purpose}\nExpected output artifact: ${workerTask.outputFile}${referenceWarningText}\nRun directory: ${dir}\nRead input-worker-task.md, perform the requested work, run useful checks, and write the expected output artifact with write_run_artifact using path ${JSON.stringify(workerTask.outputFile)}. Do not use absolute paths or the generic write tool for the handoff artifact. If running as part of a parallel worker batch, stay within the assigned task and avoid editing files likely owned by sibling workers. If a product, architecture, or scope decision is missing, stop and report it instead of guessing.`;
-	const result = await dep.spawnPiRole({ cwd, role: "worker", task, runDir: dir, config, signal, onUpdate: (text) => onUpdate?.(`${progressLabel}: ${text}`), onStatus: forwardChildStatus(onUpdate), statusKey: `subagent:${safePathLabel(progressLabel, "worker")}`, statusLabel: progressLabel });
+	const result = await dep.spawnPiRole({ cwd, role: "worker", task, runDir: dir, config, signal, onUpdate: (text) => onUpdate?.(`${progressLabel}: ${text}`), onStatus: forwardChildStatus(onUpdate), statusKey: `subagent:${safePathLabel(progressLabel, "worker")}`, statusLabel: progressLabel, statusDescription: compactStatusDescription(`${workerTask.purpose}: ${promptSummary(workerTask.text, workerTask.source, 56)}`) });
 	if (result.exitCode === 0) requireExpectedArtifact(dep, dir, workerTask.outputFile, result, `worker ${workerTask.name}`);
 	return { name: workerTask.name, runDir: dir, taskSource: workerTask.source, result: { ...result, outputPath: result.exitCode === 0 ? workerTask.outputArtifactPath : result.outputPath }, outputArtifactPath: workerTask.outputArtifactPath, purpose: workerTask.purpose };
 }
@@ -483,6 +494,7 @@ export async function runReviewers(cwd: string, params: ReviewersParams, signal?
 			onStatus: forwardChildStatus(onUpdate),
 			statusKey: "subagent:scout",
 			statusLabel: "scout",
+			statusDescription: compactStatusDescription(`review scout: ${target.source}`),
 			systemPrompt: reviewTargetSystemPrompt("scout", dir, config),
 		});
 		if (scout.exitCode !== 0) throwChildRunError("review-target scout failed", scout);
@@ -516,6 +528,7 @@ export async function runReviewers(cwd: string, params: ReviewersParams, signal?
 				onStatus: forwardChildStatus(onUpdate),
 				statusKey: `subagent:reviewer-${index + 1}`,
 				statusLabel: `reviewer-${index + 1}`,
+				statusDescription: compactStatusDescription(angle),
 				systemPrompt: reviewTargetSystemPrompt("reviewer", dir, config),
 			});
 			if (result.exitCode !== 0) throw new Error(childResultText(`review-target reviewer ${index + 1} failed`, result));
@@ -548,6 +561,7 @@ export async function runReviewers(cwd: string, params: ReviewersParams, signal?
 		onStatus: forwardChildStatus(onUpdate),
 		statusKey: "subagent:synthesis",
 		statusLabel: "synthesis",
+		statusDescription: compactStatusDescription(`synthesize ${reviewRecords.length} review artifact${reviewRecords.length === 1 ? "" : "s"}`),
 		systemPrompt: reviewTargetSystemPrompt("synthesis", dir, config),
 	});
 	if (synthesis.exitCode !== 0) throwChildRunError("review-target synthesis failed", synthesis);

@@ -430,8 +430,12 @@ Interactive Pi shows child-agent progress in a stable multi-line block. Slash co
 
 ```text
 Subagents: ⠋ working
-- ✓ worker     │ ↑1k ↓2k R3k W4.0k $0.123 3.7%/272k (auto) - gpt-5.5 • medium │ finished
-- • reviewer-1 │ ↑867 ↓103 R31k $0.023 11.8%/272k (auto) - gpt-5.5 • low     │ read references.ts
+✓ worker     │ implementation: fix parser regression       │ finished
+            │ gpt-5.5 • medium │ ↑1k ↓2k R3k W4.0k $0.123 3.7%/272k (auto)
+• reviewer-1 │ packaging/installability for npm extension │ read package.json
+            │ gpt-5.5 • low    │ ↑867 ↓103 R31k $0.023 11.8%/272k (auto)
 ```
+
+Each subagent shows two lines: role label, short prompt/assignment description, and current activity first; model/thinking and usage/context metrics second. The description is populated for orchestrator, scout, worker, parallel worker, reviewer, and synthesis roles so review and delegation fanouts are less opaque.
 
 The context percentage is estimated from the latest child response token total and known model-family context windows; child processes do not currently expose Pi's exact parent footer context calculation.

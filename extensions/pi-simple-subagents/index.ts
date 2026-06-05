@@ -41,7 +41,7 @@ type ToolProgressOnUpdate = ((update: { content: Array<{ type: "text"; text: str
 type WidgetSetter = (content: string[] | undefined) => void;
 
 interface SubagentProgressSnapshot {
-	statuses: Array<{ key: string; text: string }>;
+	statuses: Array<{ key: string; text: string; description?: string }>;
 	current?: string;
 }
 
@@ -150,6 +150,11 @@ function childSummary(prefix: string, fields: Array<[string, string | number | u
 	return `${lines.join("\n")}\n\n${outputLocationNote(options.kind ?? "child")}`;
 }
 
+function roleTaskStatusDescription(purpose: string, task: string): string {
+	const firstLine = task.split(/\r?\n/).map((line) => line.trim()).find((line) => line.length > 0) ?? "delegated task";
+	return trimStatusField(`${purpose}: ${firstLine}`, 72);
+}
+
 function requireExpectedRunArtifact(runDir: string, outputFile: string, result: { outputPath: string; transcriptPath: string }, label: string): string {
 	const target = validateOutputArtifactPath(runDir, outputFile);
 	if (!fs.existsSync(target)) {
@@ -172,30 +177,55 @@ function assertKnownKeys(record: Record<string, unknown>, allowedKeys: readonly 
 	if (unknown.length > 0) throw new Error(`${label} has unknown field${unknown.length === 1 ? "" : "s"}: ${unknown.join(", ")}`);
 }
 
+function trimStatusField(value: string, maxLength: number): string {
+	const normalized = value.trim().replace(/\s+/g, " ");
+	if (normalized.length <= maxLength) return normalized;
+	return `${normalized.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
+}
+
+function splitStatusDetails(status: string): { usage: string; model: string } {
+	const trimmed = status.trim();
+	if (!trimmed) return { usage: "usage pending", model: "model pending" };
+	const separator = trimmed.lastIndexOf(" - ");
+	if (separator >= 0) {
+		return {
+			usage: trimmed.slice(0, separator).trim() || "usage pending",
+			model: trimmed.slice(separator + " - ".length).trim() || "model pending",
+		};
+	}
+	if (trimmed.startsWith("- ")) return { usage: "usage pending", model: trimmed.slice(2).trim() || "model pending" };
+	return { usage: trimmed, model: "model pending" };
+}
+
 function formatSubagentProgress(snapshot: SubagentProgressSnapshot): string {
 	if (snapshot.statuses.length === 0) return ["Subagents: ⠋ working", "- starting"].join("\n");
-	const parsed = snapshot.statuses.map((status) => ({ key: status.key, ...parseStatusLine(status.text, status.key) }));
+	const parsed = snapshot.statuses.map((status) => ({ key: status.key, description: status.description, ...parseStatusLine(status.text, status.key) }));
 	const active = parsed.find((status) => !isTerminalStatusAction(status.action));
 	const workingIndicator = active?.spinner ?? (parsed.length > 0 && parsed.every((status) => isTerminalStatusAction(status.action)) ? "✓" : "⠋");
 	const header = `Subagents: ${workingIndicator} ${active ? "working" : "done"}`;
 	const roleWidth = Math.max(...parsed.map((status) => status.label.length));
-	const statusWidth = Math.max(0, ...parsed.map((status) => status.status.length));
-	const lines = parsed.map((status) => {
+	const descriptionWidth = Math.max(...parsed.map((status) => trimStatusField(status.description ?? "—", 56).length));
+	const lines = parsed.flatMap((status) => {
 		const marker = status.action === "finished" ? "✓" : isTerminalStatusAction(status.action) ? "!" : "•";
 		const role = status.label.padEnd(roleWidth);
-		const statusText = status.status ? `${status.status.padEnd(statusWidth)} │ ${status.action}` : status.action;
-		return `- ${marker} ${role} │ ${statusText}`;
+		const description = trimStatusField(status.description ?? "—", 56).padEnd(descriptionWidth);
+		const details = splitStatusDetails(status.status);
+		const detailIndent = " ".repeat(roleWidth + 4);
+		return [
+			`${marker} ${role} │ ${description} │ ${status.action}`,
+			` ${detailIndent}│ ${details.model} │ ${details.usage}`,
+		];
 	});
 	return [header, ...lines].join("\n");
 }
 
 function createSubagentProgress(options: { onToolUpdate?: ToolProgressOnUpdate; setWidget?: WidgetSetter }) {
-	const statuses = new Map<string, string>();
+	const statuses = new Map<string, { text: string; description?: string }>();
 	let current: string | undefined;
 	let lastRendered = "";
 
 	const snapshot = (): SubagentProgressSnapshot => ({
-		statuses: [...statuses.entries()].map(([key, text]) => ({ key, text })),
+		statuses: [...statuses.entries()].map(([key, status]) => ({ key, text: status.text, ...(status.description ? { description: status.description } : {}) })),
 		...(current ? { current } : {}),
 	});
 	const publish = () => {
@@ -216,18 +246,20 @@ function createSubagentProgress(options: { onToolUpdate?: ToolProgressOnUpdate; 
 		},
 		status(status: ChildStatusUpdate) {
 			const existing = statuses.get(status.key);
+			const description = status.description?.trim() || existing?.description;
 			if (status.text === undefined) {
 				if (!existing) return;
-				const finished = finishStatusText(existing, status.key);
-				if (finished === existing) return;
-				statuses.set(status.key, finished);
+				const finished = finishStatusText(existing.text, status.key);
+				if (finished === existing.text && description === existing.description) return;
+				statuses.set(status.key, { text: finished, ...(description ? { description } : {}) });
 				current = finished;
 				publish();
 				return;
 			}
 			const text = status.text.trim();
-			if (!text || text === existing) return;
-			statuses.set(status.key, text);
+			if (!text) return;
+			if (text === existing?.text && description === existing.description) return;
+			statuses.set(status.key, { text, ...(description ? { description } : {}) });
 			current = text;
 			publish();
 		},
@@ -402,6 +434,7 @@ Write the expected output artifact with write_run_artifact using path ${JSON.str
 					onStatus: (status) => progress.status(status),
 					statusKey: `subagent:${params.role}${params.round ? `-${params.round}` : ""}`,
 					statusLabel: `${params.role}${params.round ? `-${params.round}` : ""}`,
+					statusDescription: roleTaskStatusDescription(params.purpose, taskInput),
 				});
 				const succeeded = result.exitCode === 0;
 				if (result.exitCode !== 0) {

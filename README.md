@@ -71,10 +71,20 @@ npm run check
 
 ### 2. Install into Pi
 
+Unix shells:
+
 ```bash
 pi install /absolute/path/to/pi-simple-subagents
 mkdir -p .pi/pi-simple-subagents
 cp /absolute/path/to/pi-simple-subagents/examples/config.json .pi/pi-simple-subagents/config.json
+```
+
+PowerShell:
+
+```powershell
+pi install C:\absolute\path\to\pi-simple-subagents
+New-Item -ItemType Directory -Force .pi/pi-simple-subagents
+Copy-Item C:\absolute\path\to\pi-simple-subagents\examples\config.json .pi/pi-simple-subagents/config.json
 ```
 
 Reload Pi after install or config changes:

@@ -45,6 +45,7 @@ function taskkillInvocation(): { command: string; argsPrefix: string[] } {
 export interface ChildStatusUpdate {
 	key: string;
 	text: string | undefined;
+	description?: string;
 }
 
 export interface ChildRunResult {
@@ -120,7 +121,9 @@ function nestedSubagentStatuses(value: unknown): ChildStatusUpdate[] {
 	return statuses.flatMap((entry) => {
 		if (!entry || typeof entry !== "object") return [];
 		const status = entry as Record<string, unknown>;
-		return typeof status.key === "string" && typeof status.text === "string" ? [{ key: status.key, text: status.text }] : [];
+		return typeof status.key === "string" && typeof status.text === "string"
+			? [{ key: status.key, text: status.text, ...(typeof status.description === "string" && status.description.trim() ? { description: status.description.trim() } : {}) }]
+			: [];
 	});
 }
 
@@ -327,6 +330,7 @@ export async function spawnPiRole(input: {
 	onStatus?: (status: ChildStatusUpdate) => void;
 	statusKey?: string;
 	statusLabel?: string;
+	statusDescription?: string;
 	systemPrompt?: string;
 }): Promise<ChildRunResult> {
 	const roleConfig = input.config.roles[input.role];
@@ -429,6 +433,7 @@ export async function spawnPiRole(input: {
 		const usageTotals: UsageTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, latestTotalTokens: 0 };
 		const statusKey = input.statusKey ?? `subagent:${input.role}`;
 		const statusLabel = input.statusLabel ?? input.role;
+		const statusDescription = input.statusDescription?.trim() || undefined;
 		let statusFrame = 0;
 		let statusAction = "starting";
 		let pendingStatusAction = statusAction;
@@ -466,7 +471,7 @@ export async function spawnPiRole(input: {
 			const text = formatStatusText(options.action);
 			if (!options.force && text === lastStatusText) return;
 			lastStatusText = text;
-			input.onStatus({ key: statusKey, text });
+			input.onStatus({ key: statusKey, text, ...(statusDescription ? { description: statusDescription } : {}) });
 		};
 		const setStatusAction = (action: string, options: { force?: boolean } = {}) => {
 			pendingStatusAction = action;
@@ -612,7 +617,7 @@ export async function spawnPiRole(input: {
 				: artifactErrorMessage || stdoutLineTooLarge ? "failed"
 					: aborted ? "aborted"
 						: effectiveExitCode !== 0 ? "failed" : "finished";
-			input.onStatus?.({ key: statusKey, text: formatStatusText(finalStatus) });
+			input.onStatus?.({ key: statusKey, text: formatStatusText(finalStatus), ...(statusDescription ? { description: statusDescription } : {}) });
 			const truncatedOutput = truncateForTool(fullOutput, MAX_TOOL_OUTPUT_BYTES);
 			const truncatedStderr = truncateForTool(stderr, MAX_STDERR_BYTES);
 			resolve({
