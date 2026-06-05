@@ -20,7 +20,6 @@ import {
 	OrchestratorParams,
 	WorkersParallelParams,
 	ReviewersParams,
-	ImproveLoopParams,
 	RoleRunParams,
 	ScoutParams,
 	WorkerParams,
@@ -30,14 +29,13 @@ import {
 	type OrchestratorParams as OrchestratorParamsType,
 	type WorkersParallelParams as WorkersParallelParamsType,
 	type ReviewersParams as ReviewersParamsType,
-	type ImproveLoopParams as ImproveLoopParamsType,
 	type RoleRunParams as RoleRunParamsType,
 	type ScoutParams as ScoutParamsType,
 	type WorkerParams as WorkerParamsType,
 } from "./schemas.ts";
 import { DELEGABLE_ROLE_NAMES } from "./role-registry.ts";
 import { readOrchestrationState, writeOrchestrationState } from "./state.ts";
-import { assertWorkerTaskWithinBudget, parseImproveLoopCommand, parseReviewTargetCommand, runImproveLoop, runOrchestrator, runReviewers, runScout, runWorker, runWorkersParallel } from "./workflows.ts";
+import { assertWorkerTaskWithinBudget, parseReviewTargetCommand, runOrchestrator, runReviewers, runScout, runWorker, runWorkersParallel } from "./workflows.ts";
 
 type ToolProgressOnUpdate = ((update: { content: Array<{ type: "text"; text: string }>; details: { subagentProgress: SubagentProgressSnapshot } }) => void) | undefined;
 type WidgetSetter = (content: string[] | undefined) => void;
@@ -48,8 +46,9 @@ interface SubagentProgressSnapshot {
 }
 
 const RUN_ORCHESTRATOR_GUIDELINES = [
-	"Use run_orchestrator for plan-driven implementation work that benefits from scout/worker/reviewer coordination and review/fix loops.",
-	"Do not use run_orchestrator for review-only work; use run_reviewers instead.",
+	"Use run_orchestrator for plan-driven implementation or review/fix workflows that need scout/worker/reviewer coordination.",
+	"The orchestrator coordinates review/fix loops; reviewers perform the review, and the orchestrator routes evidence-backed accepted fixes to worker.",
+	"Do not use run_orchestrator for review-only work with no intended fixes; use run_reviewers instead.",
 ];
 
 const RUN_REVIEWERS_GUIDELINES = [
@@ -58,13 +57,6 @@ const RUN_REVIEWERS_GUIDELINES = [
 	"Name reviewer angles concretely, e.g. 'runtime correctness for parser changes' or 'packaging/installability for npm extension'. Avoid broad duplicate reviewers.",
 	"Pass a prior scout-report.md or other concise background as run_reviewers.extraContext when available, but reviewers must verify it against current files.",
 	"Keep run_reviewers.includeScout enabled unless the user explicitly asks to skip the review-specific scout.",
-];
-
-const RUN_IMPROVE_LOOP_GUIDELINES = [
-	"Use run_improve_loop for a deterministic review-only improvement loop with structured findings and early stop decisions.",
-	"Choose the reviewers array yourself based on the target and user focus: use the smallest number of distinct reviewer angles needed for useful coverage, up to 8.",
-	"Do not request autoFix=true; MVP improve-loop does not implement worker auto-fixes or add new roles.",
-	"Default maxRounds is 5 and minSeverity is medium; the loop stops early for clean, optional-only, or repeated/no-progress findings.",
 ];
 
 const RUN_SCOUT_GUIDELINES = [
@@ -263,8 +255,8 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 		pi.registerTool({
 			name: "run_orchestrator",
 			label: "Run Orchestrator",
-			description: "Start the simple orchestrator workflow for a plan or @plan-file. The orchestrator coordinates scout, worker, reviewer, loops fixes, and runs validation only after implementation/review.",
-			promptSnippet: "Run the configured orchestrator workflow for a plan or @plan-file",
+			description: "Start the simple orchestrator workflow for a plan or review/fix instruction. The orchestrator coordinates scout, worker, reviewers, accepted fixes, and validation; reviewers perform the review.",
+			promptSnippet: "Run the configured orchestrator workflow for a plan or review/fix instruction",
 			promptGuidelines: RUN_ORCHESTRATOR_GUIDELINES,
 			parameters: OrchestratorParams,
 			async execute(_id, params: OrchestratorParamsType, signal, onUpdate, ctx) {
@@ -362,26 +354,6 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 				};
 			},
 		});
-		pi.registerTool({
-			name: "run_improve_loop",
-			label: "Run Improve Loop",
-			description: "Run the MVP controlled improvement loop in review-only mode. Repeats reviewer fanout up to maxRounds (default 5), writes structured findings artifacts, and stops deterministically for clean/optional/repeated/max-round outcomes. The caller/model should choose reviewer angles/count for the target; if omitted, one adaptive general reviewer is used. autoFix=true is unsupported.",
-			promptSnippet: "Run a deterministic review-only improvement loop for a target, plan, or reference",
-			promptGuidelines: RUN_IMPROVE_LOOP_GUIDELINES,
-			parameters: ImproveLoopParams,
-			async execute(_id, params: ImproveLoopParamsType, signal, onUpdate, ctx) {
-				const progress = createSubagentProgress({ onToolUpdate: onUpdate });
-				const result = await runImproveLoop(ctx.cwd, params, signal, (text, status) => {
-					if (text) progress.text(text);
-					if (status) progress.status(status);
-				});
-				return {
-					content: [{ type: "text", text: childSummary("Improve loop finished.", [["Run dir", result.runDir], ["Target source", result.targetSource], ["Stop reason", result.stopReason], ["Rounds", result.rounds.length], ["Final summary", result.finalSummaryPath], ["Artifact cleanup", result.cleanupSummary]], fs.readFileSync(result.finalSummaryPath, "utf8"), { kind: "improve-loop", includeOutput: params.includeOutput }) }],
-					details: result,
-				};
-			},
-		});
-
 	}
 
 	if (role === "orchestrator" && runDir) {
@@ -528,7 +500,7 @@ Write the expected output artifact with write_run_artifact using path ${JSON.str
 		const runOrchestrateCommand = async (args: string, ctx: ExtensionCommandContext) => {
 			const plan = args.trim();
 			if (!plan) {
-				ctx.ui.notify("Usage: /orchestrate @path/to/plan.md or /orchestrate <plan>", "warning");
+				ctx.ui.notify("Usage: /orchestrate @path/to/plan.md, /orchestrate <plan>, or /orchestrate <review/fix instruction>", "warning");
 				return;
 			}
 			ctx.ui.notify("Starting orchestrator workflow...", "info");
@@ -576,42 +548,6 @@ Write the expected output artifact with write_run_artifact using path ${JSON.str
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				ctx.ui.notify(`Scout failed: ${message.split("\n")[0]}`, "error");
-				throw error;
-			} finally {
-				progress.clear();
-			}
-		};
-
-		const runImproveLoopCommand = async (args: string, ctx: ExtensionCommandContext) => {
-			const input = args.trim();
-			if (!input) {
-				ctx.ui.notify("Usage: /improve-loop [--max-rounds N] [--min-severity blocker|high|medium|low|optional] [--reviewer <angle>] [--context <text-or-@file>] [--no-scout] @path-or-dir [focus/instructions]", "warning");
-				return;
-			}
-			let params: ImproveLoopParamsType;
-			try {
-				params = parseImproveLoopCommand(input);
-			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				ctx.ui.notify(message, "error");
-				return;
-			}
-			ctx.ui.notify("Starting improve loop (review-only)...", "info");
-			const progress = createSubagentProgress({ setWidget: (content) => ctx.ui.setWidget("pi-simple-subagents:improve-loop", content, { placement: "belowEditor" }) });
-			try {
-				const result = await runImproveLoop(ctx.cwd, params, ctx.signal, (text, status) => {
-					if (text) progress.text(text);
-					if (status) progress.status(status);
-				});
-				pi.sendMessage({
-					customType: "pi-simple-subagents-improve-loop-result",
-					display: true,
-					content: childSummary("Improve loop finished.", [["Run dir", result.runDir], ["Stop reason", result.stopReason], ["Rounds", result.rounds.length], ["Final summary", result.finalSummaryPath], ["Artifact cleanup", result.cleanupSummary]], fs.readFileSync(result.finalSummaryPath, "utf8"), { kind: "improve-loop" }),
-					details: result,
-				});
-			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				ctx.ui.notify(`Improve loop failed: ${message.split("\n")[0]}`, "error");
 				throw error;
 			} finally {
 				progress.clear();
@@ -675,7 +611,7 @@ Write the expected output artifact with write_run_artifact using path ${JSON.str
 		};
 
 		pi.registerCommand("orchestrate", {
-			description: "Run the simple orchestrator workflow for a plan or @plan-file",
+			description: "Run the simple orchestrator workflow for a plan or review/fix instruction",
 			handler: runOrchestrateCommand,
 		});
 
@@ -687,11 +623,6 @@ Write the expected output artifact with write_run_artifact using path ${JSON.str
 		pi.registerCommand("work", {
 			description: "Run a standalone worker subagent. Usage: @task-file, @directory, or inline implementation/fix/validation instructions",
 			handler: runWorkCommand,
-		});
-
-		pi.registerCommand("improve-loop", {
-			description: "Run a deterministic review-only improvement loop. Usage: [--max-rounds N] [--min-severity medium] [--reviewer <angle>] @target [focus]",
-			handler: runImproveLoopCommand,
 		});
 
 		pi.registerCommand("work-parallel", {

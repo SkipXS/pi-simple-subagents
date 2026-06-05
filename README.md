@@ -13,7 +13,7 @@ Instead of one long agent doing everything, this extension makes the workflow vi
 
 ## Safety model: review-only is cooperative
 
-`/review`, `/improve-loop`, scout, reviewer, and synthesis roles are intentionally **not** implemented as a hard read-only sandbox. They are prompted to keep review workflows inspection-only and to write handoff artifacts via `write_run_artifact`, but the extension does not block the normal Pi tool surface. This keeps diagnostics, tests, benchmarks, and repository-specific workflows available to reviewers.
+`/review`, scout, reviewer, and synthesis roles are intentionally **not** implemented as a hard read-only sandbox. They are prompted to keep review workflows inspection-only and to write handoff artifacts via `write_run_artifact`, but the extension does not block the normal Pi tool surface. This keeps diagnostics, tests, benchmarks, and repository-specific workflows available to reviewers.
 
 Child Pi processes also inherit the parent process environment by design. That preserves normal Pi/model authentication and developer tooling behavior, but it means environment variables such as API keys, cloud credentials, GitHub tokens, and CI secrets are available to child agents. Pi subscription/OAuth credentials and API keys stored in `~/.pi/agent/auth.json` remain available as long as the child runs as the same user with the same home/config directory.
 
@@ -37,10 +37,6 @@ flowchart LR
   RF --> RR[reviewer fanout]
   RR --> SYN[synthesis]
 
-  Root -->|/improve-loop| IL[controlled review loop]
-  IL --> ILR[review rounds]
-  ILR --> ILD[deterministic stop decision]
-
   Root -->|/scout| S[scout]
   Root -->|/work| W[worker]
   Root -->|/work-parallel| WP[workers 1..N]
@@ -51,7 +47,6 @@ flowchart LR
   OF --> Artifacts
   RS --> Artifacts
   SYN --> Artifacts
-  ILD --> Artifacts
   S --> Artifacts
   W --> Artifacts
   WP --> Artifacts
@@ -59,12 +54,11 @@ flowchart LR
 
 | Command | Tool | Best for |
 | --- | --- | --- |
-| `/orchestrate <plan-or-@file>` | `run_orchestrator` | Plan-driven work with scout → worker → review/fix loops. |
+| `/orchestrate <plan-or-review/fix-instruction>` | `run_orchestrator` | Plan-driven work or reviewer → accepted-fix → validation loops. |
 | `/scout <task-or-@target>` | `run_scout` | Context gathering before risky, broad, or ambiguous work. |
 | `/work <task-or-@file>` | `run_worker` | One focused implementation, fix, or validation task. |
 | `/work-parallel <json>` | `run_workers_parallel` | 2-8 independent worker tasks. |
 | `/review [options] <target> [focus]` | `run_reviewers` | One review-only fanout for an existing file, directory, or diff. |
-| `/improve-loop [options] <target> [focus]` | `run_improve_loop` | Deterministic review-only improvement loop with structured findings and early stop. |
 
 ## Quickstart
 
@@ -127,12 +121,10 @@ pi install git:https://github.com/SkipXS/pi-simple-subagents
 
 ```mermaid
 flowchart TD
-  A[Need help with a task?] --> B{Already have a plan?}
-  B -->|yes| O[/orchestrate/]
+  A[Need help with a task?] --> B{Need orchestration?}
+  B -->|plan or review/fix loop| O[/orchestrate/]
   B -->|no| C{Only reviewing existing target?}
-  C -->|yes| L{Need deterministic repeated review rounds?}
-  L -->|yes| I[/improve-loop/]
-  L -->|no| R[/review/]
+  C -->|yes: no fixes| R[/review/]
   C -->|no| D{Need context first?}
   D -->|yes: broad, risky, unclear| S[/scout/]
   D -->|no| E{Multiple independent tasks?}
@@ -146,10 +138,10 @@ For review workflows, choose reviewer angles/count for the target. Use one focus
 
 ```text
 /orchestrate @docs/plan.md
+/orchestrate Review @src/parser.ts, fix accepted findings, validate, and review again until good enough
 /scout Map parser behavior, affected files, risks, and next steps
 /work Fix the failing parser test and run the focused test suite
 /review --reviewer "runtime correctness" --reviewer "packaging UX" @extensions/pi-simple-subagents
-/improve-loop --max-rounds 3 --min-severity high --reviewer "runtime correctness" @extensions/pi-simple-subagents
 ```
 
 Parallel workers accept JSON only:
@@ -159,7 +151,7 @@ Parallel workers accept JSON only:
 /work-parallel [{"name":"docs","task":"Update README usage examples"},{"name":"tests","task":"Add parser regression tests"}]
 ```
 
-`/improve-loop` is review-only: it never runs worker auto-fixes. Defaults are `maxRounds=5`, `minSeverity=medium`, `autoFix=false`, evidence-required reviewer synthesis, and early stop on clean review, optional-only/non-actionable findings, repeated/no-progress findings, review failure, or the max-round cap. Evidence-less blocker/high/medium findings are preserved but do not count as actionable for continuation/repetition decisions. It writes `improve-loop.md`, `review-loop-round-N.md`, and `findings-round-N.json`.
+Review/fix loops are intentionally orchestrator-steered: use `/orchestrate` for work that should run independent reviewers, hand evidence-backed accepted fixes to worker, validate, and review again. The orchestrator does not review itself; it coordinates reviewers/workers and decides from reviewer evidence whether an item is worth fixing now or merely optional/suboptimal LLM churn.
 
 See [Command reference](docs/reference.md#command-reference) for full slash-command options.
 
@@ -174,7 +166,7 @@ sequenceDiagram
   participant R as reviewer
   participant A as artifacts
 
-  U->>O: /orchestrate plan
+  U->>O: /orchestrate plan or review/fix instruction
   O->>A: input-plan.md + orchestration.md
 
   opt context needed
@@ -242,15 +234,6 @@ Typical layouts:
   final-summary.md
   review-failure-summary.md   # only on fanout failure
   logs/ outputs/ prompts/ sessions/ tasks/
-
-# improve loop
-.pi/agent-runs/<run-id>/
-  input-target.md
-  improve-loop.md
-  review-loop-round-N.md
-  findings-round-N.json
-  logs/ outputs/ prompts/ sessions/ tasks/
-  # each round also has a nested review run dir with review-*.md/final-summary.md
 ```
 
 More details: [Run artifacts](docs/reference.md#run-artifacts).
