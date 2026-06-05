@@ -371,17 +371,21 @@ function formatSubagentProgress(snapshot: SubagentProgressSnapshot): string {
 	const workingIndicator = active?.spinner ?? (parsed.length > 0 && parsed.every((status) => isTerminalStatusAction(status.action)) ? "✓" : "⠋");
 	const header = `Subagents: ${workingIndicator} ${active ? "working" : "done"}`;
 	const roleWidth = Math.max(...parsed.map((status) => status.label.length));
-	const descriptionWidth = Math.max(...parsed.map((status) => trimStatusField(status.description ?? "—", 56).length));
-	const lines = parsed.flatMap((status) => {
+	const parsedDetails = parsed.map((status) => splitStatusDetails(status.status));
+	const detailColumnWidth = Math.max(
+		...parsed.map((status) => trimStatusField(status.description ?? "—", 56).length),
+		...parsedDetails.map((details, index) => parsed[index].status ? details.usage.length : 0),
+	);
+	const lines = parsed.flatMap((status, index) => {
 		const marker = status.action === "finished" ? "✓" : isTerminalStatusAction(status.action) ? "!" : "•";
 		const role = status.label.padEnd(roleWidth);
-		const description = trimStatusField(status.description ?? "—", 56).padEnd(descriptionWidth);
-		const details = splitStatusDetails(status.status);
+		const description = trimStatusField(status.description ?? "—", 56).padEnd(detailColumnWidth);
+		const details = parsedDetails[index];
 		const detailIndent = " ".repeat(roleWidth + 3);
 		return status.status
 			? [
 				`${marker} ${role} │ ${description} │ ${status.action}`,
-				`${detailIndent}│ ${details.usage.padEnd(descriptionWidth)} │ ${details.model}`,
+				`${detailIndent}│ ${details.usage.padEnd(detailColumnWidth)} │ ${details.model}`,
 			]
 			: [`${marker} ${role} │ ${description} │ ${status.action}`];
 	});
