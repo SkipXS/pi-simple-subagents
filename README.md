@@ -172,7 +172,7 @@ sequenceDiagram
   participant U as User/model
   participant O as orchestrator
   participant S as scout
-  participant W as worker
+  participant W as worker-N
   participant R as reviewer
   participant A as artifacts
 
@@ -185,19 +185,19 @@ sequenceDiagram
   end
 
   loop work packages and useful fix rounds
-    O->>W: run_role_agent worker
-    W->>A: worker.md / accepted-fixes-round-N.md / validation.md
+    O->>W: run_role_agent worker (new workerId per package)
+    W->>A: worker-N.md / accepted-fixes-round-N.md / validation.md
     O->>R: run_role_agent reviewer
     R->>A: review-round-N.md
     alt fixes worth doing now
-      O->>W: accepted fixes
+      O->>W: accepted fixes (same workerId)
     else clean enough
       O->>A: mark_review_clean + final-summary.md
     end
   end
 ```
 
-The orchestrator is prompted to split large milestones into small worker packages. A worker handoff should contain one deliverable, likely files, acceptance criteria, non-goals, and validation.
+The orchestrator is prompted to split large milestones into small worker packages and review after each implementation package by default. Each new implementation package gets its own worker session (`worker-1`, `worker-2`, ...), and accepted fixes after review reuse that package's `workerId`. If the orchestrator batches reviews, the tool emits a soft warning and the rationale should be recorded in `orchestration.md`. A worker handoff should contain one deliverable, likely files, acceptance criteria, non-goals, and validation.
 
 ## Run artifacts
 

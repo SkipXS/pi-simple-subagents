@@ -7,6 +7,8 @@ export interface OrchestrationState {
 	reviewRuns: number;
 	reviewRunsSinceLatestWorker: number;
 	latestWorkerRunReviewedClean: boolean;
+	latestWorkerId?: string;
+	nextWorkerSequence: number;
 	updatedAt: string;
 }
 
@@ -33,12 +35,16 @@ export function readOrchestrationState(runDir: string): OrchestrationState | und
 		if (parsed.latestWorkerRunReviewedClean !== undefined && typeof parsed.latestWorkerRunReviewedClean !== "boolean") {
 			throw new Error("latestWorkerRunReviewedClean must be a boolean");
 		}
+		if (parsed.latestWorkerId !== undefined && typeof parsed.latestWorkerId !== "string") throw new Error("latestWorkerId must be a string");
 		if (parsed.updatedAt !== undefined && typeof parsed.updatedAt !== "string") throw new Error("updatedAt must be a string");
+		const workerRuns = nonNegativeInteger(parsed.workerRuns ?? 0, "workerRuns");
 		return {
-			workerRuns: nonNegativeInteger(parsed.workerRuns ?? 0, "workerRuns"),
+			workerRuns,
 			reviewRuns: nonNegativeInteger(parsed.reviewRuns ?? 0, "reviewRuns"),
 			reviewRunsSinceLatestWorker: nonNegativeInteger(parsed.reviewRunsSinceLatestWorker ?? 0, "reviewRunsSinceLatestWorker"),
 			latestWorkerRunReviewedClean: parsed.latestWorkerRunReviewedClean === true,
+			...(typeof parsed.latestWorkerId === "string" && parsed.latestWorkerId.trim() ? { latestWorkerId: parsed.latestWorkerId } : {}),
+			nextWorkerSequence: nonNegativeInteger(parsed.nextWorkerSequence ?? workerRuns + 1, "nextWorkerSequence"),
 			updatedAt: parsed.updatedAt ?? new Date(0).toISOString(),
 		};
 	} catch (error) {

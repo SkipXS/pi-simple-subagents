@@ -165,11 +165,11 @@ Tool results are summary-first by default. Set `includeOutput: true` for inline 
 | --- | --- | --- | --- |
 | `orchestrator` | workflow control | one persistent session per run | `orchestration.md`, `final-summary.md` |
 | `scout` | context | fresh session per scout call | `scout.md`, `scout-report.md` |
-| `worker` | implementation, fix, validation | persistent worker session per orchestration run | `worker.md`, `accepted-fixes-round-N.md`, `validation.md` |
+| `worker` | implementation, fix, validation | one persistent worker session per work package (`worker-1`, `worker-2`, ...); reuse the same `workerId` for fixes to that package | `worker-1.md`, `accepted-fixes-round-N.md`, `validation.md` |
 | `reviewer` | review | fresh session per review round/reviewer | `review-round-N.md`, `review-*.md` |
 | `synthesis` | review synthesis | fresh synthesis session | `final-summary.md` |
 
-`run_role_agent` calls are serialized inside an orchestration run so the persistent worker session is not shared concurrently. Use `/work-parallel` only when tasks are intentionally independent and can use isolated child run directories.
+`run_role_agent` calls are serialized inside an orchestration run. For new implementation work packages, omit `workerId` so the tool assigns the next worker session. For accepted fixes after reviewing a package, pass that package's `workerId`; if omitted for fix/validation, the latest worker is reused. The orchestrator is prompted to review after each implementation package by default; if it starts another implementation worker before the latest package is marked cleanly reviewed, the tool emits a soft batching warning and the orchestrator should record the rationale in `orchestration.md`. Use `/work-parallel` only when tasks are intentionally independent and can use isolated child run directories.
 
 ### LLM routing guidance
 

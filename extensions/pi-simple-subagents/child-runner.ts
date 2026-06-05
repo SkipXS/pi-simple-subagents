@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
-import { appendArtifactFile, resolveArtifactPath, resolveRoleSessionFile, uniqueSuffix, writeArtifact } from "./artifacts.ts";
+import { appendArtifactFile, resolveArtifactPath, resolveRoleSessionFile, roleSessionArtifactName, uniqueSuffix, writeArtifact } from "./artifacts.ts";
 import { applyThinking, getRoleTimeoutMs, type Config, type ExtensionForwardMode } from "./config.ts";
 import { roleSystemPrompt } from "./prompts.ts";
 import {
@@ -333,11 +333,12 @@ export async function spawnPiRole(input: {
 	statusLabel?: string;
 	statusDescription?: string;
 	systemPrompt?: string;
+	sessionLabel?: string;
 }): Promise<ChildRunResult> {
 	const roleConfig = input.config.roles[input.role];
 	if (input.signal?.aborted) {
 		const stampBase = `${Date.now()}-${uniqueSuffix()}`;
-		const sessionFile = resolveArtifactPath(input.runDir, input.role === "worker" || input.role === "orchestrator" ? `sessions/${input.role}.jsonl` : `sessions/${input.role}-${stampBase}.jsonl`);
+		const sessionFile = resolveArtifactPath(input.runDir, roleSessionArtifactName(input.role, input.sessionLabel));
 		const transcriptPath = resolveArtifactPath(input.runDir, `logs/${input.role}-${stampBase}.jsonl`);
 		const stderrPath = resolveArtifactPath(input.runDir, `logs/${input.role}-${stampBase}.stderr.log`);
 		const outputPath = resolveArtifactPath(input.runDir, `outputs/${input.role}-${stampBase}.md`);
@@ -360,7 +361,7 @@ export async function spawnPiRole(input: {
 			errorMessage: output,
 		};
 	}
-	const sessionFile = resolveRoleSessionFile(input.runDir, input.role);
+	const sessionFile = resolveRoleSessionFile(input.runDir, input.role, input.sessionLabel);
 	const promptPath = writeArtifact(input.runDir, `prompts/${input.role}-system-${uniqueSuffix()}.md`, input.systemPrompt ?? roleSystemPrompt(input.role, input.runDir, input.config));
 	const taskPath = writeArtifact(input.runDir, `tasks/${input.role}-${uniqueSuffix()}.md`, input.task);
 	const args = [

@@ -162,9 +162,19 @@ export function uniqueSuffix(): string {
 	return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-export function resolveRoleSessionFile(runDir: string, role: RoleName): string {
-	const fileName = roleById(role).sessionStrategy === "persistent" ? `sessions/${role}.jsonl` : `sessions/${role}-${uniqueSuffix()}.jsonl`;
-	const sessionFile = resolveArtifactPath(runDir, fileName);
+function validateSessionLabel(label: string): string {
+	const trimmed = label.trim();
+	if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(trimmed)) throw new Error(`Invalid role session label: ${label}`);
+	return trimmed;
+}
+
+export function roleSessionArtifactName(role: RoleName, sessionLabel?: string): string {
+	if (sessionLabel !== undefined) return `sessions/${validateSessionLabel(sessionLabel)}.jsonl`;
+	return roleById(role).sessionStrategy === "persistent" ? `sessions/${role}.jsonl` : `sessions/${role}-${uniqueSuffix()}.jsonl`;
+}
+
+export function resolveRoleSessionFile(runDir: string, role: RoleName, sessionLabel?: string): string {
+	const sessionFile = resolveArtifactPath(runDir, roleSessionArtifactName(role, sessionLabel));
 	ensureArtifactFileForAppend(runDir, sessionFile);
 	return sessionFile;
 }

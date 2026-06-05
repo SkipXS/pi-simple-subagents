@@ -29,21 +29,45 @@ test("role registry is the source for config, prompts, and session policy", () =
 	}
 });
 
-test("review prompts gate low-value findings and stay read-only by instruction", () => {
+test("orchestrator prompt preserves worker package and review policy semantics", () => {
+	const prompt = roleSystemPrompt("orchestrator", tempProject(), DEFAULT_CONFIG);
+
+	assert.match(prompt, /one new worker session per implementation package/i);
+	assert.match(prompt, /without workerId/i);
+	assert.match(prompt, /worker-1, worker-2/i);
+	assert.match(prompt, /reuse the same workerId/i);
+	assert.match(prompt, /Default: review each completed implementation package/i);
+	assert.match(prompt, /Batch only when/i);
+	assert.match(prompt, /record the rationale in orchestration\.md/i);
+	assert.match(prompt, /does not review or invent findings/i);
+	assert.match(prompt, /evidence-backed fixes/i);
+	assert.match(prompt, /route those to worker/i);
+});
+
+test("prompts preserve artifact, reviewer safety, and finding-threshold semantics", () => {
 	const runDir = tempProject();
 	const scoutPrompt = roleSystemPrompt("scout", runDir, DEFAULT_CONFIG);
 	const reviewerPrompt = roleSystemPrompt("reviewer", runDir, DEFAULT_CONFIG);
 	const synthesisPrompt = roleSystemPrompt("synthesis", runDir, DEFAULT_CONFIG);
 	const reviewTargetPrompt = reviewTargetSystemPrompt("reviewer", runDir, DEFAULT_CONFIG);
 
-	assert.match(scoutPrompt, /Do not intentionally modify project\/source files/);
-	assert.match(scoutPrompt, /prefer read-only alternatives or explain the risk/);
-	assert.match(reviewerPrompt, /Do not modify project\/source files/);
-	assert.match(reviewerPrompt, /Finding threshold: report a finding only when/);
-	assert.match(reviewerPrompt, /Do not include speculative nice-to-haves/);
-	assert.match(synthesisPrompt, /omit optional polish, cosmetic cleanup, or micro-optimizations/);
-	assert.match(synthesisPrompt, /practical verification\/measurement/);
-	assert.match(reviewTargetPrompt, /do not modify target\/project\/source files/i);
+	for (const prompt of [scoutPrompt, reviewerPrompt, synthesisPrompt, reviewTargetPrompt]) {
+		assert.match(prompt, /write_run_artifact/);
+		assert.match(prompt, /exact relative filename/i);
+		assert.match(prompt, /Expected output artifact/);
+		assert.match(prompt, /Never use absolute paths or the generic write tool/i);
+	}
+	assert.match(scoutPrompt, /do not intentionally modify project\/source files/i);
+	assert.match(scoutPrompt, /prefer read-only alternatives or explain the risk/i);
+	assert.match(reviewerPrompt, /Review-only: do not modify project\/source files/i);
+	assert.match(reviewerPrompt, /Finding threshold: report only evidence-backed issues/i);
+	assert.match(reviewerPrompt, /measurably improve correctness/i);
+	assert.match(reviewerPrompt, /verification\/measurement/i);
+	assert.match(reviewerPrompt, /Omit speculative, cosmetic\/style-only/i);
+	assert.match(synthesisPrompt, /Do not invent findings/i);
+	assert.match(synthesisPrompt, /Deduplicate and prioritize reviewer evidence/i);
+	assert.match(reviewTargetPrompt, /Review-only: do not modify target\/project\/source files/i);
+	assert.match(reviewTargetPrompt, /verify supplemental context against current files/i);
 });
 
 test("delegable registry roles match run_role_agent schema and keep synthesis private", () => {

@@ -696,7 +696,7 @@ test("parallel workers read task references once during preflight and launch pre
 	assert.equal(spawnedTasks.every((task) => task.includes("Read input-worker-task.md")), true);
 });
 
-test("run_role_agent requires the default output artifact", async () => {
+test("run_role_agent requires the assigned worker output artifact", async () => {
 	const oldRole = process.env.PI_ORCHESTRATOR_AGENT_ROLE;
 	const oldRunDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
 	const oldCli = process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
@@ -709,7 +709,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const runDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
 fs.mkdirSync(runDir, { recursive: true });
-fs.writeFileSync(path.join(runDir, "worker.md"), "child done", "utf8");
+fs.writeFileSync(path.join(runDir, "worker-1.md"), "child done", "utf8");
 console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", provider: "fake", model: "fake-model", content: [{ type: "text", text: "child done" }], stopReason: "stop" } }));
 `, "utf8");
 		process.env.PI_ORCHESTRATOR_AGENT_ROLE = "orchestrator";
@@ -719,11 +719,11 @@ console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", 
 		orchestratorAgentsExtension({ registerTool: (tool: { name: string; execute: (...args: any[]) => Promise<any> }) => { if (tool.name === "run_role_agent") runRole = tool; }, registerCommand() {}, sendMessage() {} } as never);
 		assert.ok(runRole);
 		const result = await runRole.execute("id", { role: "worker", purpose: "implementation", task: "do work" }, new AbortController().signal, undefined, { cwd } as never);
-		const expected = path.join(runDir, "worker.md");
+		const expected = path.join(runDir, "worker-1.md");
 		assert.equal(fs.existsSync(expected), true);
 		assert.equal(result.details.outputPath, expected);
 		assert.match(result.content[0].text, /Subagents: .*done/);
-		assert.equal(result.details.subagentProgress.statuses.some((status: { key: string; text: string }) => status.key === "subagent:worker" && /worker: .*finished/.test(status.text)), true);
+		assert.equal(result.details.subagentProgress.statuses.some((status: { key: string; text: string }) => status.key === "subagent:worker-1" && /worker-1: .*finished/.test(status.text)), true);
 		assert.match(fs.readFileSync(expected, "utf8"), /child done/);
 	} finally {
 		if (oldRole === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_ROLE;
@@ -766,7 +766,7 @@ test("run_role_agent rejects oversized worker delegations before spawning", asyn
 	}
 });
 
-test("run_role_agent default output artifact avoids existing artifacts", async () => {
+test("run_role_agent assigns one worker session per implementation and reuses it for fixes", async () => {
 	const oldRole = process.env.PI_ORCHESTRATOR_AGENT_ROLE;
 	const oldRunDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
 	const oldCli = process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
@@ -794,10 +794,26 @@ console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", 
 		assert.ok(runRole);
 		const first = await runRole.execute("id", { role: "worker", purpose: "implementation", task: "first" }, new AbortController().signal, undefined, { cwd } as never);
 		const second = await runRole.execute("id", { role: "worker", purpose: "implementation", task: "second" }, new AbortController().signal, undefined, { cwd } as never);
-		assert.equal(first.details.outputPath, path.join(runDir, "worker.md"));
-		assert.equal(second.details.outputPath, path.join(runDir, "worker-1.md"));
-		assert.equal(fs.readFileSync(path.join(runDir, "worker.md"), "utf8"), "worker.md");
+		const latestFix = await runRole.execute("id", { role: "worker", purpose: "fix", task: "fix latest" }, new AbortController().signal, undefined, { cwd } as never);
+		const explicitFix = await runRole.execute("id", { role: "worker", purpose: "fix", workerId: "worker-1", task: "fix first", outputFile: "worker-1-fix.md" }, new AbortController().signal, undefined, { cwd } as never);
+		assert.equal(first.details.workerId, "worker-1");
+		assert.equal(second.details.workerId, "worker-2");
+		assert.match(second.details.reviewBatchingWarning, /worker-1 is not marked cleanly reviewed/);
+		assert.match(second.content[0].text, /Review batching warning:/);
+		assert.equal(latestFix.details.workerId, "worker-2");
+		assert.equal(explicitFix.details.workerId, "worker-1");
+		assert.equal(first.details.sessionFile, path.join(runDir, "sessions", "worker-1.jsonl"));
+		assert.equal(second.details.sessionFile, path.join(runDir, "sessions", "worker-2.jsonl"));
+		assert.equal(latestFix.details.sessionFile, path.join(runDir, "sessions", "worker-2.jsonl"));
+		assert.equal(explicitFix.details.sessionFile, path.join(runDir, "sessions", "worker-1.jsonl"));
+		assert.equal(first.details.outputPath, path.join(runDir, "worker-1.md"));
+		assert.equal(second.details.outputPath, path.join(runDir, "worker-2.md"));
+		assert.equal(latestFix.details.outputPath, path.join(runDir, "worker-2-1.md"));
+		assert.equal(explicitFix.details.outputPath, path.join(runDir, "worker-1-fix.md"));
 		assert.equal(fs.readFileSync(path.join(runDir, "worker-1.md"), "utf8"), "worker-1.md");
+		assert.equal(fs.readFileSync(path.join(runDir, "worker-2.md"), "utf8"), "worker-2.md");
+		assert.equal(fs.readFileSync(path.join(runDir, "worker-2-1.md"), "utf8"), "worker-2-1.md");
+		assert.equal(fs.readFileSync(path.join(runDir, "worker-1-fix.md"), "utf8"), "worker-1-fix.md");
 	} finally {
 		if (oldRole === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_ROLE;
 		else process.env.PI_ORCHESTRATOR_AGENT_ROLE = oldRole;

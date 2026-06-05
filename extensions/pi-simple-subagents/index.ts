@@ -122,6 +122,10 @@ function requireNonEmpty(value: string, label: string): string {
 	return trimmed;
 }
 
+function safeIdLabel(value: string, fallback: string): string {
+	return (value || fallback).toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-|-$/g, "").slice(0, 64) || fallback;
+}
+
 function parseStartupRole(pi: ExtensionAPI): RoleName | undefined {
 	try {
 		return parseRoleEnv(process.env[ROLE_ENV]);
@@ -274,7 +278,7 @@ const renderReviewersCall = createCallRenderer("Run Reviewers", (args) => [["Tar
 const renderScoutCall = createCallRenderer("Run Scout", (args) => [["Task", previewValue(args?.task)], ["Output", renderString(args, "outputFile")]]);
 const renderWorkerCall = createCallRenderer("Run Worker", (args) => [["Purpose", renderString(args, "purpose") ?? "implementation"], ["Task", previewValue(args?.task)], ["Output", renderString(args, "outputFile")]]);
 const renderParallelWorkersCall = createCallRenderer("Run Workers Parallel", (args) => [["Workers", renderArrayLength(args, "tasks")]]);
-const renderRoleAgentCall = createCallRenderer("Run Role Agent", (args) => [["Role", renderString(args, "role")], ["Purpose", renderString(args, "purpose")], ["Task", previewValue(args?.task)], ["Output", renderString(args, "outputFile")]]);
+const renderRoleAgentCall = createCallRenderer("Run Role Agent", (args) => [["Role", renderString(args, "role")], ["Purpose", renderString(args, "purpose")], ["Worker", renderString(args, "workerId")], ["Task", previewValue(args?.task)], ["Output", renderString(args, "outputFile")]]);
 const renderArtifactCall = createCallRenderer("Write Run Artifact", (args) => [["Path", renderString(args, "path")], ["Bytes", typeof args?.content === "string" ? Buffer.byteLength(args.content, "utf8") : undefined]]);
 const renderCompactCall = createCallRenderer("Compact Session", (args) => [["Instructions", previewValue(args?.instructions, "default role-aware summary")]]);
 const renderMarkReviewCleanCall = createCallRenderer("Mark Review Clean", (args) => [["Round", renderNumber(args, "round")], ["Summary", previewValue(args?.summary)]]);
@@ -310,7 +314,7 @@ const renderParallelWorkersResult = createResultRenderer("Parallel Workers", (de
 
 const renderRoleAgentResult = createResultRenderer("Role Agent", (details, result) => ({
 	status: renderNumber(details, "exitCode") === 0 ? "success" : renderBoolean(result, "isError") ? "error" : "pending",
-	fields: [["Purpose", renderString(details, "purpose")], ["Round", renderNumber(details, "round")], ...childRunFields(details), ["Worker runs", renderNumber(details, "workerRuns")], ["Review runs", renderNumber(details, "reviewRuns")]],
+	fields: [["Purpose", renderString(details, "purpose")], ["Worker", renderString(details, "workerId")], ["Round", renderNumber(details, "round")], ...childRunFields(details), ["Worker runs", renderNumber(details, "workerRuns")], ["Review runs", renderNumber(details, "reviewRuns")]],
 }));
 
 const renderArtifactResult = createResultRenderer("Run Artifact", (details) => ({ status: "success", fields: [["Path", renderString(details, "path")]] }));
@@ -456,10 +460,17 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 	let reviewRuns = persistedState?.reviewRuns ?? (Number(process.env[REVIEW_RUNS_ENV] ?? "0") || 0);
 	let reviewRunsSinceLatestWorker = persistedState?.reviewRunsSinceLatestWorker ?? 0;
 	let latestWorkerRunReviewedClean = persistedState?.latestWorkerRunReviewedClean ?? false;
+	let latestWorkerId = persistedState?.latestWorkerId;
+	let nextWorkerSequence = Math.max(1, persistedState?.nextWorkerSequence ?? workerRuns + 1);
 	let roleOutputSequence = 0;
 	const persistState = () => {
 		if (!runDir) return undefined;
-		return writeOrchestrationState(runDir, { workerRuns, reviewRuns, reviewRunsSinceLatestWorker, latestWorkerRunReviewedClean });
+		return writeOrchestrationState(runDir, { workerRuns, reviewRuns, reviewRunsSinceLatestWorker, latestWorkerRunReviewedClean, latestWorkerId, nextWorkerSequence });
+	};
+	const allocateWorkerId = (explicitWorkerId: string | undefined, purpose: string): { workerId: string; allocatedNew: boolean } => {
+		if (explicitWorkerId?.trim()) return { workerId: safeIdLabel(explicitWorkerId, "worker"), allocatedNew: false };
+		if ((purpose === "fix" || purpose === "validation") && latestWorkerId) return { workerId: latestWorkerId, allocatedNew: false };
+		return { workerId: `worker-${nextWorkerSequence}`, allocatedNew: true };
 	};
 
 	if (!role) {
@@ -587,7 +598,7 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 		pi.registerTool({
 			name: "run_role_agent",
 			label: "Run Role Agent",
-			description: `Run ${delegableRoleText} for one concrete handoff task in the current orchestration run. YOLO by design: no file, time, validation, or snapshot guardrails are imposed. Calls are serialized so persistent child sessions are not shared concurrently.`,
+			description: `Run ${delegableRoleText} for one concrete handoff task in the current orchestration run. YOLO by design: no file, time, validation, or snapshot guardrails are imposed. Worker sessions are per work package; reuse the same workerId for review fixes to that package.`,
 			promptSnippet: `Delegate a concrete task to ${delegableRoleText} within the current orchestration run`,
 			renderCall: renderRoleAgentCall,
 			renderResult: renderRoleAgentResult,
@@ -595,7 +606,8 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 				"Use run_role_agent from orchestrator after deciding the next workflow step.",
 				"Before the first worker call, split broad milestones into small work packages; never delegate a whole milestone or full plan section to one worker.",
 				"A worker task should normally have one deliverable, 1-3 likely files, 3-5 acceptance criteria, explicit non-goals, and one validation check.",
-				"Use purpose=validation for final tests or end-user checks when useful; Pi YOLO policy applies.",
+				"For each new worker implementation package, omit workerId so the tool assigns worker-1, worker-2, etc.; for accepted fixes after reviewing that package, pass the same workerId.",
+				"Use purpose=validation for final tests or end-user checks when useful; Pi YOLO policy applies. If workerId is omitted for fix/validation, the latest worker is reused.",
 				"run_role_agent calls are serialized; do not rely on parallel worker execution in a single assistant turn.",
 				"Default output artifacts avoid overwriting existing role artifacts, but use explicit readable outputFile names for iterative loops such as review-round-1.md, accepted-fixes-round-1.md, and validation.md.",
 			],
@@ -603,17 +615,26 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 			parameters: RoleRunParams,
 			async execute(_id, params: RoleRunParamsType, signal, onUpdate, ctx) {
 				validateRolePurpose(params.role, params.purpose);
+				if (params.workerId !== undefined && params.role !== "worker") throw new Error("workerId is only valid when role=worker");
 				const config = loadConfig(ctx.cwd);
-				const label = `${params.role}${params.round ? `-round-${params.round}` : ""}`;
+				const workerAllocation = params.role === "worker" ? allocateWorkerId(params.workerId, params.purpose) : undefined;
+				const statusLabel = workerAllocation?.workerId ?? `${params.role}${params.round ? `-${params.round}` : ""}`;
+				const baseLabel = workerAllocation?.workerId ?? params.role;
+				const label = `${baseLabel}${params.round ? `-round-${params.round}` : ""}`;
 				const taskInput = requireNonEmpty(params.task, "role task");
 				if (params.role === "worker") assertWorkerTaskWithinBudget(taskInput, "run_role_agent.task", config, "worker delegation task");
 				const outputFile = params.outputFile?.trim() || defaultRoleOutputFile(runDir, label, () => ++roleOutputSequence);
 				const outputArtifactPath = validateOutputArtifactPath(runDir, outputFile);
+				const reviewBatchingWarning = params.role === "worker" && params.purpose === "implementation" && workerAllocation?.allocatedNew && latestWorkerId && !latestWorkerRunReviewedClean
+					? `Starting ${workerAllocation.workerId} while ${latestWorkerId} is not marked cleanly reviewed. This is allowed, but record the rationale for batching/skipping review in orchestration.md and review the pending package(s) before final validation.`
+					: undefined;
+				const workerLine = workerAllocation ? `\nWorker ID: ${workerAllocation.workerId}` : "";
+				const reviewWarningLine = reviewBatchingWarning ? `\nReview batching warning: ${reviewBatchingWarning}` : "";
 				const task = `${taskInput}
 
 Run directory: ${runDir}
 Expected output artifact: ${outputFile}
-Purpose: ${params.purpose}
+Purpose: ${params.purpose}${workerLine}${reviewWarningLine}
 
 Write the expected output artifact with write_run_artifact using path ${JSON.stringify(outputFile)}. Do not use absolute paths or the generic write tool for the handoff artifact.`;
 				writeArtifact(runDir, `delegations/${label}-${Date.now()}.md`, task);
@@ -628,9 +649,10 @@ Write the expected output artifact with write_run_artifact using path ${JSON.str
 					envExtra: childEnvCounts(workerRuns, reviewRuns),
 					onUpdate: (text) => progress.text(text),
 					onStatus: (status) => progress.status(status),
-					statusKey: `subagent:${params.role}${params.round ? `-${params.round}` : ""}`,
-					statusLabel: `${params.role}${params.round ? `-${params.round}` : ""}`,
+					statusKey: `subagent:${statusLabel}`,
+					statusLabel,
 					statusDescription: roleTaskStatusDescription(params.purpose, taskInput),
+					...(workerAllocation ? { sessionLabel: workerAllocation.workerId } : {}),
 				});
 				const succeeded = result.exitCode === 0;
 				if (result.exitCode !== 0) {
@@ -639,8 +661,10 @@ Write the expected output artifact with write_run_artifact using path ${JSON.str
 				}
 				requireExpectedRunArtifact(runDir, outputFile, result, params.role);
 
-				if (succeeded && params.role === "worker" && (params.purpose === "implementation" || params.purpose === "fix" || params.purpose === "validation")) {
+				if (succeeded && params.role === "worker" && workerAllocation && (params.purpose === "implementation" || params.purpose === "fix" || params.purpose === "validation")) {
 					workerRuns++;
+					if (workerAllocation.allocatedNew) nextWorkerSequence++;
+					latestWorkerId = workerAllocation.workerId;
 					reviewRunsSinceLatestWorker = 0;
 					latestWorkerRunReviewedClean = false;
 				}
@@ -651,8 +675,8 @@ Write the expected output artifact with write_run_artifact using path ${JSON.str
 				persistState();
 				const subagentProgress = progress.snapshot();
 				return {
-					content: [{ type: "text", text: childSummary(`${params.role} finished with exit code ${result.exitCode}.`, [["Session", result.sessionFile], ["Output", outputArtifactPath], ["Transcript", result.transcriptPath], ["Stderr", result.stderrPath]], result.output, { subagentProgress }) }],
-					details: withSubagentProgress({ ...result, outputPath: outputArtifactPath, purpose: params.purpose, round: params.round, latestWorkerRunReviewedClean, workerRuns, reviewRuns, reviewRunsSinceLatestWorker }, progress),
+					content: [{ type: "text", text: childSummary(`${params.role} finished with exit code ${result.exitCode}.`, [["Worker", workerAllocation?.workerId], ["Review batching warning", reviewBatchingWarning], ["Session", result.sessionFile], ["Output", outputArtifactPath], ["Transcript", result.transcriptPath], ["Stderr", result.stderrPath]], result.output, { subagentProgress }) }],
+					details: withSubagentProgress({ ...result, outputPath: outputArtifactPath, purpose: params.purpose, workerId: workerAllocation?.workerId, reviewBatchingWarning, round: params.round, latestWorkerRunReviewedClean, latestWorkerId, nextWorkerSequence, workerRuns, reviewRuns, reviewRunsSinceLatestWorker }, progress),
 				};
 
 			},

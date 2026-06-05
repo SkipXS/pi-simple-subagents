@@ -8,6 +8,7 @@ export const RoleRunParams = Type.Object({
 	purpose: StringEnum(ROLE_RUN_PURPOSES, { description: "Why this role is being run. Allowed combinations: scout=context; worker=implementation/fix/validation; reviewer=review. Use validation for final tests/end-user checks." }),
 	task: Type.String({ minLength: 1, description: "Concrete task for the role. For worker, pass one small work package only—not an entire milestone or full plan section. Include artifact paths, expected output file, likely files, constraints/non-goals, acceptance criteria, validation, and relevant prior artifacts/context." }),
 	round: Type.Optional(Type.Integer({ minimum: 1, description: "Optional review/fix round number for artifact labels and status display." })),
+	workerId: Type.Optional(Type.String({ minLength: 1, description: "Worker session id for role=worker. Omit for a new implementation work package; pass the same id (for example worker-2) for fixes after reviewing that worker's work. If omitted for fix/validation, the latest worker is reused." })),
 	outputFile: Type.Optional(Type.String({ minLength: 1, description: "Expected handoff artifact filename inside the run dir, e.g. scout.md, worker-round-1.md, review-round-1.md, validation.md. Defaults avoid overwriting existing role artifacts; explicit names should still be unique and must not use reserved run dirs." })),
 });
 export type RoleRunParams = Static<typeof RoleRunParams>;
