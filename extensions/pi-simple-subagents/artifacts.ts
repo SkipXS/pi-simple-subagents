@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Config } from "./config.ts";
+import { CONFIG_EFFECTIVE_FILE, EXTRA_REVIEW_CONTEXT_FILE, INPUT_SCOUT_TASK_FILE, INPUT_TARGET_FILE, INPUT_WORKER_TASK_FILE } from "./constants.ts";
 import { roleById, type RoleName } from "./role-registry.ts";
 
 export const ACTIVE_RUN_MARKER_FILE = ".pi-simple-subagents-active-run";
@@ -86,6 +87,15 @@ function ensureArtifactTarget(runDir: string, target: string): string {
 }
 
 const RESERVED_OUTPUT_ARTIFACT_DIRS = new Set(["delegations", "logs", "outputs", "prompts", "sessions", "tasks"]);
+const RESERVED_OUTPUT_ARTIFACT_FILES = new Set([
+	ACTIVE_RUN_MARKER_FILE,
+	CONFIG_EFFECTIVE_FILE,
+	EXTRA_REVIEW_CONTEXT_FILE,
+	"input-plan.md",
+	INPUT_SCOUT_TASK_FILE,
+	INPUT_TARGET_FILE,
+	INPUT_WORKER_TASK_FILE,
+].map((name) => name.toLowerCase()));
 
 export function validateOutputArtifactPath(runDir: string, name: string): string {
 	const trimmed = name.trim();
@@ -94,8 +104,10 @@ export function validateOutputArtifactPath(runDir: string, name: string): string
 	const target = resolveArtifactPath(runDir, trimmed);
 	const relative = path.relative(path.resolve(runDir), target);
 	if (relative === "") throw new Error("Output artifact path must be a file path inside the run dir, not the run dir itself");
-	const firstPart = relative.split(path.sep).filter(Boolean)[0]?.toLowerCase();
+	const parts = relative.split(path.sep).filter(Boolean);
+	const firstPart = parts[0]?.toLowerCase();
 	if (firstPart && RESERVED_OUTPUT_ARTIFACT_DIRS.has(firstPart)) throw new Error(`Output artifact path uses reserved run directory: ${firstPart}`);
+	if (parts.length === 1 && firstPart && RESERVED_OUTPUT_ARTIFACT_FILES.has(firstPart)) throw new Error(`Output artifact path uses protected run file: ${firstPart}`);
 	assertExistingParentsAreNotSymlinks(runDir, target);
 	assertNoExistingLink(target, "append");
 	return target;

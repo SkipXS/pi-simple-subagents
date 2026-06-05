@@ -120,11 +120,11 @@ Git install after publishing:
 
 ```bash
 # reproducible tag / commit preferred
-pi install git:https://github.com/SkipXS/pi-simple-subagents#v0.1.0
-pi install git:https://github.com/SkipXS/pi-simple-subagents#<commit-sha>
+pi install git:github.com/SkipXS/pi-simple-subagents@v0.1.0
+pi install git:github.com/SkipXS/pi-simple-subagents@<commit-sha>
 
 # moving default branch for quick testing
-pi install git:https://github.com/SkipXS/pi-simple-subagents
+pi install git:github.com/SkipXS/pi-simple-subagents
 ```
 
 ## Which workflow should I use?
@@ -317,6 +317,41 @@ Cons:
 - More configuration surface to tune, test, and keep compatible with available provider credentials.
 
 A practical approach is to start with one strong base model and role-specific `thinking` levels, then switch individual roles only when measurements show a clear speed, quality, or cost benefit.
+
+### Copy/paste prompts for automatic role configuration
+
+Use one of these prompts in Pi to create or update `.pi/pi-simple-subagents/config.json`. Replace the placeholders first.
+
+**Same model for every role**
+
+```text
+Configure pi-simple-subagents for this project using the same model for every role.
+
+Use model: <provider/model>
+Use these thinking levels unless they are unsupported by the selected model/provider:
+- orchestrator: high
+- scout: minimal
+- worker: medium
+- reviewer: low
+- synthesis: medium
+
+Update .pi/pi-simple-subagents/config.json. Preserve any existing non-role settings such as children, orchestration, references, and artifacts. If the file does not exist, create it with a valid JSON object. Validate the resulting JSON and summarize the role configuration you wrote.
+```
+
+**Different models per role**
+
+```text
+Configure pi-simple-subagents for this project with role-specific models.
+
+Use these role settings:
+- orchestrator: model <provider/model-for-orchestrator>, thinking high
+- scout: model <provider/model-for-scout>, thinking minimal
+- worker: model <provider/model-for-worker>, thinking medium
+- reviewer: model <provider/model-for-reviewer>, thinking low
+- synthesis: model <provider/model-for-synthesis>, thinking medium
+
+Update .pi/pi-simple-subagents/config.json. Preserve any existing non-role settings such as children, orchestration, references, and artifacts. If the file does not exist, create it with a valid JSON object. Validate the resulting JSON and summarize the role configuration you wrote.
+```
 
 Full table: [Configuration reference](docs/reference.md#configuration-reference).
 

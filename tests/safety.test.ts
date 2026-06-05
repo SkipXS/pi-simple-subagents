@@ -213,6 +213,10 @@ test("output artifact targets reject reserved dirs, directories, and hard links"
 	assert.throws(() => validateOutputArtifactPath(runDir, "/tmp/report.md"), /relative to the run dir/);
 	assert.throws(() => validateOutputArtifactPath(runDir, "logs"), /reserved run directory/);
 	assert.throws(() => validateOutputArtifactPath(runDir, "sessions/worker-report.md"), /reserved run directory/);
+	assert.throws(() => validateOutputArtifactPath(runDir, "input-plan.md"), /protected run file/);
+	assert.throws(() => validateOutputArtifactPath(runDir, "config-effective.json"), /protected run file/);
+	assert.throws(() => validateOutputArtifactPath(runDir, ".pi-simple-subagents-active-run"), /protected run file/);
+	assert.equal(validateOutputArtifactPath(runDir, "reports/input-plan.md"), path.join(runDir, "reports", "input-plan.md"));
 	fs.mkdirSync(path.join(runDir, "report.md"));
 	assert.throws(() => validateOutputArtifactPath(runDir, "report.md"), /not a regular file/);
 

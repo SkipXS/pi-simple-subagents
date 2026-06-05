@@ -438,4 +438,6 @@ Subagents: ⠋ working
 
 Each subagent shows two lines: role label, short prompt/assignment description, and current activity first; model/thinking and usage/context metrics second. The description is populated for orchestrator, scout, worker, parallel worker, reviewer, and synthesis roles so review and delegation fanouts are less opaque.
 
+Tool results and slash-command completion messages also preserve the latest `subagentProgress` snapshot and render the same status block in the final summary. This connects the live progress widget with the stable result card so completed runs are not a black box after the widget clears.
+
 The context percentage is estimated from the latest child response token total and known model-family context windows; child processes do not currently expose Pi's exact parent footer context calculation.

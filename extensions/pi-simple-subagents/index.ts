@@ -145,10 +145,12 @@ function outputLocationNote(kind: string): string {
 	return `Full ${kind} output is preserved in the artifact paths above. To include it inline, set includeOutput=true on the tool call or PI_SIMPLE_SUBAGENTS_VERBOSE_RESULTS=1.`;
 }
 
-function childSummary(prefix: string, fields: Array<[string, string | number | undefined]>, output: string, options: { kind?: string; includeOutput?: boolean } = {}): string {
+function childSummary(prefix: string, fields: Array<[string, string | number | undefined]>, output: string, options: { kind?: string; includeOutput?: boolean; subagentProgress?: SubagentProgressSnapshot } = {}): string {
 	const lines = [prefix, ...fields.flatMap(([label, value]) => value === undefined || value === "" ? [] : [`${label}: ${value}`])];
-	if (verboseResultsRequested(options.includeOutput)) return `${lines.join("\n")}\n\n${output}`;
-	return `${lines.join("\n")}\n\n${outputLocationNote(options.kind ?? "child")}`;
+	const progress = options.subagentProgress && options.subagentProgress.statuses.length > 0 ? `\n\n${formatSubagentProgress(options.subagentProgress)}` : "";
+	const header = `${lines.join("\n")}${progress}`;
+	if (verboseResultsRequested(options.includeOutput)) return `${header}\n\n${output}`;
+	return `${header}\n\n${outputLocationNote(options.kind ?? "child")}`;
 }
 
 type RenderField = [label: string, value: string | number | boolean | undefined];
@@ -161,6 +163,28 @@ type ToolRenderSummary = {
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
 	return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function readSubagentProgressSnapshot(value: unknown): SubagentProgressSnapshot | undefined {
+	const record = asRecord(value);
+	const rawStatuses = record?.statuses;
+	if (!Array.isArray(rawStatuses)) return undefined;
+	const statuses = rawStatuses.flatMap((entry) => {
+		const status = asRecord(entry);
+		const key = typeof status?.key === "string" && status.key.trim() ? status.key : undefined;
+		const text = typeof status?.text === "string" && status.text.trim() ? status.text : undefined;
+		if (!key || !text) return [];
+		const description = typeof status?.description === "string" && status.description.trim() ? status.description : undefined;
+		return [{ key, text, ...(description ? { description } : {}) }];
+	});
+	if (statuses.length === 0) return undefined;
+	const current = typeof record?.current === "string" && record.current.trim() ? record.current : undefined;
+	return { statuses, ...(current ? { current } : {}) };
+}
+
+function renderSubagentProgressDetails(details: Record<string, unknown> | undefined): string[] {
+	const progress = readSubagentProgressSnapshot(details?.subagentProgress);
+	return progress ? ["", formatSubagentProgress(progress)] : [];
 }
 
 function renderString(record: Record<string, unknown> | undefined, key: string): string | undefined {
@@ -241,7 +265,7 @@ function createResultRenderer(title: string, summarize: (details: Record<string,
 		const optionRecord = asRecord(options);
 		const expanded = renderBoolean(optionRecord, "expanded") === true;
 		const content = expanded ? resultContentText(resultRecord) : undefined;
-		return renderToolText(theme, title, summary.fields, [...(summary.details ?? []), ...(content ? ["", content] : [])], summary.status ?? "success");
+		return renderToolText(theme, title, summary.fields, [...(summary.details ?? []), ...renderSubagentProgressDetails(details), ...(content ? ["", content] : [])], summary.status ?? "success");
 	};
 }
 
@@ -406,10 +430,16 @@ function createSubagentProgress(options: { onToolUpdate?: ToolProgressOnUpdate; 
 			current = text;
 			publish();
 		},
+		snapshot,
 		clear() {
 			options.setWidget?.(undefined);
 		},
 	};
+}
+
+function withSubagentProgress<T extends Record<string, unknown>>(details: T, progress: ReturnType<typeof createSubagentProgress>): T & { subagentProgress?: SubagentProgressSnapshot } {
+	const subagentProgress = progress.snapshot();
+	return subagentProgress.statuses.length > 0 ? { ...details, subagentProgress } : details;
 }
 
 export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
@@ -443,9 +473,10 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 					if (status) progress.status(status);
 				});
 				if (result.exitCode !== 0) throwChildRunError("Orchestration failed", result);
+				const subagentProgress = progress.snapshot();
 				return {
-					content: [{ type: "text", text: childSummary("Orchestration finished.", [["Run dir", runDir], ["Plan source", planSource], ["Output", result.outputPath], ["Transcript", result.transcriptPath], ["Artifact cleanup", cleanupSummary]], result.output, { includeOutput: params.includeOutput }) }],
-					details: { runDir, planSource, result, cleanupSummary },
+					content: [{ type: "text", text: childSummary("Orchestration finished.", [["Run dir", runDir], ["Plan source", planSource], ["Output", result.outputPath], ["Transcript", result.transcriptPath], ["Artifact cleanup", cleanupSummary]], result.output, { includeOutput: params.includeOutput, subagentProgress }) }],
+					details: withSubagentProgress({ runDir, planSource, result, cleanupSummary }, progress),
 				};
 			},
 		});
@@ -465,9 +496,10 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 					if (text) progress.text(text);
 					if (status) progress.status(status);
 				});
+				const subagentProgress = progress.snapshot();
 				return {
-					content: [{ type: "text", text: childSummary("Review finished.", [["Run dir", result.runDir], ["Target source", result.targetSource], ["Final summary", result.finalSummaryPath], ["Synthesis transcript", result.synthesis.transcriptPath], ["Artifact cleanup", result.cleanupSummary]], result.synthesis.output, { kind: "synthesis", includeOutput: params.includeOutput }) }],
-					details: result,
+					content: [{ type: "text", text: childSummary("Review finished.", [["Run dir", result.runDir], ["Target source", result.targetSource], ["Final summary", result.finalSummaryPath], ["Synthesis transcript", result.synthesis.transcriptPath], ["Artifact cleanup", result.cleanupSummary]], result.synthesis.output, { kind: "synthesis", includeOutput: params.includeOutput, subagentProgress }) }],
+					details: withSubagentProgress(result as unknown as Record<string, unknown>, progress),
 				};
 			},
 		});
@@ -487,9 +519,10 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 					if (text) progress.text(text);
 					if (status) progress.status(status);
 				});
+				const subagentProgress = progress.snapshot();
 				return {
-					content: [{ type: "text", text: childSummary("Scout finished.", [["Run dir", result.runDir], ["Task source", result.taskSource], ["Output", result.outputArtifactPath], ["Transcript", result.result.transcriptPath], ["Artifact cleanup", result.cleanupSummary]], result.result.output, { includeOutput: params.includeOutput }) }],
-					details: result,
+					content: [{ type: "text", text: childSummary("Scout finished.", [["Run dir", result.runDir], ["Task source", result.taskSource], ["Output", result.outputArtifactPath], ["Transcript", result.result.transcriptPath], ["Artifact cleanup", result.cleanupSummary]], result.result.output, { includeOutput: params.includeOutput, subagentProgress }) }],
+					details: withSubagentProgress(result as unknown as Record<string, unknown>, progress),
 				};
 			},
 		});
@@ -510,9 +543,10 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 					if (text) progress.text(text);
 					if (status) progress.status(status);
 				});
+				const subagentProgress = progress.snapshot();
 				return {
-					content: [{ type: "text", text: childSummary("Worker finished.", [["Run dir", result.runDir], ["Task source", result.taskSource], ["Output", result.outputArtifactPath], ["Transcript", result.result.transcriptPath], ["Artifact cleanup", result.cleanupSummary]], result.result.output, { includeOutput: params.includeOutput }) }],
-					details: result,
+					content: [{ type: "text", text: childSummary("Worker finished.", [["Run dir", result.runDir], ["Task source", result.taskSource], ["Output", result.outputArtifactPath], ["Transcript", result.result.transcriptPath], ["Artifact cleanup", result.cleanupSummary]], result.result.output, { includeOutput: params.includeOutput, subagentProgress }) }],
+					details: withSubagentProgress(result as unknown as Record<string, unknown>, progress),
 				};
 			},
 		});
@@ -533,9 +567,10 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 					if (status) progress.status(status);
 				});
 				const summary = result.workers.map((worker, index) => `${index + 1}. ${worker.name}: output ${worker.outputArtifactPath}; transcript ${worker.result.transcriptPath}`).join("\n");
+				const subagentProgress = progress.snapshot();
 				return {
-					content: [{ type: "text", text: `Parallel workers finished.\nRun dir: ${result.runDir}\nWorkers: ${result.workers.length}${result.cleanupSummary ? `\nArtifact cleanup: ${result.cleanupSummary}` : ""}\n\n${summary}` }],
-					details: result,
+					content: [{ type: "text", text: `Parallel workers finished.\nRun dir: ${result.runDir}\nWorkers: ${result.workers.length}${result.cleanupSummary ? `\nArtifact cleanup: ${result.cleanupSummary}` : ""}${subagentProgress.statuses.length > 0 ? `\n\n${formatSubagentProgress(subagentProgress)}` : ""}\n\n${summary}` }],
+					details: withSubagentProgress(result as unknown as Record<string, unknown>, progress),
 				};
 			},
 		});
@@ -608,9 +643,10 @@ Write the expected output artifact with write_run_artifact using path ${JSON.str
 					reviewRunsSinceLatestWorker++;
 				}
 				persistState();
+				const subagentProgress = progress.snapshot();
 				return {
-					content: [{ type: "text", text: childSummary(`${params.role} finished with exit code ${result.exitCode}.`, [["Session", result.sessionFile], ["Output", outputArtifactPath], ["Transcript", result.transcriptPath], ["Stderr", result.stderrPath]], result.output) }],
-					details: { ...result, outputPath: outputArtifactPath, purpose: params.purpose, round: params.round, latestWorkerRunReviewedClean, workerRuns, reviewRuns, reviewRunsSinceLatestWorker },
+					content: [{ type: "text", text: childSummary(`${params.role} finished with exit code ${result.exitCode}.`, [["Session", result.sessionFile], ["Output", outputArtifactPath], ["Transcript", result.transcriptPath], ["Stderr", result.stderrPath]], result.output, { subagentProgress }) }],
+					details: withSubagentProgress({ ...result, outputPath: outputArtifactPath, purpose: params.purpose, round: params.round, latestWorkerRunReviewedClean, workerRuns, reviewRuns, reviewRunsSinceLatestWorker }, progress),
 				};
 
 			},
@@ -705,11 +741,12 @@ Write the expected output artifact with write_run_artifact using path ${JSON.str
 					if (status) progress.status(status);
 				});
 				if (result.exitCode !== 0) throwChildRunError("Orchestration failed", result);
+				const subagentProgress = progress.snapshot();
 				pi.sendMessage({
 					customType: "pi-simple-subagents-result",
 					display: true,
-					content: childSummary("Orchestration finished.", [["Run dir", runDir], ["Output", result.outputPath], ["Transcript", result.transcriptPath], ["Artifact cleanup", cleanupSummary]], result.output),
-					details: { runDir, result, cleanupSummary },
+					content: childSummary("Orchestration finished.", [["Run dir", runDir], ["Output", result.outputPath], ["Transcript", result.transcriptPath], ["Artifact cleanup", cleanupSummary]], result.output, { subagentProgress }),
+					details: withSubagentProgress({ runDir, result, cleanupSummary }, progress),
 				});
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
@@ -733,11 +770,12 @@ Write the expected output artifact with write_run_artifact using path ${JSON.str
 					if (text) progress.text(text);
 					if (status) progress.status(status);
 				});
+				const subagentProgress = progress.snapshot();
 				pi.sendMessage({
 					customType: "pi-simple-subagents-scout-result",
 					display: true,
-					content: childSummary("Scout finished.", [["Run dir", result.runDir], ["Output", result.outputArtifactPath], ["Transcript", result.result.transcriptPath], ["Artifact cleanup", result.cleanupSummary]], result.result.output),
-					details: result,
+					content: childSummary("Scout finished.", [["Run dir", result.runDir], ["Output", result.outputArtifactPath], ["Transcript", result.result.transcriptPath], ["Artifact cleanup", result.cleanupSummary]], result.result.output, { subagentProgress }),
+					details: withSubagentProgress(result as unknown as Record<string, unknown>, progress),
 				});
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
@@ -761,11 +799,12 @@ Write the expected output artifact with write_run_artifact using path ${JSON.str
 					if (text) progress.text(text);
 					if (status) progress.status(status);
 				});
+				const subagentProgress = progress.snapshot();
 				pi.sendMessage({
 					customType: "pi-simple-subagents-worker-result",
 					display: true,
-					content: childSummary("Worker finished.", [["Run dir", result.runDir], ["Output", result.outputArtifactPath], ["Transcript", result.result.transcriptPath], ["Artifact cleanup", result.cleanupSummary]], result.result.output),
-					details: result,
+					content: childSummary("Worker finished.", [["Run dir", result.runDir], ["Output", result.outputArtifactPath], ["Transcript", result.result.transcriptPath], ["Artifact cleanup", result.cleanupSummary]], result.result.output, { subagentProgress }),
+					details: withSubagentProgress(result as unknown as Record<string, unknown>, progress),
 				});
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
@@ -789,11 +828,12 @@ Write the expected output artifact with write_run_artifact using path ${JSON.str
 					if (text) progress.text(text);
 					if (status) progress.status(status);
 				});
+				const subagentProgress = progress.snapshot();
 				pi.sendMessage({
 					customType: "pi-simple-subagents-review-result",
 					display: true,
-					content: childSummary("Review finished.", [["Run dir", result.runDir], ["Final summary", result.finalSummaryPath], ["Synthesis transcript", result.synthesis.transcriptPath], ["Artifact cleanup", result.cleanupSummary]], result.synthesis.output, { kind: "synthesis" }),
-					details: result,
+					content: childSummary("Review finished.", [["Run dir", result.runDir], ["Final summary", result.finalSummaryPath], ["Synthesis transcript", result.synthesis.transcriptPath], ["Artifact cleanup", result.cleanupSummary]], result.synthesis.output, { kind: "synthesis", subagentProgress }),
+					details: withSubagentProgress(result as unknown as Record<string, unknown>, progress),
 				});
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
@@ -886,11 +926,12 @@ Write the expected output artifact with write_run_artifact using path ${JSON.str
 						if (text) progress.text(text);
 						if (status) progress.status(status);
 					});
+					const subagentProgress = progress.snapshot();
 					pi.sendMessage({
 						customType: "pi-simple-subagents-parallel-workers-result",
 						display: true,
-						content: `Parallel workers finished.\n\nRun dir: ${result.runDir}\nWorkers: ${result.workers.length}${result.cleanupSummary ? `\nArtifact cleanup: ${result.cleanupSummary}` : ""}\n\n${result.workers.map((worker, index) => `${index + 1}. ${worker.name}: ${worker.outputArtifactPath}`).join("\n")}`,
-						details: result,
+						content: `Parallel workers finished.\n\nRun dir: ${result.runDir}\nWorkers: ${result.workers.length}${result.cleanupSummary ? `\nArtifact cleanup: ${result.cleanupSummary}` : ""}${subagentProgress.statuses.length > 0 ? `\n\n${formatSubagentProgress(subagentProgress)}` : ""}\n\n${result.workers.map((worker, index) => `${index + 1}. ${worker.name}: ${worker.outputArtifactPath}`).join("\n")}`,
+						details: withSubagentProgress(result as unknown as Record<string, unknown>, progress),
 					});
 				} catch (error) {
 					const message = error instanceof Error ? error.message : String(error);

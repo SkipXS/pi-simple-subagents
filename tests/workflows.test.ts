@@ -722,6 +722,8 @@ console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", 
 		const expected = path.join(runDir, "worker.md");
 		assert.equal(fs.existsSync(expected), true);
 		assert.equal(result.details.outputPath, expected);
+		assert.match(result.content[0].text, /Subagents: .*done/);
+		assert.equal(result.details.subagentProgress.statuses.some((status: { key: string; text: string }) => status.key === "subagent:worker" && /worker: .*finished/.test(status.text)), true);
 		assert.match(fs.readFileSync(expected, "utf8"), /child done/);
 	} finally {
 		if (oldRole === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_ROLE;
@@ -846,6 +848,8 @@ test("write_run_artifact rejects reserved internal run directories", async () =>
 		const tool = writeRunArtifact;
 		assert.ok(tool);
 		await assert.rejects(() => tool.execute("id", { path: "logs/evil.md", content: "evil" }), /reserved run directory/);
+		await assert.rejects(() => tool.execute("id", { path: "input-target.md", content: "evil" }), /protected run file/);
+		await assert.rejects(() => tool.execute("id", { path: "config-effective.json", content: "evil" }), /protected run file/);
 		const result = await tool.execute("id", { path: "scout-report.md", content: "ok" });
 		assert.match(result.details.path, /scout-report\.md$/);
 		assert.equal(fs.readFileSync(path.join(runDir, "scout-report.md"), "utf8"), "ok");
