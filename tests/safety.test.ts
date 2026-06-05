@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { loadConfig } from "../extensions/pi-simple-subagents/config.ts";
+import { getRoleTimeoutMs, loadConfig } from "../extensions/pi-simple-subagents/config.ts";
 import { readReference } from "../extensions/pi-simple-subagents/references.ts";
 import { validateRolePurpose } from "../extensions/pi-simple-subagents/roles.ts";
 import { ACTIVE_RUN_MARKER_FILE, appendArtifactFile, cleanupRunArtifacts, clearRunActive, copyArtifactFile, markRunActive, resolveArtifactPath, resolveRoleSessionFile, resolveRunBaseDir, validateOutputArtifactPath, writeArtifact } from "../extensions/pi-simple-subagents/artifacts.ts";
@@ -23,6 +23,9 @@ test("default config keeps YOLO roles but adds child/reference guardrails", () =
 	assert.equal("inheritSkills" in config.children, false);
 	assert.equal(config.children.forwardCurrentExtension, "auto");
 	assert.equal(config.children.timeoutMs, 30 * 60 * 1000);
+	assert.equal(config.roles.orchestrator.timeoutMs, 0);
+	assert.equal(getRoleTimeoutMs(config, "orchestrator"), 0);
+	assert.equal(getRoleTimeoutMs(config, "worker"), 30 * 60 * 1000);
 	assert.equal(config.children.maxConcurrentSubagents, 8);
 	assert.equal(config.orchestration.maxWorkerTaskBytes, 16 * 1024);
 	assert.equal(config.references.maxFileBytes, 1024 * 1024);
@@ -39,7 +42,7 @@ test("guardrail config keys are parsed and pre-1.0 legacy keys are not accepted"
 	const configPath = path.join(cwd, ".pi", "pi-simple-subagents", "config.json");
 	fs.mkdirSync(path.dirname(configPath), { recursive: true });
 	fs.writeFileSync(configPath, JSON.stringify({
-		roles: { worker: { model: "openai-codex/gpt-5.5", thinking: "low" } },
+		roles: { worker: { model: "openai-codex/gpt-5.5", thinking: "low", timeoutMs: 3 } },
 		children: { timeoutMs: 1, maxConcurrentSubagents: 2 },
 		orchestration: { maxWorkerTaskBytes: 2 },
 		references: { maxFileBytes: 1, allowOutsideCwd: true, allowBinary: true },
@@ -49,6 +52,8 @@ test("guardrail config keys are parsed and pre-1.0 legacy keys are not accepted"
 	const config = loadConfig(cwd);
 
 	assert.equal(config.roles.worker.thinking, "low");
+	assert.equal(config.roles.worker.timeoutMs, 3);
+	assert.equal(getRoleTimeoutMs(config, "worker"), 3);
 	assert.equal(config.children.timeoutMs, 1);
 	assert.equal(config.children.maxConcurrentSubagents, 2);
 	assert.equal(config.orchestration.maxWorkerTaskBytes, 2);
@@ -91,6 +96,9 @@ test("config rejects unknown keys so typos are visible", () => {
 
 	fs.writeFileSync(configPath, JSON.stringify({ roles: { worker: { thinkng: "high" } } }), "utf8");
 	assert.throws(() => loadConfig(cwd), /roles\.worker contains unknown key: thinkng/);
+
+	fs.writeFileSync(configPath, JSON.stringify({ roles: { worker: { timeoutMs: -1 } } }), "utf8");
+	assert.throws(() => loadConfig(cwd), /roles\.worker\.timeoutMs must be a non-negative integer/);
 
 	fs.writeFileSync(configPath, JSON.stringify({ references: { allowBinary: true, maxFileBytez: 1 } }), "utf8");
 	assert.throws(() => loadConfig(cwd), /references contains unknown key: maxFileBytez/);

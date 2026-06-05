@@ -10,6 +10,8 @@ import {
 export interface RoleConfig {
 	model: string;
 	thinking?: typeof THINKING_LEVELS[number];
+	/** Role-specific child process timeout in milliseconds. Use 0 to disable. Falls back to children.timeoutMs when unset. */
+	timeoutMs?: number;
 }
 
 export const EXTENSION_FORWARD_MODES = ["auto", "always", "never"] as const;
@@ -49,7 +51,10 @@ export interface Config {
 }
 
 export const DEFAULT_CONFIG: Config = {
-	roles: Object.fromEntries(ROLE_METADATA.map((role) => [role.id, { ...role.defaultConfig }])) as Record<RoleName, RoleConfig>,
+	roles: {
+		...(Object.fromEntries(ROLE_METADATA.map((role) => [role.id, { ...role.defaultConfig }])) as Record<RoleName, RoleConfig>),
+		orchestrator: { ...ROLE_METADATA.find((role) => role.id === "orchestrator")!.defaultConfig, timeoutMs: 0 },
+	},
 	children: {
 		forwardCurrentExtension: "auto",
 		timeoutMs: 30 * 60 * 1000,
@@ -149,10 +154,11 @@ function mergeConfig(base: Config, override: unknown, source = "unknown", option
 		for (const role of ROLE_NAMES) {
 			if (roles[role] === undefined) continue;
 			const roleObject = expectObject(roles[role], source, `roles.${role}`);
-			rejectUnknownKeys(roleObject, source, `roles.${role}`, ["model", "thinking"]);
+			rejectUnknownKeys(roleObject, source, `roles.${role}`, ["model", "thinking", "timeoutMs"]);
 			const roleConfig: RoleConfig = { ...next.roles[role] };
 			if (roleObject.model !== undefined) roleConfig.model = expectModel(roleObject.model, source, `roles.${role}.model`);
 			if (roleObject.thinking !== undefined) roleConfig.thinking = expectThinking(roleObject.thinking, source, `roles.${role}.thinking`);
+			if (roleObject.timeoutMs !== undefined) roleConfig.timeoutMs = expectNonNegativeInteger(roleObject.timeoutMs, source, `roles.${role}.timeoutMs`);
 			next.roles[role] = roleConfig;
 		}
 	}
@@ -215,6 +221,10 @@ export function loadConfig(cwd: string): Config {
 	config = mergeConfig(config, readJsonIfExists(globalConfigPath), globalConfigPath, { allowPiCliPath: true });
 	config = mergeConfig(config, readJsonIfExists(projectConfigPath), projectConfigPath);
 	return config;
+}
+
+export function getRoleTimeoutMs(config: Config, role: RoleName): number {
+	return config.roles[role].timeoutMs ?? config.children.timeoutMs;
 }
 
 export function applyThinking(model: string, thinking: string | undefined): string {

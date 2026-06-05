@@ -267,7 +267,7 @@ Project config overrides global config, except `children.piCliPath` is allowed o
 ```json
 {
   "roles": {
-    "orchestrator": { "model": "openai-codex/gpt-5.5", "thinking": "high" },
+    "orchestrator": { "model": "openai-codex/gpt-5.5", "thinking": "high", "timeoutMs": 0 },
     "scout": { "model": "openai-codex/gpt-5.5", "thinking": "minimal" },
     "worker": { "model": "openai-codex/gpt-5.5", "thinking": "medium" },
     "reviewer": { "model": "openai-codex/gpt-5.5", "thinking": "low" },
@@ -317,6 +317,10 @@ Cons:
 - More configuration surface to tune, test, and keep compatible with available provider credentials.
 
 A practical approach is to start with one strong base model and role-specific `thinking` levels, then switch individual roles only when measurements show a clear speed, quality, or cost benefit.
+
+### Role-specific timeouts
+
+`children.timeoutMs` is the fallback timeout for child Pi processes. Set `roles.<role>.timeoutMs` to override it for a role; `0` disables that role's timeout. By default the orchestrator has `roles.orchestrator.timeoutMs: 0` so long workflows can continue coordinating multiple bounded worker/reviewer/scout runs without the parent orchestrator being killed at 30 minutes.
 
 ### Copy/paste prompts for automatic role configuration
 

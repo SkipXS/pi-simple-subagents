@@ -291,8 +291,9 @@ Project config overrides global config, except project config is not allowed to 
 | --- | --- | --- |
 | `roles.<role>.model` | role-specific | Model for `orchestrator`, `scout`, `worker`, `reviewer`, or `synthesis`. |
 | `roles.<role>.thinking` | role-specific | Thinking suffix: `off`, `minimal`, `low`, `medium`, `high`, or `xhigh`. |
+| `roles.<role>.timeoutMs` | orchestrator: `0`; others: unset | Override `children.timeoutMs` for one role; `0` disables that role's timeout. |
 | `children.forwardCurrentExtension` | `"auto"` | Forward this extension to child runs when loaded with `-e/--extension`. Use `always` or `never` to force behavior. |
-| `children.timeoutMs` | `1800000` | Per-child-process timeout in ms; `0` disables it. |
+| `children.timeoutMs` | `1800000` | Fallback per-child-process timeout in ms; `0` disables it for roles without `roles.<role>.timeoutMs`. |
 | `children.maxConcurrentSubagents` | `8` | Concurrency cap for parallel workers and review reviewers. |
 | `children.piCliPath` | unset | Trusted Pi CLI override. Global config or env var only; must be an absolute path to an existing regular file. |
 | `orchestration.maxWorkerTaskBytes` | `16384` | Max UTF-8 bytes for one worker handoff; `0` disables the limit. |
@@ -320,7 +321,7 @@ Pi credentials stored in `~/.pi/agent/auth.json` are not environment variables, 
 Filtering the inherited environment can reduce accidental exposure of shell-provided secrets, but it is not a complete security boundary in this extension's YOLO model: child agents can still use normal tools, read same-user files, run commands, and access network resources unless an external sandbox prevents it. Use a container, separate user, isolated home directory, restricted credential profile, or other OS-level sandbox when reviewing untrusted repositories or prompts.
 
 - Role runs inherit the normal Pi tool surface; scout/reviewer/orchestrator source edits are not blocked by the extension.
-- Child process timeout defaults to 30 minutes (`children.timeoutMs`).
+- Child process timeout defaults to 30 minutes (`children.timeoutMs`) for roles without an override; the orchestrator disables its own timeout by default (`roles.orchestrator.timeoutMs=0`) so long workflows can keep coordinating bounded children.
 - Review and parallel-worker fanout concurrency defaults to 8 (`children.maxConcurrentSubagents`).
 - Worker tasks/handoffs have a configurable maximum size (`orchestration.maxWorkerTaskBytes`).
 - `@file` references are project-local, non-binary, and capped at 1 MiB by default.

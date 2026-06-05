@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 import { appendArtifactFile, resolveArtifactPath, resolveRoleSessionFile, uniqueSuffix, writeArtifact } from "./artifacts.ts";
-import { applyThinking, type Config, type ExtensionForwardMode } from "./config.ts";
+import { applyThinking, getRoleTimeoutMs, type Config, type ExtensionForwardMode } from "./config.ts";
 import { roleSystemPrompt } from "./prompts.ts";
 import {
 	MAX_PROGRESS_LINE_BYTES,
@@ -586,7 +586,7 @@ export async function spawnPiRole(input: {
 			(killFallbackTimer as { unref?: () => void }).unref?.();
 		};
 		const onAbort = () => abortChild();
-		const timeoutMs = input.config.children.timeoutMs;
+		const timeoutMs = getRoleTimeoutMs(input.config, input.role);
 		const timeoutTimer = timeoutMs > 0 ? setTimeout(() => abortChild(`Child run timed out after ${timeoutMs} ms.`, { timeout: true }), timeoutMs) : undefined;
 		(timeoutTimer as { unref?: () => void } | undefined)?.unref?.();
 		const finish = (exitCode: number) => {

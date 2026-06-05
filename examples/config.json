@@ -2,7 +2,8 @@
   "roles": {
     "orchestrator": {
       "model": "openai-codex/gpt-5.5",
-      "thinking": "high"
+      "thinking": "high",
+      "timeoutMs": 0
     },
     "scout": {
       "model": "openai-codex/gpt-5.5",

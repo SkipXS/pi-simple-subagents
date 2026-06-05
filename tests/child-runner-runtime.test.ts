@@ -128,6 +128,26 @@ writeOversizedLineThenLaterOutput();
 	assert.equal(result.output.includes("later output masked error"), false);
 });
 
+test("orchestrator default timeout is disabled while child role timeout remains configured", async () => {
+	const cwd = tempProject();
+	const runDir = path.join(cwd, ".pi", "run");
+	const cli = path.join(cwd, "fake-pi.js");
+	fs.writeFileSync(cli, `
+setTimeout(() => {
+  console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "orchestrator completed after child timeout" }], stopReason: "stop" } }));
+}, 120);
+`, "utf8");
+	const config = cloneConfig();
+	config.children.piCliPath = cli;
+	config.children.timeoutMs = 50;
+
+	const result = await spawnPiRole({ cwd, role: "orchestrator", task: "long orchestration", runDir, config });
+
+	assert.equal(result.exitCode, 0);
+	assert.equal(result.timedOut, false);
+	assert.match(result.output, /orchestrator completed after child timeout/);
+});
+
 test("timeout on Windows uses taskkill cleanup path and still finalizes artifacts", async () => {
 	const cwd = tempProject();
 	const runDir = path.join(cwd, ".pi", "run");
