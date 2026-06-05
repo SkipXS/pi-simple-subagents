@@ -288,6 +288,36 @@ Project config overrides global config, except `children.piCliPath` is allowed o
 }
 ```
 
+### Choosing role models
+
+The default config uses the same base model for every role and varies only `thinking` levels. This is usually a good starting point when your provider supports prompt/input caching: repeated Pi system prompt, tool definitions, and extension context are more likely to hit the same model-specific cache across orchestrator, scout, worker, reviewer, and synthesis runs.
+
+**Same base model for all roles**
+
+Pros:
+- Better chance of shared prompt-cache hits for repeated tool/schema/system-prefix tokens.
+- More consistent behavior across handoffs because all roles interpret instructions similarly.
+- Simpler configuration and easier cost/debug comparisons; tune by `thinking` first.
+
+Cons:
+- A powerful model may be overkill for cheap reconnaissance or simple synthesis.
+- If the chosen model is slow, rate-limited, or temporarily degraded, every role is affected.
+- Cache savings are provider-dependent and not guaranteed, especially when prompts diverge or parallel cold starts happen.
+
+**Different models per role**
+
+Pros:
+- You can use cheaper/faster models for scouts or simple reviewers and reserve stronger models for orchestration or implementation.
+- Different model families can provide useful diversity in reviews and reduce shared blind spots.
+- Lets you work around per-model rate limits or outages.
+
+Cons:
+- Prompt caches typically do not carry across different models, so repeated tool/schema/system-prefix tokens may be billed as fresh input.
+- Behavior can be less consistent across handoffs; weaker models may miss constraints from artifacts or role prompts.
+- More configuration surface to tune, test, and keep compatible with available provider credentials.
+
+A practical approach is to start with one strong base model and role-specific `thinking` levels, then switch individual roles only when measurements show a clear speed, quality, or cost benefit.
+
 Full table: [Configuration reference](docs/reference.md#configuration-reference).
 
 ## Development
