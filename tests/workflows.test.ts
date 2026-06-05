@@ -824,6 +824,56 @@ console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", 
 	}
 });
 
+test("run_role_agent scopes reviewer status labels to the latest worker", async () => {
+	const oldRole = process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+	const oldRunDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+	const oldCli = process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
+	try {
+		const cwd = tempProject();
+		const runDir = path.join(cwd, ".pi", "run");
+		const cli = path.join(cwd, "fake-pi.js");
+		fs.writeFileSync(cli, `
+const fs = require("node:fs");
+const path = require("node:path");
+const runDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+const tasksDir = path.join(runDir, "tasks");
+const taskFile = fs.readdirSync(tasksDir).map((name) => path.join(tasksDir, name)).sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)[0];
+const task = fs.readFileSync(taskFile, "utf8");
+const outputFile = /^Expected output artifact: (.+)$/m.exec(task)[1];
+fs.mkdirSync(path.dirname(path.join(runDir, outputFile)), { recursive: true });
+fs.writeFileSync(path.join(runDir, outputFile), outputFile, "utf8");
+console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", provider: "fake", model: "fake-model", content: [{ type: "text", text: outputFile }], stopReason: "stop" } }));
+`, "utf8");
+		process.env.PI_ORCHESTRATOR_AGENT_ROLE = "orchestrator";
+		process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR = runDir;
+		process.env.PI_SIMPLE_SUBAGENTS_PI_CLI = cli;
+		let runRole: { execute: (...args: any[]) => Promise<any> } | undefined;
+		orchestratorAgentsExtension({ registerTool: (tool: { name: string; execute: (...args: any[]) => Promise<any> }) => { if (tool.name === "run_role_agent") runRole = tool; }, registerCommand() {}, sendMessage() {} } as never);
+		assert.ok(runRole);
+
+		await runRole.execute("id", { role: "worker", purpose: "implementation", task: "worker one" }, new AbortController().signal, undefined, { cwd } as never);
+		const firstReview = await runRole.execute("id", { role: "reviewer", purpose: "review", round: 1, task: "review worker one" }, new AbortController().signal, undefined, { cwd } as never);
+		await runRole.execute("id", { role: "worker", purpose: "implementation", task: "worker two" }, new AbortController().signal, undefined, { cwd } as never);
+		const secondReview = await runRole.execute("id", { role: "reviewer", purpose: "review", round: 1, task: "review worker two" }, new AbortController().signal, undefined, { cwd } as never);
+
+		const firstStatus = firstReview.details.subagentProgress.statuses[0];
+		const secondStatus = secondReview.details.subagentProgress.statuses[0];
+		assert.equal(firstStatus.key, "subagent:reviewer-1-1");
+		assert.match(firstStatus.text, /reviewer-1-1:/);
+		assert.equal(secondStatus.key, "subagent:reviewer-2-1");
+		assert.match(secondStatus.text, /reviewer-2-1:/);
+		assert.equal(firstReview.details.outputPath, path.join(runDir, "reviewer-1-round-1.md"));
+		assert.equal(secondReview.details.outputPath, path.join(runDir, "reviewer-2-round-1.md"));
+	} finally {
+		if (oldRole === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+		else process.env.PI_ORCHESTRATOR_AGENT_ROLE = oldRole;
+		if (oldRunDir === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+		else process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR = oldRunDir;
+		if (oldCli === undefined) delete process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
+		else process.env.PI_SIMPLE_SUBAGENTS_PI_CLI = oldCli;
+	}
+});
+
 test("run_role_agent fails instead of copying child output when artifact is missing", async () => {
 	const oldRole = process.env.PI_ORCHESTRATOR_AGENT_ROLE;
 	const oldRunDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;

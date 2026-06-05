@@ -326,6 +326,36 @@ function roleTaskStatusDescription(purpose: string, task: string): string {
 	return trimStatusField(`${purpose}: ${firstLine}`, 72);
 }
 
+function workerDisplaySegment(workerId: string | undefined): string | undefined {
+	if (!workerId) return undefined;
+	return /^worker-(.+)$/.exec(workerId)?.[1] ?? workerId;
+}
+
+function reviewerScopedLabels(latestWorkerId: string | undefined, round: number | undefined, fallbackRound: number): { artifactLabel?: string; statusLabel?: string } {
+	const workerSegment = workerDisplaySegment(latestWorkerId);
+	if (!workerSegment) return {};
+	const effectiveRound = round ?? fallbackRound;
+	return {
+		artifactLabel: `reviewer-${workerSegment}-round-${effectiveRound}`,
+		statusLabel: `reviewer-${workerSegment}-${effectiveRound}`,
+	};
+}
+
+function roleRunLabels(role: string, round: number | undefined, workerId: string | undefined, latestWorkerId: string | undefined, fallbackReviewRound: number): { artifactLabel: string; statusLabel: string } {
+	if (workerId) {
+		const label = `${workerId}${round ? `-round-${round}` : ""}`;
+		return { artifactLabel: label, statusLabel: workerId };
+	}
+	if (role === "reviewer") {
+		const scoped = reviewerScopedLabels(latestWorkerId, round, fallbackReviewRound);
+		if (scoped.artifactLabel && scoped.statusLabel) return { artifactLabel: scoped.artifactLabel, statusLabel: scoped.statusLabel };
+	}
+	return {
+		artifactLabel: `${role}${round ? `-round-${round}` : ""}`,
+		statusLabel: `${role}${round ? `-${round}` : ""}`,
+	};
+}
+
 function requireExpectedRunArtifact(runDir: string, outputFile: string, result: { outputPath: string; transcriptPath: string }, label: string): string {
 	const target = validateOutputArtifactPath(runDir, outputFile);
 	if (!fs.existsSync(target)) {
@@ -618,9 +648,9 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 				if (params.workerId !== undefined && params.role !== "worker") throw new Error("workerId is only valid when role=worker");
 				const config = loadConfig(ctx.cwd);
 				const workerAllocation = params.role === "worker" ? allocateWorkerId(params.workerId, params.purpose) : undefined;
-				const statusLabel = workerAllocation?.workerId ?? `${params.role}${params.round ? `-${params.round}` : ""}`;
-				const baseLabel = workerAllocation?.workerId ?? params.role;
-				const label = `${baseLabel}${params.round ? `-round-${params.round}` : ""}`;
+				const labels = roleRunLabels(params.role, params.round, workerAllocation?.workerId, latestWorkerId, reviewRunsSinceLatestWorker + 1);
+				const statusLabel = labels.statusLabel;
+				const label = labels.artifactLabel;
 				const taskInput = requireNonEmpty(params.task, "role task");
 				if (params.role === "worker") assertWorkerTaskWithinBudget(taskInput, "run_role_agent.task", config, "worker delegation task");
 				const outputFile = params.outputFile?.trim() || defaultRoleOutputFile(runDir, label, () => ++roleOutputSequence);

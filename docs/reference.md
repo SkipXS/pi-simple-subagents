@@ -433,11 +433,11 @@ Interactive Pi shows child-agent progress in a stable multi-line block. Slash co
 Subagents: ⠋ working
 ✓ worker     │ implementation: fix parser regression      │ finished
              │ ↑1k ↓2k R3k W4.0k $0.123 3.7%/272k (auto) │ gpt-5.5 • medium
-• reviewer-1 │ packaging/installability for npm extension │ read package.json
-             │ ↑867 ↓103 R31k $0.023 11.8%/272k (auto)   │ gpt-5.5 • low
+• reviewer-2-1 │ packaging/installability for npm extension │ read package.json
+               │ ↑867 ↓103 R31k $0.023 11.8%/272k (auto)   │ gpt-5.5 • low
 ```
 
-Each subagent shows two lines: role label, short prompt/assignment description, and current activity first; usage/context metrics and model/thinking second. The model separator on the second line is aligned with the activity separator on the first line, using one shared detail-column width across descriptions and usage metrics. The description is populated for orchestrator, scout, worker, parallel worker, reviewer, and synthesis roles so review and delegation fanouts are less opaque.
+Each subagent shows two lines: role label, short prompt/assignment description, and current activity first; usage/context metrics and model/thinking second. Orchestrated reviewer labels are scoped to the latest worker package as `reviewer-<worker>-<round>` (for example, `reviewer-2-1` is review round 1 for `worker-2`) so later packages do not overwrite earlier `reviewer-1` status rows. The model separator on the second line is aligned with the activity separator on the first line, using one shared detail-column width across descriptions and usage metrics. The description is populated for orchestrator, scout, worker, parallel worker, reviewer, and synthesis roles so review and delegation fanouts are less opaque.
 
 Tool results and slash-command completion messages also preserve the latest `subagentProgress` snapshot and render the same status block in the final summary. This connects the live progress widget with the stable result card so completed runs are not a black box after the widget clears.
 
