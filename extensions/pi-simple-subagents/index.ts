@@ -377,10 +377,10 @@ function formatSubagentProgress(snapshot: SubagentProgressSnapshot): string {
 		const role = status.label.padEnd(roleWidth);
 		const description = trimStatusField(status.description ?? "—", 56).padEnd(descriptionWidth);
 		const details = splitStatusDetails(status.status);
-		const detailIndent = " ".repeat(roleWidth + 4);
+		const detailIndent = " ".repeat(roleWidth + 3);
 		return [
 			`${marker} ${role} │ ${description} │ ${status.action}`,
-			` ${detailIndent}│ ${details.model} │ ${details.usage}`,
+			`${detailIndent}│ ${details.usage} │ ${details.model}`,
 		];
 	});
 	return [header, ...lines].join("\n");

@@ -34,6 +34,26 @@ test("pre-aborted child runs do not create artifacts or spawn a child", async ()
 	assert.equal(fs.existsSync(runDir), false);
 });
 
+test("exit-0 child with non-JSON stdout and no assistant event fails with diagnostics", async () => {
+	const cwd = tempProject();
+	const runDir = path.join(cwd, ".pi", "run");
+	const cli = path.join(cwd, "fake-pi.js");
+	fs.writeFileSync(cli, `
+console.log("hello from a broken wrapper");
+`, "utf8");
+	const config = cloneConfig();
+	config.children.piCliPath = cli;
+
+	const result = await spawnPiRole({ cwd, role: "worker", task: "malformed stdout", runDir, config });
+
+	assert.equal(result.exitCode, 1);
+	assert.equal(result.stopReason, "error");
+	assert.match(result.output, /non-JSON line/i);
+	assert.match(result.output, /without a parsed assistant message_end/i);
+	assert.match(result.output, /hello from a broken wrapper/);
+	assert.equal(result.output.includes("(no output)"), false);
+});
+
 test("single-line JSONL stdout below the 4 MiB hard cap is parsed instead of reported as no output", async () => {
 	const cwd = tempProject();
 	const runDir = path.join(cwd, ".pi", "run");

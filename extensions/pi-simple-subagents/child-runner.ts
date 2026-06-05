@@ -23,6 +23,7 @@ const PI_CLI_PATH_ENV = "PI_SIMPLE_SUBAGENTS_PI_CLI";
 const MAX_TRANSCRIPT_ARTIFACT_BYTES = 4 * 1024 * 1024;
 const MAX_STDERR_ARTIFACT_BYTES = 1024 * 1024;
 const MAX_PENDING_STDOUT_LINE_BYTES = MAX_TRANSCRIPT_ARTIFACT_BYTES;
+const MAX_MALFORMED_STDOUT_DIAGNOSTIC_BYTES = 8 * 1024;
 let platformOverrideForTests: NodeJS.Platform | undefined;
 let taskkillOverrideForTests: { command: string; argsPrefix?: string[] } | undefined;
 
@@ -443,6 +444,9 @@ export async function spawnPiRole(input: {
 		let aborted = false;
 		let timedOut = false;
 		let stdoutLineTooLarge = false;
+		let parsedAssistantMessageEnd = false;
+		let malformedStdoutLineCount = 0;
+		let malformedStdoutTail = "";
 		let artifactErrorMessage: string | undefined;
 		let killFallbackTimer: ReturnType<typeof setTimeout> | undefined;
 		const transcriptCap = { bytes: 0, capped: false };
@@ -513,6 +517,7 @@ export async function spawnPiRole(input: {
 				} else if (event.type === "message_start") {
 					setStatusAction("thinking");
 				} else if (event.type === "message_end" && event.message?.role === "assistant") {
+					parsedAssistantMessageEnd = true;
 					if (typeof event.message.provider === "string" && typeof event.message.model === "string") childModel = event.message.model;
 					const usage = messageUsage(event.message);
 					if (usage) {
@@ -541,7 +546,11 @@ export async function spawnPiRole(input: {
 						setStatusAction("waiting");
 					}
 				}
-			} catch { /* ignore non-json */ }
+			} catch {
+				malformedStdoutLineCount++;
+				malformedStdoutTail = appendBoundedTail(malformedStdoutTail, `${line}\n`, MAX_MALFORMED_STDOUT_DIAGNOSTIC_BYTES);
+				setStatusAction("invalid child JSON");
+			}
 		};
 		const signalChildTree = (signalName: NodeJS.Signals) => {
 			if (runtimePlatform() !== "win32" && child.pid) {
@@ -597,11 +606,18 @@ export async function spawnPiRole(input: {
 				stderr = appendBoundedTail(stderr, stderrTail, MAX_STDERR_BYTES);
 			}
 			if (buffer.trim()) processLine(buffer);
-			const baseOutput = stdoutLineTooLarge && assistantErrorMessage
-				? `Assistant ${assistantStopReason ?? "failed"}: ${assistantErrorMessage}`
-				: finalOutput
-					|| (assistantErrorMessage ? `Assistant ${assistantStopReason ?? "failed"}: ${assistantErrorMessage}` : "")
-					|| (stderr ? `No assistant output. Stderr log: ${stderrPath}\n\n${stderr}` : "(no output)");
+			const protocolErrors = [
+				malformedStdoutLineCount > 0 ? `Child stdout contained ${malformedStdoutLineCount} non-JSON line${malformedStdoutLineCount === 1 ? "" : "s"} while --mode json was expected.\nTranscript: ${transcriptPath}\n\n${malformedStdoutTail.trimEnd()}` : undefined,
+				!parsedAssistantMessageEnd ? `Child exited without a parsed assistant message_end event.\nTranscript: ${transcriptPath}` : undefined,
+			].filter(Boolean).join("\n\n");
+			const protocolErrorMessage = protocolErrors || undefined;
+			const baseOutput = protocolErrorMessage
+				? `Child run infrastructure error:\n${protocolErrorMessage}${stderr ? `\n\nStderr log: ${stderrPath}\n\n${stderr}` : ""}`
+				: stdoutLineTooLarge && assistantErrorMessage
+					? `Assistant ${assistantStopReason ?? "failed"}: ${assistantErrorMessage}`
+					: finalOutput
+						|| (assistantErrorMessage ? `Assistant ${assistantStopReason ?? "failed"}: ${assistantErrorMessage}` : "")
+						|| (stderr ? `No assistant output. Stderr log: ${stderrPath}\n\n${stderr}` : "(no output)");
 			let fullOutput = artifactErrorMessage ? `${baseOutput}\n\nChild run infrastructure error:\n${artifactErrorMessage}` : baseOutput;
 			let outputPath = resolveArtifactPath(input.runDir, `outputs/${input.role}-${stampBase}.md`);
 			try {
@@ -610,11 +626,11 @@ export async function spawnPiRole(input: {
 				rememberArtifactError("output", error);
 				fullOutput = `${fullOutput}\n\nChild run infrastructure error:\n${artifactErrorMessage}`;
 			}
-			const effectiveExitCode = artifactErrorMessage || stdoutLineTooLarge ? 1 : exitCode === 0 && isFailedStopReason(assistantStopReason) ? 1 : exitCode;
-			const finalStopReason = timedOut ? "timed_out" : stdoutLineTooLarge || artifactErrorMessage ? "error" : aborted ? "aborted" : assistantStopReason;
-			const finalErrorMessage = timedOut ? `Child run timed out after ${timeoutMs} ms.` : stdoutLineTooLarge ? assistantErrorMessage : artifactErrorMessage ?? (aborted ? "Child run aborted." : assistantErrorMessage);
+			const effectiveExitCode = timedOut || aborted ? exitCode : artifactErrorMessage || stdoutLineTooLarge || protocolErrorMessage ? 1 : exitCode === 0 && isFailedStopReason(assistantStopReason) ? 1 : exitCode;
+			const finalStopReason = timedOut ? "timed_out" : stdoutLineTooLarge || artifactErrorMessage || protocolErrorMessage ? "error" : aborted ? "aborted" : assistantStopReason;
+			const finalErrorMessage = timedOut ? `Child run timed out after ${timeoutMs} ms.` : stdoutLineTooLarge ? assistantErrorMessage : artifactErrorMessage ?? protocolErrorMessage ?? (aborted ? "Child run aborted." : assistantErrorMessage);
 			const finalStatus = timedOut ? "timed out"
-				: artifactErrorMessage || stdoutLineTooLarge ? "failed"
+				: artifactErrorMessage || stdoutLineTooLarge || protocolErrorMessage ? "failed"
 					: aborted ? "aborted"
 						: effectiveExitCode !== 0 ? "failed" : "finished";
 			input.onStatus?.({ key: statusKey, text: formatStatusText(finalStatus), ...(statusDescription ? { description: statusDescription } : {}) });

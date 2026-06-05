@@ -23,3 +23,13 @@ jobs:
         run: npm install --no-save --save-dev @earendil-works/pi-ai@"${{ matrix.pi-version }}" @earendil-works/pi-coding-agent@"${{ matrix.pi-version }}"
       - run: npm run check
       - run: npm pack --dry-run --ignore-scripts
+      - name: Smoke-test packed Pi package load
+        shell: bash
+        run: |
+          set -euo pipefail
+          tarball="$(npm pack --ignore-scripts --silent)"
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp" "$tarball"' EXIT
+          npm install --prefix "$tmp/install" "$PWD/$tarball" --ignore-scripts --legacy-peer-deps
+          pkg_dir="$tmp/install/node_modules/pi-simple-subagents"
+          ./node_modules/.bin/pi -e "$pkg_dir" --list-models "pi-simple-subagents-smoke-no-model"

@@ -101,6 +101,8 @@ export function validateOutputArtifactPath(runDir: string, name: string): string
 	const trimmed = name.trim();
 	if (!trimmed) throw new Error("Output artifact path must be a non-empty file path");
 	if (path.isAbsolute(trimmed) || /^[/\\]/.test(trimmed)) throw new Error(`Output artifact path must be relative to the run dir: ${name}`);
+	const rawParts = trimmed.split(/[\\/]+/).filter(Boolean);
+	if (rawParts.some((part) => part.includes(":"))) throw new Error(`Output artifact path components must not contain ':' characters: ${name}`);
 	const target = resolveArtifactPath(runDir, trimmed);
 	const relative = path.relative(path.resolve(runDir), target);
 	if (relative === "") throw new Error("Output artifact path must be a file path inside the run dir, not the run dir itself");
