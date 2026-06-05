@@ -372,16 +372,18 @@ function formatSubagentProgress(snapshot: SubagentProgressSnapshot): string {
 	const header = `Subagents: ${workingIndicator} ${active ? "working" : "done"}`;
 	const roleWidth = Math.max(...parsed.map((status) => status.label.length));
 	const descriptionWidth = Math.max(...parsed.map((status) => trimStatusField(status.description ?? "—", 56).length));
+	const actionWidth = Math.max(...parsed.map((status) => status.action.length));
 	const lines = parsed.flatMap((status) => {
 		const marker = status.action === "finished" ? "✓" : isTerminalStatusAction(status.action) ? "!" : "•";
 		const role = status.label.padEnd(roleWidth);
 		const description = trimStatusField(status.description ?? "—", 56).padEnd(descriptionWidth);
+		const action = status.action.padEnd(actionWidth);
 		const details = splitStatusDetails(status.status);
 		const detailIndent = " ".repeat(roleWidth + 3);
-		return [
-			`${marker} ${role} │ ${description} │ ${status.action}`,
-			`${detailIndent}│ ${details.usage} │ ${details.model}`,
-		];
+		const summary = status.status
+			? `${marker} ${role} │ ${description} │ ${action} │ ${details.model}`
+			: `${marker} ${role} │ ${description} │ ${action}`;
+		return status.status ? [summary, `${detailIndent}│ ${details.usage}`] : [summary];
 	});
 	return [header, ...lines].join("\n");
 }
