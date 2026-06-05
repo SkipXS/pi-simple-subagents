@@ -2,11 +2,11 @@
   "roles": {
     "orchestrator": {
       "model": "openai-codex/gpt-5.5",
-      "thinking": "medium"
+      "thinking": "high"
     },
     "scout": {
-      "model": "openai-codex/gpt-5.3-codex-spark",
-      "thinking": "medium"
+      "model": "openai-codex/gpt-5.5",
+      "thinking": "minimal"
     },
     "worker": {
       "model": "openai-codex/gpt-5.5",

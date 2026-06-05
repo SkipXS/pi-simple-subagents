@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import { validateOutputArtifactPath, writeArtifact } from "./artifacts.ts";
 import { childEnvCounts, childResultText, throwChildRunError, spawnPiRole, type ChildStatusUpdate } from "./child-runner.ts";
 import { WORK_PARALLEL_ROOT_KEYS, WORK_PARALLEL_TASK_KEYS, WORKER_PURPOSES } from "./constants.ts";
@@ -150,6 +151,148 @@ function childSummary(prefix: string, fields: Array<[string, string | number | u
 	return `${lines.join("\n")}\n\n${outputLocationNote(options.kind ?? "child")}`;
 }
 
+type RenderField = [label: string, value: string | number | boolean | undefined];
+
+type ToolRenderSummary = {
+	status?: "success" | "error" | "pending";
+	fields: RenderField[];
+	details?: string[];
+};
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+	return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function renderString(record: Record<string, unknown> | undefined, key: string): string | undefined {
+	const value = record?.[key];
+	return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function renderNumber(record: Record<string, unknown> | undefined, key: string): number | undefined {
+	const value = record?.[key];
+	return typeof value === "number" ? value : undefined;
+}
+
+function renderBoolean(record: Record<string, unknown> | undefined, key: string): boolean | undefined {
+	const value = record?.[key];
+	return typeof value === "boolean" ? value : undefined;
+}
+
+function renderNested(record: Record<string, unknown> | undefined, key: string): Record<string, unknown> | undefined {
+	return asRecord(record?.[key]);
+}
+
+function renderArrayLength(record: Record<string, unknown> | undefined, key: string): number | undefined {
+	const value = record?.[key];
+	return Array.isArray(value) ? value.length : undefined;
+}
+
+function previewValue(value: unknown, fallback = "—", maxLength = 96): string {
+	const raw = typeof value === "string" ? value : value === undefined || value === null ? fallback : String(value);
+	const normalized = raw.trim().replace(/\s+/g, " ");
+	if (!normalized) return fallback;
+	if (normalized.length <= maxLength) return normalized;
+	return `${normalized.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
+}
+
+function renderToolText(theme: any, title: string, fields: RenderField[], details: string[] = [], status: ToolRenderSummary["status"] = "pending"): Text {
+	const marker = status === "success" ? theme.fg("success", "✓") : status === "error" ? theme.fg("error", "✗") : theme.fg("accent", "•");
+	const lines = [`${marker} ${theme.fg("toolTitle", theme.bold(title))}`];
+	for (const [label, value] of fields) {
+		if (value === undefined || value === "") continue;
+		lines.push(`${theme.fg("muted", `${label}:`)} ${String(value)}`);
+	}
+	for (const detail of details) {
+		if (detail.trim()) lines.push(theme.fg("dim", detail));
+	}
+	return new Text(lines.join("\n"), 0, 0);
+}
+
+function resultContentText(result: Record<string, unknown> | undefined): string | undefined {
+	const content = result?.content;
+	if (!Array.isArray(content)) return undefined;
+	const text = content.flatMap((part) => {
+		const record = asRecord(part);
+		return record?.type === "text" && typeof record.text === "string" ? [record.text] : [];
+	}).join("\n").trim();
+	return text || undefined;
+}
+
+function childRunFields(details: Record<string, unknown> | undefined): RenderField[] {
+	const child = renderNested(details, "result") ?? renderNested(details, "synthesis") ?? details;
+	return [
+		["Exit", renderNumber(child, "exitCode")],
+		["Stop", renderString(child, "stopReason")],
+		["Output", renderString(details, "outputArtifactPath") ?? renderString(details, "finalSummaryPath") ?? renderString(details, "outputPath") ?? renderString(child, "outputPath")],
+		["Transcript", renderString(child, "transcriptPath")],
+		["Stderr", renderString(child, "stderrPath")],
+	];
+}
+
+function createCallRenderer(title: string, fieldsForArgs: (args: Record<string, unknown> | undefined) => RenderField[]) {
+	return (args: unknown, theme: any) => renderToolText(theme, title, fieldsForArgs(asRecord(args)));
+}
+
+function createResultRenderer(title: string, summarize: (details: Record<string, unknown> | undefined, result: Record<string, unknown> | undefined) => ToolRenderSummary) {
+	return (result: unknown, options: unknown, theme: any) => {
+		const resultRecord = asRecord(result);
+		const details = renderNested(resultRecord, "details");
+		const summary = summarize(details, resultRecord);
+		const optionRecord = asRecord(options);
+		const expanded = renderBoolean(optionRecord, "expanded") === true;
+		const content = expanded ? resultContentText(resultRecord) : undefined;
+		return renderToolText(theme, title, summary.fields, [...(summary.details ?? []), ...(content ? ["", content] : [])], summary.status ?? "success");
+	};
+}
+
+const renderOrchestratorCall = createCallRenderer("Run Orchestrator", (args) => [["Plan", previewValue(args?.plan)]]);
+const renderReviewersCall = createCallRenderer("Run Reviewers", (args) => [["Target", previewValue(args?.target)], ["Focus", previewValue(args?.focus, undefined)], ["Reviewers", renderArrayLength(args, "reviewers")], ["Scout", args?.includeScout === false ? "disabled" : "enabled"]]);
+const renderScoutCall = createCallRenderer("Run Scout", (args) => [["Task", previewValue(args?.task)], ["Output", renderString(args, "outputFile")]]);
+const renderWorkerCall = createCallRenderer("Run Worker", (args) => [["Purpose", renderString(args, "purpose") ?? "implementation"], ["Task", previewValue(args?.task)], ["Output", renderString(args, "outputFile")]]);
+const renderParallelWorkersCall = createCallRenderer("Run Workers Parallel", (args) => [["Workers", renderArrayLength(args, "tasks")]]);
+const renderRoleAgentCall = createCallRenderer("Run Role Agent", (args) => [["Role", renderString(args, "role")], ["Purpose", renderString(args, "purpose")], ["Task", previewValue(args?.task)], ["Output", renderString(args, "outputFile")]]);
+const renderArtifactCall = createCallRenderer("Write Run Artifact", (args) => [["Path", renderString(args, "path")], ["Bytes", typeof args?.content === "string" ? Buffer.byteLength(args.content, "utf8") : undefined]]);
+const renderCompactCall = createCallRenderer("Compact Session", (args) => [["Instructions", previewValue(args?.instructions, "default role-aware summary")]]);
+const renderMarkReviewCleanCall = createCallRenderer("Mark Review Clean", (args) => [["Round", renderNumber(args, "round")], ["Summary", previewValue(args?.summary)]]);
+
+const renderOrchestratorResult = createResultRenderer("Orchestration", (details, result) => ({
+	status: renderNumber(renderNested(details, "result"), "exitCode") === 0 ? "success" : renderBoolean(result, "isError") ? "error" : "pending",
+	fields: [["Run dir", renderString(details, "runDir")], ["Plan source", renderString(details, "planSource")], ...childRunFields(details), ["Cleanup", renderString(details, "cleanupSummary")]],
+}));
+
+const renderReviewersResult = createResultRenderer("Review", (details, result) => ({
+	status: renderNumber(renderNested(details, "synthesis"), "exitCode") === 0 ? "success" : renderBoolean(result, "isError") ? "error" : "pending",
+	fields: [["Run dir", renderString(details, "runDir")], ["Target", renderString(details, "targetSource")], ["Reviews", renderArrayLength(details, "reviews")], ["Failures", renderArrayLength(details, "reviewFailures")], ["Final summary", renderString(details, "finalSummaryPath")], ["Transcript", renderString(renderNested(details, "synthesis"), "transcriptPath")], ["Cleanup", renderString(details, "cleanupSummary")]],
+}));
+
+const renderScoutResult = createResultRenderer("Scout", (details, result) => ({
+	status: renderNumber(renderNested(details, "result"), "exitCode") === 0 ? "success" : renderBoolean(result, "isError") ? "error" : "pending",
+	fields: [["Run dir", renderString(details, "runDir")], ["Task source", renderString(details, "taskSource")], ...childRunFields(details), ["Cleanup", renderString(details, "cleanupSummary")]],
+}));
+
+const renderWorkerResult = createResultRenderer("Worker", (details, result) => ({
+	status: renderNumber(renderNested(details, "result"), "exitCode") === 0 ? "success" : renderBoolean(result, "isError") ? "error" : "pending",
+	fields: [["Run dir", renderString(details, "runDir")], ["Task source", renderString(details, "taskSource")], ["Purpose", renderString(details, "purpose")], ...childRunFields(details), ["Cleanup", renderString(details, "cleanupSummary")]],
+}));
+
+const renderParallelWorkersResult = createResultRenderer("Parallel Workers", (details, result) => ({
+	status: renderArrayLength(details, "failed") && renderArrayLength(details, "failed")! > 0 ? "error" : renderBoolean(result, "isError") ? "error" : "success",
+	fields: [["Run dir", renderString(details, "runDir")], ["Workers", renderArrayLength(details, "workers")], ["Failed", renderArrayLength(details, "failed")], ["Cleanup", renderString(details, "cleanupSummary")]],
+	details: Array.isArray(details?.workers) ? details.workers.slice(0, 6).flatMap((worker, index) => {
+		const record = asRecord(worker);
+		return [`${index + 1}. ${renderString(record, "name") ?? "worker"}: ${renderString(record, "outputArtifactPath") ?? "no output artifact"}`];
+	}) : [],
+}));
+
+const renderRoleAgentResult = createResultRenderer("Role Agent", (details, result) => ({
+	status: renderNumber(details, "exitCode") === 0 ? "success" : renderBoolean(result, "isError") ? "error" : "pending",
+	fields: [["Purpose", renderString(details, "purpose")], ["Round", renderNumber(details, "round")], ...childRunFields(details), ["Worker runs", renderNumber(details, "workerRuns")], ["Review runs", renderNumber(details, "reviewRuns")]],
+}));
+
+const renderArtifactResult = createResultRenderer("Run Artifact", (details) => ({ status: "success", fields: [["Path", renderString(details, "path")]] }));
+const renderCompactResult = createResultRenderer("Compaction", (details) => ({ status: renderBoolean(details, "requested") ? "success" : "pending", fields: [["Requested", renderBoolean(details, "requested")], ["Run dir", renderString(details, "runDir")]] }));
+const renderMarkReviewCleanResult = createResultRenderer("Review Clean", (details) => ({ status: "success", fields: [["Artifact", renderString(details, "path")], ["State", renderString(details, "statePath")], ["Worker runs", renderNumber(details, "workerRuns")], ["Review runs", renderNumber(details, "reviewRuns")]] }));
+
 function roleTaskStatusDescription(purpose: string, task: string): string {
 	const firstLine = task.split(/\r?\n/).map((line) => line.trim()).find((line) => line.length > 0) ?? "delegated task";
 	return trimStatusField(`${purpose}: ${firstLine}`, 72);
@@ -291,6 +434,8 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 			promptSnippet: "Run the configured orchestrator workflow for a plan or review/fix instruction",
 			promptGuidelines: RUN_ORCHESTRATOR_GUIDELINES,
 			parameters: OrchestratorParams,
+			renderCall: renderOrchestratorCall,
+			renderResult: renderOrchestratorResult,
 			async execute(_id, params: OrchestratorParamsType, signal, onUpdate, ctx) {
 				const progress = createSubagentProgress({ onToolUpdate: onUpdate });
 				const { result, runDir, planSource, cleanupSummary } = await runOrchestrator(ctx.cwd, params.plan, signal, (text, status) => {
@@ -312,6 +457,8 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 			promptSnippet: "Review an existing file, directory, diff, or extension with model-selected reviewer angles",
 			promptGuidelines: RUN_REVIEWERS_GUIDELINES,
 			parameters: ReviewersParams,
+			renderCall: renderReviewersCall,
+			renderResult: renderReviewersResult,
 			async execute(_id, params: ReviewersParamsType, signal, onUpdate, ctx) {
 				const progress = createSubagentProgress({ onToolUpdate: onUpdate });
 				const result = await runReviewers(ctx.cwd, params, signal, (text, status) => {
@@ -332,6 +479,8 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 			promptSnippet: "Run a standalone scout subagent for non-trivial or uncertain tasks before implementation",
 			promptGuidelines: RUN_SCOUT_GUIDELINES,
 			parameters: ScoutParams,
+			renderCall: renderScoutCall,
+			renderResult: renderScoutResult,
 			async execute(_id, params: ScoutParamsType, signal, onUpdate, ctx) {
 				const progress = createSubagentProgress({ onToolUpdate: onUpdate });
 				const result = await runScout(ctx.cwd, params, signal, (text, status) => {
@@ -353,6 +502,8 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 			promptGuidelines: RUN_WORKER_GUIDELINES,
 			executionMode: "sequential",
 			parameters: WorkerParams,
+			renderCall: renderWorkerCall,
+			renderResult: renderWorkerResult,
 			async execute(_id, params: WorkerParamsType, signal, onUpdate, ctx) {
 				const progress = createSubagentProgress({ onToolUpdate: onUpdate });
 				const result = await runWorker(ctx.cwd, params, signal, (text, status) => {
@@ -373,6 +524,8 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 			promptSnippet: "Run multiple standalone worker subagents concurrently for independent tasks",
 			promptGuidelines: RUN_WORKERS_PARALLEL_GUIDELINES,
 			parameters: WorkersParallelParams,
+			renderCall: renderParallelWorkersCall,
+			renderResult: renderParallelWorkersResult,
 			async execute(_id, params: WorkersParallelParamsType, signal, onUpdate, ctx) {
 				const progress = createSubagentProgress({ onToolUpdate: onUpdate });
 				const result = await runWorkersParallel(ctx.cwd, params, signal, (text, status) => {
@@ -395,6 +548,8 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 			label: "Run Role Agent",
 			description: `Run ${delegableRoleText} for one concrete handoff task in the current orchestration run. YOLO by design: no file, time, validation, or snapshot guardrails are imposed. Calls are serialized so persistent child sessions are not shared concurrently.`,
 			promptSnippet: `Delegate a concrete task to ${delegableRoleText} within the current orchestration run`,
+			renderCall: renderRoleAgentCall,
+			renderResult: renderRoleAgentResult,
 			promptGuidelines: [
 				"Use run_role_agent from orchestrator after deciding the next workflow step.",
 				"Before the first worker call, split broad milestones into small work packages; never delegate a whole milestone or full plan section to one worker.",
@@ -469,6 +624,8 @@ Write the expected output artifact with write_run_artifact using path ${JSON.str
 			promptGuidelines: ["Use mark_review_clean after reviewer artifacts show no blockers and no fixes worth doing now."],
 			executionMode: "sequential",
 			parameters: MarkReviewCleanParams,
+			renderCall: renderMarkReviewCleanCall,
+			renderResult: renderMarkReviewCleanResult,
 			async execute(_id, params: MarkReviewCleanParamsType) {
 				const summary = requireNonEmpty(params.summary, "clean review summary");
 				latestWorkerRunReviewedClean = true;
@@ -487,6 +644,8 @@ Write the expected output artifact with write_run_artifact using path ${JSON.str
 			promptSnippet: "Compact the current child session with role-aware summary instructions",
 			promptGuidelines: ["Use compact_session when any child role session with a run directory is getting long, especially scouts doing broad repo/docs reconnaissance; artifacts remain the source of truth after compaction."],
 			parameters: CompactSessionParams,
+			renderCall: renderCompactCall,
+			renderResult: renderCompactResult,
 			async execute(_id, params: CompactSessionParamsType, _signal, _onUpdate, ctx) {
 				const defaultInstructions = [
 					"Preserve the original plan/task/target and current goal.",
@@ -520,6 +679,8 @@ Write the expected output artifact with write_run_artifact using path ${JSON.str
 			promptSnippet: "Write a handoff artifact inside the current orchestration run directory",
 			promptGuidelines: ["Use write_run_artifact for scout, worker, reviewer, and orchestrator handoff files instead of the generic write tool. For expected outputs, pass the exact relative filename from 'Expected output artifact' as path; never invent absolute artifact paths."],
 			parameters: ArtifactParams,
+			renderCall: renderArtifactCall,
+			renderResult: renderArtifactResult,
 			async execute(_id, params: ArtifactParamsType) {
 				const artifactPath = requireNonEmpty(params.path, "artifact path");
 				const target = validateOutputArtifactPath(runDir, artifactPath);

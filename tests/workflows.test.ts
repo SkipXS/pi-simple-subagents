@@ -242,8 +242,10 @@ test("package uses Pi-provided runtime imports as wildcard peers", () => {
 	assert.deepEqual(manifest.peerDependencies, {
 		"@earendil-works/pi-ai": "*",
 		"@earendil-works/pi-coding-agent": "*",
+		"@earendil-works/pi-tui": "*",
 		typebox: "*",
 	});
+	assert.match(manifest.devDependencies?.["@earendil-works/pi-tui"] ?? "", /^\^0\.78\./);
 	assert.equal(manifest.devDependencies?.typebox, "^1.1.39");
 });
 

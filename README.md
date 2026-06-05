@@ -267,8 +267,8 @@ Project config overrides global config, except `children.piCliPath` is allowed o
 ```json
 {
   "roles": {
-    "orchestrator": { "model": "openai-codex/gpt-5.5", "thinking": "medium" },
-    "scout": { "model": "openai-codex/gpt-5.3-codex-spark", "thinking": "medium" },
+    "orchestrator": { "model": "openai-codex/gpt-5.5", "thinking": "high" },
+    "scout": { "model": "openai-codex/gpt-5.5", "thinking": "minimal" },
     "worker": { "model": "openai-codex/gpt-5.5", "thinking": "medium" },
     "reviewer": { "model": "openai-codex/gpt-5.5", "thinking": "low" },
     "synthesis": { "model": "openai-codex/gpt-5.5", "thinking": "medium" }

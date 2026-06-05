@@ -14,7 +14,7 @@ export const ROLE_METADATA = [
 		allowedPurposes: [] as const,
 		sessionStrategy: "persistent",
 		promptKind: "orchestrator",
-		defaultConfig: { model: "openai-codex/gpt-5.5", thinking: "medium" },
+		defaultConfig: { model: "openai-codex/gpt-5.5", thinking: "high" },
 	},
 	{
 		id: "scout",
@@ -22,7 +22,7 @@ export const ROLE_METADATA = [
 		allowedPurposes: ["context"] as const,
 		sessionStrategy: "ephemeral",
 		promptKind: "scout",
-		defaultConfig: { model: "openai-codex/gpt-5.3-codex-spark", thinking: "medium" },
+		defaultConfig: { model: "openai-codex/gpt-5.5", thinking: "minimal" },
 	},
 	{
 		id: "worker",
