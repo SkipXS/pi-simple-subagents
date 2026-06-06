@@ -334,17 +334,30 @@ function workerDisplaySegment(workerId: string | undefined): string | undefined 
 function reviewerScopedLabels(latestWorkerId: string | undefined, round: number | undefined, fallbackRound: number): { artifactLabel?: string; statusLabel?: string } {
 	const workerSegment = workerDisplaySegment(latestWorkerId);
 	if (!workerSegment) return {};
+	const workerId = latestWorkerId ?? `worker-${workerSegment}`;
 	const effectiveRound = round ?? fallbackRound;
 	return {
 		artifactLabel: `reviewer-${workerSegment}-round-${effectiveRound}`,
-		statusLabel: `reviewer-${workerSegment}-${effectiveRound}`,
+		statusLabel: `review ${workerId} r${effectiveRound}`,
 	};
 }
 
-function roleRunLabels(role: string, round: number | undefined, workerId: string | undefined, latestWorkerId: string | undefined, fallbackReviewRound: number): { artifactLabel: string; statusLabel: string } {
+function workerPurposeLabel(purpose: string): string {
+	return purpose === "implementation" ? "impl" : purpose;
+}
+
+function workerStatusLabel(workerId: string, purpose: string, round: number | undefined): string {
+	return `${workerId} ${workerPurposeLabel(purpose)}${round ? ` r${round}` : ""}`;
+}
+
+function roleStatusKey(statusLabel: string, sequence: number): string {
+	return `subagent:${safeIdLabel(statusLabel, "role")}-${sequence}`;
+}
+
+function roleRunLabels(role: string, purpose: string, round: number | undefined, workerId: string | undefined, latestWorkerId: string | undefined, fallbackReviewRound: number): { artifactLabel: string; statusLabel: string } {
 	if (workerId) {
 		const label = `${workerId}${round ? `-round-${round}` : ""}`;
-		return { artifactLabel: label, statusLabel: workerId };
+		return { artifactLabel: label, statusLabel: workerStatusLabel(workerId, purpose, round) };
 	}
 	if (role === "reviewer") {
 		const scoped = reviewerScopedLabels(latestWorkerId, round, fallbackReviewRound);
@@ -352,7 +365,7 @@ function roleRunLabels(role: string, round: number | undefined, workerId: string
 	}
 	return {
 		artifactLabel: `${role}${round ? `-round-${round}` : ""}`,
-		statusLabel: `${role}${round ? `-${round}` : ""}`,
+		statusLabel: `${role}${round ? ` r${round}` : ""}`,
 	};
 }
 
@@ -493,6 +506,7 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 	let latestWorkerId = persistedState?.latestWorkerId;
 	let nextWorkerSequence = Math.max(1, persistedState?.nextWorkerSequence ?? workerRuns + 1);
 	let roleOutputSequence = 0;
+	let roleStatusSequence = workerRuns + reviewRuns;
 	const persistState = () => {
 		if (!runDir) return undefined;
 		return writeOrchestrationState(runDir, { workerRuns, reviewRuns, reviewRunsSinceLatestWorker, latestWorkerRunReviewedClean, latestWorkerId, nextWorkerSequence });
@@ -648,8 +662,9 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 				if (params.workerId !== undefined && params.role !== "worker") throw new Error("workerId is only valid when role=worker");
 				const config = loadConfig(ctx.cwd);
 				const workerAllocation = params.role === "worker" ? allocateWorkerId(params.workerId, params.purpose) : undefined;
-				const labels = roleRunLabels(params.role, params.round, workerAllocation?.workerId, latestWorkerId, reviewRunsSinceLatestWorker + 1);
+				const labels = roleRunLabels(params.role, params.purpose, params.round, workerAllocation?.workerId, latestWorkerId, reviewRunsSinceLatestWorker + 1);
 				const statusLabel = labels.statusLabel;
+				const statusKey = roleStatusKey(statusLabel, ++roleStatusSequence);
 				const label = labels.artifactLabel;
 				const taskInput = requireNonEmpty(params.task, "role task");
 				if (params.role === "worker") assertWorkerTaskWithinBudget(taskInput, "run_role_agent.task", config, "worker delegation task");
@@ -679,7 +694,7 @@ Write the expected output artifact with write_run_artifact using path ${JSON.str
 					envExtra: childEnvCounts(workerRuns, reviewRuns),
 					onUpdate: (text) => progress.text(text),
 					onStatus: (status) => progress.status(status),
-					statusKey: `subagent:${statusLabel}`,
+					statusKey,
 					statusLabel,
 					statusDescription: roleTaskStatusDescription(params.purpose, taskInput),
 					...(workerAllocation ? { sessionLabel: workerAllocation.workerId } : {}),
@@ -706,7 +721,7 @@ Write the expected output artifact with write_run_artifact using path ${JSON.str
 				const subagentProgress = progress.snapshot();
 				return {
 					content: [{ type: "text", text: childSummary(`${params.role} finished with exit code ${result.exitCode}.`, [["Worker", workerAllocation?.workerId], ["Review batching warning", reviewBatchingWarning], ["Session", result.sessionFile], ["Output", outputArtifactPath], ["Transcript", result.transcriptPath], ["Stderr", result.stderrPath]], result.output, { subagentProgress }) }],
-					details: withSubagentProgress({ ...result, outputPath: outputArtifactPath, purpose: params.purpose, workerId: workerAllocation?.workerId, reviewBatchingWarning, round: params.round, latestWorkerRunReviewedClean, latestWorkerId, nextWorkerSequence, workerRuns, reviewRuns, reviewRunsSinceLatestWorker }, progress),
+					details: withSubagentProgress({ ...result, outputPath: outputArtifactPath, purpose: params.purpose, workerId: workerAllocation?.workerId, reviewBatchingWarning, round: params.round, statusLabel, statusKey, latestWorkerRunReviewedClean, latestWorkerId, nextWorkerSequence, workerRuns, reviewRuns, reviewRunsSinceLatestWorker }, progress),
 				};
 
 			},

@@ -723,7 +723,7 @@ console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", 
 		assert.equal(fs.existsSync(expected), true);
 		assert.equal(result.details.outputPath, expected);
 		assert.match(result.content[0].text, /Subagents: .*done/);
-		assert.equal(result.details.subagentProgress.statuses.some((status: { key: string; text: string }) => status.key === "subagent:worker-1" && /worker-1: .*finished/.test(status.text)), true);
+		assert.equal(result.details.subagentProgress.statuses.some((status: { key: string; text: string }) => /^subagent:worker-1-impl-\d+$/.test(status.key) && /worker-1 impl: .*finished/.test(status.text)), true);
 		assert.match(fs.readFileSync(expected, "utf8"), /child done/);
 	} finally {
 		if (oldRole === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_ROLE;
@@ -802,6 +802,12 @@ console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", 
 		assert.match(second.content[0].text, /Review batching warning:/);
 		assert.equal(latestFix.details.workerId, "worker-2");
 		assert.equal(explicitFix.details.workerId, "worker-1");
+		assert.equal(first.details.statusLabel, "worker-1 impl");
+		assert.equal(latestFix.details.statusLabel, "worker-2 fix");
+		assert.equal(explicitFix.details.statusLabel, "worker-1 fix");
+		assert.notEqual(first.details.statusKey, explicitFix.details.statusKey);
+		assert.match(first.details.subagentProgress.statuses[0].text, /worker-1 impl:/);
+		assert.match(explicitFix.details.subagentProgress.statuses[0].text, /worker-1 fix:/);
 		assert.equal(first.details.sessionFile, path.join(runDir, "sessions", "worker-1.jsonl"));
 		assert.equal(second.details.sessionFile, path.join(runDir, "sessions", "worker-2.jsonl"));
 		assert.equal(latestFix.details.sessionFile, path.join(runDir, "sessions", "worker-2.jsonl"));
@@ -858,10 +864,12 @@ console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", 
 
 		const firstStatus = firstReview.details.subagentProgress.statuses[0];
 		const secondStatus = secondReview.details.subagentProgress.statuses[0];
-		assert.equal(firstStatus.key, "subagent:reviewer-1-1");
-		assert.match(firstStatus.text, /reviewer-1-1:/);
-		assert.equal(secondStatus.key, "subagent:reviewer-2-1");
-		assert.match(secondStatus.text, /reviewer-2-1:/);
+		assert.equal(firstReview.details.statusLabel, "review worker-1 r1");
+		assert.equal(secondReview.details.statusLabel, "review worker-2 r1");
+		assert.match(firstStatus.key, /^subagent:review-worker-1-r1-\d+$/);
+		assert.match(firstStatus.text, /review worker-1 r1:/);
+		assert.match(secondStatus.key, /^subagent:review-worker-2-r1-\d+$/);
+		assert.match(secondStatus.text, /review worker-2 r1:/);
 		assert.equal(firstReview.details.outputPath, path.join(runDir, "reviewer-1-round-1.md"));
 		assert.equal(secondReview.details.outputPath, path.join(runDir, "reviewer-2-round-1.md"));
 	} finally {
