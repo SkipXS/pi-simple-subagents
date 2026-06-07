@@ -257,7 +257,49 @@ Typical layouts:
   logs/ outputs/ prompts/ sessions/ tasks/
 ```
 
-More details: [Run artifacts](docs/reference.md#run-artifacts).
+### Handoff report shapes
+
+Child agents write their expected handoff artifact with `write_run_artifact`. The filename comes from the task/tool call; the content follows these role-specific shapes:
+
+```md
+# Scout Report
+## Relevant files
+## Existing behavior
+## Risks / unknowns
+## Recommended worker context
+
+# Worker Report
+## Changed files
+## What was implemented
+## Implementation checks run
+## Open issues / decisions needed
+## Residual risks
+
+# Verification Report
+## Scope checked
+## Acceptance criteria status
+## Implementation gaps to send back to worker
+## Validation evidence / gaps
+## Verdict
+
+# Review Report
+## Blockers
+## Fixes worth doing now
+## Optional / deferred
+## Validation gaps
+## Verdict
+
+# Review Synthesis
+## Overall verdict
+## Blockers
+## Fixes worth doing now
+## Optional / deferred
+## Positive findings / existing strengths
+## Evidence reviewed
+## Recommended next steps
+```
+
+Review-only target scouts use `# Scout Review Context` with target, relevant files, existing behavior/architecture, and risk areas. See [Run artifacts](docs/reference.md#run-artifacts) for layouts and reserved paths.
 
 ## Configuration
 
