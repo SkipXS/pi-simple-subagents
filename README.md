@@ -7,13 +7,14 @@ Instead of one long agent doing everything, this extension makes the workflow vi
 - **orchestrator** plans and delegates
 - **scout** gathers context and writes compact handoffs
 - **worker** implements, fixes, or validates
+- **verifier** checks a worker package against its plan before review
 - **reviewer** inspects existing work and reports actionable findings
 
 > Pi remains YOLO by default: roles guide behavior and preserve artifacts, but they are not a hard sandbox.
 
 ## Safety model: review-only is cooperative
 
-`/review`, scout, reviewer, and synthesis roles are intentionally **not** implemented as a hard read-only sandbox. They are prompted to keep review workflows inspection-only and to write handoff artifacts via `write_run_artifact`, but the extension does not block the normal Pi tool surface. This keeps diagnostics, tests, benchmarks, and repository-specific workflows available to reviewers.
+`/review`, scout, verifier, reviewer, and synthesis roles are intentionally **not** implemented as a hard read-only sandbox. They are prompted to keep verification/review workflows inspection-only and to write handoff artifacts via `write_run_artifact`, but the extension does not block the normal Pi tool surface. This keeps diagnostics, tests, benchmarks, and repository-specific workflows available to verifiers and reviewers.
 
 Child Pi processes also inherit the parent process environment by design. That preserves normal Pi/model authentication and developer tooling behavior, but it means environment variables such as API keys, cloud credentials, GitHub tokens, and CI secrets are available to child agents. Pi subscription/OAuth credentials and API keys stored in `~/.pi/agent/auth.json` remain available as long as the child runs as the same user with the same home/config directory.
 
@@ -28,6 +29,8 @@ flowchart LR
   Root -->|/orchestrate| O[orchestrator]
   O --> OS[scout when useful]
   O --> OW[worker package]
+  O --> OV[verifier check]
+  OV -->|implementation gaps| OW
   O --> OR[reviewer round]
   OR -->|accepted fixes| OW
   O --> OF[final summary]
@@ -54,7 +57,7 @@ flowchart LR
 
 | Command | Tool | Best for |
 | --- | --- | --- |
-| `/orchestrate <plan-or-review/fix-instruction>` | `run_orchestrator` | Plan-driven work or reviewer → accepted-fix → validation loops. |
+| `/orchestrate <plan-or-review/fix-instruction>` | `run_orchestrator` | Plan-driven work or worker → verifier → reviewer → accepted-fix loops. |
 | `/scout <task-or-@target>` | `run_scout` | Context gathering before risky, broad, or ambiguous work. |
 | `/work <task-or-@file>` | `run_worker` | One focused implementation, fix, or validation task. |
 | `/work-parallel <json>` | `run_workers_parallel` | 2-8 independent worker tasks. |
@@ -161,7 +164,7 @@ Parallel workers accept JSON only:
 /work-parallel [{"name":"docs","task":"Update README usage examples"},{"name":"tests","task":"Add parser regression tests"}]
 ```
 
-Review/fix loops are intentionally orchestrator-steered: use `/orchestrate` for work that should run independent reviewers, hand evidence-backed accepted fixes to worker, validate, and review again. The orchestrator does not review itself; it coordinates reviewers/workers and decides from reviewer evidence whether an item is worth fixing now or merely optional/suboptimal LLM churn.
+Review/fix loops are intentionally orchestrator-steered: use `/orchestrate` for work that should verify worker output against the plan, run independent reviewers, hand evidence-backed accepted fixes to worker, validate, and review again. The orchestrator does not verify or review itself; it coordinates verifiers/reviewers/workers and decides from child-agent evidence whether an item is worth fixing now or merely optional/suboptimal LLM churn.
 
 See [Command reference](docs/reference.md#command-reference) for full slash-command options.
 
@@ -173,6 +176,7 @@ sequenceDiagram
   participant O as orchestrator
   participant S as scout
   participant W as worker-N
+  participant V as verifier
   participant R as reviewer
   participant A as artifacts
 
@@ -187,9 +191,15 @@ sequenceDiagram
   loop work packages and useful fix rounds
     O->>W: run_role_agent worker (new workerId per package)
     W->>A: worker-N.md / accepted-fixes-round-N.md / validation.md
-    O->>R: run_role_agent reviewer
-    R->>A: review-round-N.md
-    alt fixes worth doing now
+    O->>V: run_role_agent verifier
+    V->>A: verification-round-N.md
+    alt implementation gaps
+      O->>W: gap fixes (same workerId)
+    else verified
+      O->>R: run_role_agent reviewer
+      R->>A: review-round-N.md
+    end
+    alt review fixes worth doing now
       O->>W: accepted fixes (same workerId)
     else clean enough
       O->>A: mark_review_clean + final-summary.md
@@ -197,7 +207,7 @@ sequenceDiagram
   end
 ```
 
-The orchestrator is prompted to split large milestones into small worker packages and review after each implementation package by default. Each new implementation package gets its own worker session (`worker-1`, `worker-2`, ...), and accepted fixes after review reuse that package's `workerId`. If the orchestrator batches reviews, the tool emits a soft warning and the rationale should be recorded in `orchestration.md`. A worker handoff should contain one deliverable, likely files, acceptance criteria, non-goals, and validation.
+The orchestrator is prompted to split large milestones into small worker packages, verify each package against its acceptance criteria, and then review after verification passes. Each new implementation package gets its own worker session (`worker-1`, `worker-2`, ...), and verifier gap fixes or accepted review fixes reuse that package's `workerId`. If the orchestrator batches reviews, the tool emits a soft warning and the rationale should be recorded in `orchestration.md`. A worker handoff should contain one deliverable, likely files, acceptance criteria, non-goals, and validation.
 
 ## Run artifacts
 
@@ -210,7 +220,7 @@ flowchart TB
   Base --> Logs["logs/<br/>*.stderr.log<br/>*.invocation.json"]
   Base --> Sessions["sessions/<br/>*.jsonl"]
   Base --> Outputs["outputs/"]
-  Base --> Reports["scout-report.md<br/>worker-report.md<br/>review-*.md<br/>final-summary.md"]
+  Base --> Reports["scout-report.md<br/>worker-report.md<br/>verification-*.md<br/>review-*.md<br/>final-summary.md"]
 ```
 
 Typical layouts:
@@ -223,6 +233,7 @@ Typical layouts:
   orchestration.md
   scout.md
   worker.md
+  verification-round-N.md
   review-round-N.md
   accepted-fixes-round-N.md
   validation.md
@@ -270,6 +281,7 @@ Project config overrides global config, except `children.piCliPath` is allowed o
     "orchestrator": { "model": "openai-codex/gpt-5.5", "thinking": "high", "timeoutMs": 0 },
     "scout": { "model": "openai-codex/gpt-5.5", "thinking": "minimal" },
     "worker": { "model": "openai-codex/gpt-5.5", "thinking": "medium" },
+    "verifier": { "model": "openai-codex/gpt-5.5", "thinking": "low" },
     "reviewer": { "model": "openai-codex/gpt-5.5", "thinking": "low" },
     "synthesis": { "model": "openai-codex/gpt-5.5", "thinking": "medium" }
   },
@@ -290,7 +302,7 @@ Project config overrides global config, except `children.piCliPath` is allowed o
 
 ### Choosing role models
 
-The default config uses the same base model for every role and varies only `thinking` levels. This is usually a good starting point when your provider supports prompt/input caching: repeated Pi system prompt, tool definitions, and extension context are more likely to hit the same model-specific cache across orchestrator, scout, worker, reviewer, and synthesis runs.
+The default config uses the same base model for every role and varies only `thinking` levels. This is usually a good starting point when your provider supports prompt/input caching: repeated Pi system prompt, tool definitions, and extension context are more likely to hit the same model-specific cache across orchestrator, scout, worker, verifier, reviewer, and synthesis runs.
 
 **Same base model for all roles**
 
@@ -320,7 +332,7 @@ A practical approach is to start with one strong base model and role-specific `t
 
 ### Role-specific timeouts
 
-`children.timeoutMs` is the fallback timeout for child Pi processes. Set `roles.<role>.timeoutMs` to override it for a role; `0` disables that role's timeout. By default the orchestrator has `roles.orchestrator.timeoutMs: 0` so long workflows can continue coordinating multiple bounded worker/reviewer/scout runs without the parent orchestrator being killed at 30 minutes.
+`children.timeoutMs` is the fallback timeout for child Pi processes. Set `roles.<role>.timeoutMs` to override it for a role; `0` disables that role's timeout. By default the orchestrator has `roles.orchestrator.timeoutMs: 0` so long workflows can continue coordinating multiple bounded worker/verifier/reviewer/scout runs without the parent orchestrator being killed at 30 minutes.
 
 ### Copy/paste prompts for automatic role configuration
 

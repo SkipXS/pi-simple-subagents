@@ -36,10 +36,11 @@ test("orchestrator prompt preserves worker package and review policy semantics",
 	assert.match(prompt, /without workerId/i);
 	assert.match(prompt, /worker-1, worker-2/i);
 	assert.match(prompt, /reuse the same workerId/i);
-	assert.match(prompt, /Default: review each completed implementation package/i);
+	assert.match(prompt, /Default: verify each completed implementation package before review/i);
 	assert.match(prompt, /Batch only when/i);
 	assert.match(prompt, /record the rationale in orchestration\.md/i);
-	assert.match(prompt, /does not review or invent findings/i);
+	assert.match(prompt, /does not verify, review, or invent findings/i);
+	assert.match(prompt, /worker -> verifier -> gap-fix worker/i);
 	assert.match(prompt, /evidence-backed fixes/i);
 	assert.match(prompt, /route those to worker/i);
 });
@@ -47,11 +48,12 @@ test("orchestrator prompt preserves worker package and review policy semantics",
 test("prompts preserve artifact, reviewer safety, and finding-threshold semantics", () => {
 	const runDir = tempProject();
 	const scoutPrompt = roleSystemPrompt("scout", runDir, DEFAULT_CONFIG);
+	const verifierPrompt = roleSystemPrompt("verifier", runDir, DEFAULT_CONFIG);
 	const reviewerPrompt = roleSystemPrompt("reviewer", runDir, DEFAULT_CONFIG);
 	const synthesisPrompt = roleSystemPrompt("synthesis", runDir, DEFAULT_CONFIG);
 	const reviewTargetPrompt = reviewTargetSystemPrompt("reviewer", runDir, DEFAULT_CONFIG);
 
-	for (const prompt of [scoutPrompt, reviewerPrompt, synthesisPrompt, reviewTargetPrompt]) {
+	for (const prompt of [scoutPrompt, verifierPrompt, reviewerPrompt, synthesisPrompt, reviewTargetPrompt]) {
 		assert.match(prompt, /write_run_artifact/);
 		assert.match(prompt, /exact relative filename/i);
 		assert.match(prompt, /Expected output artifact/);
@@ -59,6 +61,9 @@ test("prompts preserve artifact, reviewer safety, and finding-threshold semantic
 	}
 	assert.match(scoutPrompt, /do not intentionally modify project\/source files/i);
 	assert.match(scoutPrompt, /prefer read-only alternatives or explain the risk/i);
+	assert.match(verifierPrompt, /Verify the assigned worker package before reviewer review/i);
+	assert.match(verifierPrompt, /Implementation gaps to send back to worker/i);
+	assert.match(verifierPrompt, /Do not perform broad code review/i);
 	assert.match(reviewerPrompt, /Review-only: do not modify project\/source files/i);
 	assert.match(reviewerPrompt, /Finding threshold: report only evidence-backed issues/i);
 	assert.match(reviewerPrompt, /measurably improve correctness/i);
@@ -72,7 +77,7 @@ test("prompts preserve artifact, reviewer safety, and finding-threshold semantic
 
 test("delegable registry roles match run_role_agent schema and keep synthesis private", () => {
 	assert.deepEqual((RoleRunParams.properties.role as unknown as { enum: string[] }).enum, [...DELEGABLE_ROLE_NAMES]);
-	assert.deepEqual(DELEGABLE_ROLE_NAMES, ["scout", "worker", "reviewer"]);
+	assert.deepEqual(DELEGABLE_ROLE_NAMES, ["scout", "worker", "verifier", "reviewer"]);
 	assert.equal(DELEGABLE_ROLE_NAMES.includes("synthesis" as never), false);
 	assert.equal(DELEGABLE_ROLE_NAMES.includes("orchestrator" as never), false);
 });

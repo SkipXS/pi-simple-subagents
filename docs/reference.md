@@ -11,14 +11,14 @@ Detailed reference for [Pi Simple Subagents](../README.md).
 /orchestrate Review @src/parser.ts, fix accepted findings, validate, and review again until good enough
 ```
 
-Use for plan-driven implementation or review/fix workflows that benefit from scout, worker, reviewer, fix, and validation phases.
+Use for plan-driven implementation or review/fix workflows that benefit from scout, worker, verifier, reviewer, fix, and validation phases.
 
 Notes:
 
 - The orchestrator receives the prompt plus the plan content/reference or review/fix instruction.
-- The orchestrator does not perform the review itself; it coordinates fresh reviewers, reads their artifacts, and routes evidence-backed accepted fixes to worker.
+- The orchestrator does not perform verification or review itself; it coordinates fresh verifiers and reviewers, reads their artifacts, routes concrete implementation gaps to the same worker before review, and routes evidence-backed accepted review fixes to worker.
 - Before the first worker call it is instructed to break milestones or accepted fixes into small work packages.
-- Worker and reviewer loop while useful; there is no default hard review-round cap.
+- Worker, verifier, and reviewer loop while useful; there is no default hard verification/review-round cap.
 - Each plan/task/target/context value supports **at most one** `@file` or `@directory` reference. Extra `@...` tokens are rejected to avoid accidental partial context loading.
 
 ### `/scout`
@@ -142,7 +142,7 @@ The corresponding root tool is `run_reviewers`:
 
 | Tool | Slash command | Key options | Use when |
 | --- | --- | --- | --- |
-| `run_orchestrator` | `/orchestrate <plan-or-review/fix-instruction>` | `plan`, `includeOutput?` | Plan-driven or review/fix work should coordinate scout, worker, reviewers, accepted fixes, and validation. |
+| `run_orchestrator` | `/orchestrate <plan-or-review/fix-instruction>` | `plan`, `includeOutput?` | Plan-driven or review/fix work should coordinate scout, worker, verifier, reviewers, accepted fixes, and validation. |
 | `run_scout` | `/scout <task-or-@target>` | `task`, `outputFile?`, `includeOutput?` | Context gathering should be isolated into a compact handoff report. |
 | `run_worker` | `/work <task-or-@file>` | `task`, `purpose?`, `outputFile?`, `includeOutput?` | Direct implementation, fix, or validation is enough. |
 | `run_workers_parallel` | `/work-parallel <json>` | `tasks[{name?, task, purpose?, outputFile?}]` | Multiple tasks are independent and unlikely to edit the same files. |
@@ -166,10 +166,11 @@ Tool results are summary-first by default. Set `includeOutput: true` for inline 
 | `orchestrator` | workflow control | one persistent session per run | `orchestration.md`, `final-summary.md` |
 | `scout` | context | fresh session per scout call | `scout.md`, `scout-report.md` |
 | `worker` | implementation, fix, validation | one persistent worker session per work package (`worker-1`, `worker-2`, ...); reuse the same `workerId` for fixes to that package | `worker-1.md`, `accepted-fixes-round-N.md`, `validation.md` |
+| `verifier` | validation | fresh session per verification round; checks the latest worker package against its plan before reviewer review | `verification-round-N.md`, `verifier-*.md` |
 | `reviewer` | review | fresh session per review round/reviewer | `review-round-N.md`, `review-*.md` |
 | `synthesis` | review synthesis | fresh synthesis session | `final-summary.md` |
 
-`run_role_agent` calls are serialized inside an orchestration run. For new implementation work packages, omit `workerId` so the tool assigns the next worker session. For accepted fixes after reviewing a package, pass that package's `workerId`; if omitted for fix/validation, the latest worker is reused. The orchestrator is prompted to review after each implementation package by default; if it starts another implementation worker before the latest package is marked cleanly reviewed, the tool emits a soft batching warning and the orchestrator should record the rationale in `orchestration.md`. Use `/work-parallel` only when tasks are intentionally independent and can use isolated child run directories.
+`run_role_agent` calls are serialized inside an orchestration run. For new implementation work packages, omit `workerId` so the tool assigns the next worker session. After a worker completes, the orchestrator is prompted to run a fresh `verifier` (`purpose=validation`) against that package before starting reviewer review. If verification finds concrete implementation gaps, the orchestrator should run `worker` with `purpose=fix` and the same `workerId`, then verify again. For accepted fixes after reviewing a package, pass that package's `workerId`; if omitted for worker fix/validation, the latest worker is reused. The orchestrator is prompted to verify and review after each implementation package by default; if it starts another implementation worker before the latest package is marked cleanly reviewed, the tool emits a soft batching warning and the orchestrator should record the rationale in `orchestration.md`. Use `/work-parallel` only when tasks are intentionally independent and can use isolated child run directories.
 
 ### LLM routing guidance
 
@@ -177,7 +178,7 @@ The extension exposes prompt guidance on each root tool:
 
 - Prefer `run_scout` before implementation when the task is not obviously trivial.
 - Use `run_reviewers` for one review-only fanout. Choose `reviewers` explicitly based on the target/focus when calling the tool: one targeted reviewer for narrow work, multiple reviewers only for distinct independent aspects. Keep the review-specific scout enabled unless the user asks to skip it.
-- Use `run_orchestrator` for plan-driven implementation or review/fix workflows that benefit from scout/worker/reviewer coordination. Reviewers review; the orchestrator sequences the loop and sends only evidence-backed accepted fixes to worker.
+- Use `run_orchestrator` for plan-driven implementation or review/fix workflows that benefit from scout/worker/verifier/reviewer coordination. Verifiers check worker packages against the plan before review; reviewers review; the orchestrator sequences the loop and sends only concrete verifier gaps or evidence-backed accepted review fixes to worker.
 - Use `run_worker` for direct implementation, fix, or validation tasks that do not need a full orchestration loop.
 - Use `run_workers_parallel` only for clearly independent tasks unlikely to edit the same files.
 
@@ -199,6 +200,7 @@ Every run writes durable audit artifacts. Keep the artifact directory ignored/pr
   prompts/
   sessions/
   tasks/
+  verification-round-N.md
   accepted-fixes-round-N.md
   validation.md
   final-summary.md
@@ -289,7 +291,7 @@ Project config overrides global config, except project config is not allowed to 
 
 | Key | Default | Description |
 | --- | --- | --- |
-| `roles.<role>.model` | role-specific | Model for `orchestrator`, `scout`, `worker`, `reviewer`, or `synthesis`. |
+| `roles.<role>.model` | role-specific | Model for `orchestrator`, `scout`, `worker`, `verifier`, `reviewer`, or `synthesis`. |
 | `roles.<role>.thinking` | role-specific | Thinking suffix: `off`, `minimal`, `low`, `medium`, `high`, or `xhigh`. |
 | `roles.<role>.timeoutMs` | orchestrator: `0`; others: unset | Override `children.timeoutMs` for one role; `0` disables that role's timeout. |
 | `children.forwardCurrentExtension` | `"auto"` | Forward this extension to child runs when loaded with `-e/--extension`. Use `always` or `never` to force behavior. |
@@ -310,7 +312,7 @@ Unknown config keys are rejected so typos fail early.
 
 This extension adds workflow structure and auditability, not a confidentiality, read-only, or OS sandbox.
 
-Review-only workflows are cooperative by design: `/review`, scout, reviewer, and synthesis prompts instruct child agents not to modify target/source/generated project files, but the extension intentionally does not enforce a separate read-only tool policy. The normal Pi tool surface remains available so reviewers can run diagnostics, tests, benchmarks, and repository-specific evidence-gathering commands when useful. Use an external sandbox/container when the target or commands are untrusted.
+Verification/review workflows are cooperative by design: `/review`, scout, verifier, reviewer, and synthesis prompts instruct child agents not to modify target/source/generated project files, but the extension intentionally does not enforce a separate read-only tool policy. The normal Pi tool surface remains available so verifiers and reviewers can run diagnostics, tests, benchmarks, and repository-specific evidence-gathering commands when useful. Use an external sandbox/container when the target or commands are untrusted.
 
 ### Child environment and credentials
 
@@ -320,7 +322,7 @@ Pi credentials stored in `~/.pi/agent/auth.json` are not environment variables, 
 
 Filtering the inherited environment can reduce accidental exposure of shell-provided secrets, but it is not a complete security boundary in this extension's YOLO model: child agents can still use normal tools, read same-user files, run commands, and access network resources unless an external sandbox prevents it. Use a container, separate user, isolated home directory, restricted credential profile, or other OS-level sandbox when reviewing untrusted repositories or prompts.
 
-- Role runs inherit the normal Pi tool surface; scout/reviewer/orchestrator source edits are not blocked by the extension.
+- Role runs inherit the normal Pi tool surface; scout/verifier/reviewer/orchestrator source edits are not blocked by the extension.
 - Child process timeout defaults to 30 minutes (`children.timeoutMs`) for roles without an override; the orchestrator disables its own timeout by default (`roles.orchestrator.timeoutMs=0`) so long workflows can keep coordinating bounded children.
 - Review and parallel-worker fanout concurrency defaults to 8 (`children.maxConcurrentSubagents`).
 - Worker tasks/handoffs have a configurable maximum size (`orchestration.maxWorkerTaskBytes`).
@@ -340,7 +342,7 @@ The compaction request preserves:
 - original plan/task/target and current goal
 - scout-specific inspected files/docs, key findings, risks, open questions, and expected report artifact
 - changed files and implementation decisions when source work happened
-- open reviewer findings and accepted fixes
+- verifier gaps, open reviewer findings, and accepted fixes
 - validation state and deferred items
 - run artifact paths
 
@@ -433,11 +435,13 @@ Interactive Pi shows child-agent progress in a stable multi-line block. Slash co
 Subagents: ⠋ working
 ✓ worker     │ implementation: fix parser regression      │ finished
              │ ↑1k ↓2k R3k W4.0k $0.123 3.7%/272k (auto) │ gpt-5.5 • medium
-• reviewer-2-1 │ packaging/installability for npm extension │ read package.json
-               │ ↑867 ↓103 R31k $0.023 11.8%/272k (auto)   │ gpt-5.5 • low
+• verify worker-2 r1 │ validation: check package acceptance criteria │ inspect files
+                     │ ↑640 ↓90 R28k $0.018 10.4%/272k (auto)     │ gpt-5.5 • low
+• review worker-2 r1 │ packaging/installability for npm extension   │ read package.json
+                     │ ↑867 ↓103 R31k $0.023 11.8%/272k (auto)     │ gpt-5.5 • low
 ```
 
-Each subagent shows two lines: role label, short prompt/assignment description, and current activity first; usage/context metrics and model/thinking second. Orchestrated reviewer labels are scoped to the latest worker package as `reviewer-<worker>-<round>` (for example, `reviewer-2-1` is review round 1 for `worker-2`) so later packages do not overwrite earlier `reviewer-1` status rows. The model separator on the second line is aligned with the activity separator on the first line, using one shared detail-column width across descriptions and usage metrics. The description is populated for orchestrator, scout, worker, parallel worker, reviewer, and synthesis roles so review and delegation fanouts are less opaque.
+Each subagent shows two lines: role label, short prompt/assignment description, and current activity first; usage/context metrics and model/thinking second. Orchestrated verifier and reviewer status labels are scoped to the latest worker package as `verify worker-N rM` / `review worker-N rM` (for example, `verify worker-2 r1` and `review worker-2 r1` are verification/review round 1 for `worker-2`) so later packages do not overwrite earlier status rows. The model separator on the second line is aligned with the activity separator on the first line, using one shared detail-column width across descriptions and usage metrics. The description is populated for orchestrator, scout, worker, parallel worker, verifier, reviewer, and synthesis roles so verification/review and delegation fanouts are less opaque.
 
 Tool results and slash-command completion messages also preserve the latest `subagentProgress` snapshot and render the same status block in the final summary. This connects the live progress widget with the stable result card so completed runs are not a black box after the widget clears.
 

@@ -47,8 +47,8 @@ interface SubagentProgressSnapshot {
 }
 
 const RUN_ORCHESTRATOR_GUIDELINES = [
-	"Use run_orchestrator for plan-driven implementation or review/fix workflows that need scout/worker/reviewer coordination.",
-	"The orchestrator coordinates review/fix loops; reviewers perform the review, and the orchestrator routes evidence-backed accepted fixes to worker.",
+	"Use run_orchestrator for plan-driven implementation or review/fix workflows that need scout/worker/verifier/reviewer coordination.",
+	"The orchestrator coordinates verification plus review/fix loops; verifiers check worker packages against the plan before review, reviewers perform the review, and the orchestrator routes concrete gaps/fixes to worker.",
 	"Do not use run_orchestrator for review-only work with no intended fixes; use run_reviewers instead.",
 ];
 
@@ -331,14 +331,14 @@ function workerDisplaySegment(workerId: string | undefined): string | undefined 
 	return /^worker-(.+)$/.exec(workerId)?.[1] ?? workerId;
 }
 
-function reviewerScopedLabels(latestWorkerId: string | undefined, round: number | undefined, fallbackRound: number): { artifactLabel?: string; statusLabel?: string } {
+function workerScopedEphemeralLabels(role: "verifier" | "reviewer", latestWorkerId: string | undefined, round: number | undefined, fallbackRound: number): { artifactLabel?: string; statusLabel?: string } {
 	const workerSegment = workerDisplaySegment(latestWorkerId);
 	if (!workerSegment) return {};
 	const workerId = latestWorkerId ?? `worker-${workerSegment}`;
 	const effectiveRound = round ?? fallbackRound;
 	return {
-		artifactLabel: `reviewer-${workerSegment}-round-${effectiveRound}`,
-		statusLabel: `review ${workerId} r${effectiveRound}`,
+		artifactLabel: `${role}-${workerSegment}-round-${effectiveRound}`,
+		statusLabel: `${role === "verifier" ? "verify" : "review"} ${workerId} r${effectiveRound}`,
 	};
 }
 
@@ -359,8 +359,8 @@ function roleRunLabels(role: string, purpose: string, round: number | undefined,
 		const label = `${workerId}${round ? `-round-${round}` : ""}`;
 		return { artifactLabel: label, statusLabel: workerStatusLabel(workerId, purpose, round) };
 	}
-	if (role === "reviewer") {
-		const scoped = reviewerScopedLabels(latestWorkerId, round, fallbackReviewRound);
+	if (role === "verifier" || role === "reviewer") {
+		const scoped = workerScopedEphemeralLabels(role, latestWorkerId, round, fallbackReviewRound);
 		if (scoped.artifactLabel && scoped.statusLabel) return { artifactLabel: scoped.artifactLabel, statusLabel: scoped.statusLabel };
 	}
 	return {
@@ -521,7 +521,7 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 		pi.registerTool({
 			name: "run_orchestrator",
 			label: "Run Orchestrator",
-			description: "Start the simple orchestrator workflow for a plan or review/fix instruction. The orchestrator coordinates scout, worker, reviewers, accepted fixes, and validation; reviewers perform the review.",
+			description: "Start the simple orchestrator workflow for a plan or review/fix instruction. The orchestrator coordinates scout, worker, verifier, reviewers, accepted fixes, and validation; verifiers check worker packages before reviewers perform the review.",
 			promptSnippet: "Run the configured orchestrator workflow for a plan or review/fix instruction",
 			promptGuidelines: RUN_ORCHESTRATOR_GUIDELINES,
 			parameters: OrchestratorParams,
@@ -642,7 +642,7 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 		pi.registerTool({
 			name: "run_role_agent",
 			label: "Run Role Agent",
-			description: `Run ${delegableRoleText} for one concrete handoff task in the current orchestration run. YOLO by design: no file, time, validation, or snapshot guardrails are imposed. Worker sessions are per work package; reuse the same workerId for review fixes to that package.`,
+			description: `Run ${delegableRoleText} for one concrete handoff task in the current orchestration run. YOLO by design: no file, time, validation, or snapshot guardrails are imposed. Worker sessions are per work package; reuse the same workerId for verifier gap fixes or review fixes to that package.`,
 			promptSnippet: `Delegate a concrete task to ${delegableRoleText} within the current orchestration run`,
 			renderCall: renderRoleAgentCall,
 			renderResult: renderRoleAgentResult,
@@ -650,10 +650,12 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 				"Use run_role_agent from orchestrator after deciding the next workflow step.",
 				"Before the first worker call, split broad milestones into small work packages; never delegate a whole milestone or full plan section to one worker.",
 				"A worker task should normally have one deliverable, 1-3 likely files, 3-5 acceptance criteria, explicit non-goals, and one validation check.",
-				"For each new worker implementation package, omit workerId so the tool assigns worker-1, worker-2, etc.; for accepted fixes after reviewing that package, pass the same workerId.",
-				"Use purpose=validation for final tests or end-user checks when useful; Pi YOLO policy applies. If workerId is omitted for fix/validation, the latest worker is reused.",
+				"For each new worker implementation package, omit workerId so the tool assigns worker-1, worker-2, etc.; after the worker returns, run role=verifier purpose=validation before reviewer review.",
+				"If the verifier reports concrete implementation gaps, run role=worker purpose=fix with the same workerId, then run the verifier again before review.",
+				"For accepted fixes after reviewing that package, pass the same workerId; run verifier again before the next reviewer round when the fix changes implementation state.",
+				"Use worker purpose=validation for final tests or end-user checks when useful; Pi YOLO policy applies. If workerId is omitted for fix/validation, the latest worker is reused.",
 				"run_role_agent calls are serialized; do not rely on parallel worker execution in a single assistant turn.",
-				"Default output artifacts avoid overwriting existing role artifacts, but use explicit readable outputFile names for iterative loops such as review-round-1.md, accepted-fixes-round-1.md, and validation.md.",
+				"Default output artifacts avoid overwriting existing role artifacts, but use explicit readable outputFile names for iterative loops such as verification-round-1.md, review-round-1.md, accepted-fixes-round-1.md, and validation.md.",
 			],
 			executionMode: "sequential",
 			parameters: RoleRunParams,
@@ -762,7 +764,7 @@ Write the expected output artifact with write_run_artifact using path ${JSON.str
 					"Preserve the original plan/task/target and current goal.",
 					"For scout sessions, preserve inspected files/docs, key findings, risks, open questions, and expected scout report artifact.",
 					"Preserve changed files, implementation decisions, and rationale when any source work happened.",
-					"Preserve open reviewer findings, accepted fixes, deferred items, and validation state.",
+					"Preserve verifier findings/gaps, open reviewer findings, accepted fixes, deferred items, and validation state.",
 					"Preserve artifact paths under the run directory and any decisions needing user approval.",
 				].join(" ");
 				ctx.compact({
@@ -788,7 +790,7 @@ Write the expected output artifact with write_run_artifact using path ${JSON.str
 			label: "Write Run Artifact",
 			description: "Write a handoff artifact relative to the current orchestration run directory.",
 			promptSnippet: "Write a handoff artifact inside the current orchestration run directory",
-			promptGuidelines: ["Use write_run_artifact for scout, worker, reviewer, and orchestrator handoff files instead of the generic write tool. For expected outputs, pass the exact relative filename from 'Expected output artifact' as path; never invent absolute artifact paths."],
+			promptGuidelines: ["Use write_run_artifact for scout, worker, verifier, reviewer, and orchestrator handoff files instead of the generic write tool. For expected outputs, pass the exact relative filename from 'Expected output artifact' as path; never invent absolute artifact paths."],
 			parameters: ArtifactParams,
 			renderCall: renderArtifactCall,
 			renderResult: renderArtifactResult,

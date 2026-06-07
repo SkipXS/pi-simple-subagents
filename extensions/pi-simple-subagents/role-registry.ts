@@ -5,7 +5,7 @@ export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhig
 export type ThinkingLevel = typeof THINKING_LEVELS[number];
 
 export type RoleSessionStrategy = "persistent" | "ephemeral";
-export type RolePromptKind = "orchestrator" | "scout" | "worker" | "reviewer" | "synthesis";
+export type RolePromptKind = "orchestrator" | "scout" | "worker" | "verifier" | "reviewer" | "synthesis";
 
 export const ROLE_METADATA = [
 	{
@@ -31,6 +31,14 @@ export const ROLE_METADATA = [
 		sessionStrategy: "persistent",
 		promptKind: "worker",
 		defaultConfig: { model: "openai-codex/gpt-5.5", thinking: "medium" },
+	},
+	{
+		id: "verifier",
+		delegable: true,
+		allowedPurposes: ["validation"] as const,
+		sessionStrategy: "ephemeral",
+		promptKind: "verifier",
+		defaultConfig: { model: "openai-codex/gpt-5.5", thinking: "low" },
 	},
 	{
 		id: "reviewer",

@@ -363,8 +363,10 @@ test("role and purpose combinations are validated", () => {
 	assert.doesNotThrow(() => validateRolePurpose("worker", "validation"));
 	assert.doesNotThrow(() => validateRolePurpose("scout", "context"));
 	assert.doesNotThrow(() => validateRolePurpose("reviewer", "review"));
+	assert.doesNotThrow(() => validateRolePurpose("verifier", "validation"));
 	assert.throws(() => validateRolePurpose("worker", "review"), /Invalid role\/purpose/);
 	assert.throws(() => validateRolePurpose("reviewer", "implementation"), /Invalid role\/purpose/);
+	assert.throws(() => validateRolePurpose("verifier", "review"), /Invalid role\/purpose/);
 });
 
 test("corrupt orchestration state is quarantined and ignored", () => {

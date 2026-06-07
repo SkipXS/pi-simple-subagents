@@ -13,6 +13,10 @@
       "model": "openai-codex/gpt-5.5",
       "thinking": "medium"
     },
+    "verifier": {
+      "model": "openai-codex/gpt-5.5",
+      "thinking": "low"
+    },
     "reviewer": {
       "model": "openai-codex/gpt-5.5",
       "thinking": "low"
