@@ -508,15 +508,17 @@ Interactive Pi shows child-agent progress in a stable multi-line block. Slash co
 ```text
 Subagents: ⠋ working
 ✓ worker     │ implementation: fix parser regression      │ finished
-             │ ↑1k ↓2k R3k W4.0k $0.123 3.7%/272k (auto) │ gpt-5.5 • medium
+             │ ↑1k ↓2k R3k W4.0k CH37.5% $0.123 (sub) 3.7%/272k (auto) │ gpt-5.5 • medium
 • verify worker-2 r1 │ validation: check package acceptance criteria │ inspect files
-                     │ ↑640 ↓90 R28k $0.018 10.4%/272k (auto)     │ gpt-5.5 • low
+                     │ ↑640 ↓90 R28k CH98.0% $0.018 (sub) 10.4%/272k (auto) │ gpt-5.5 • low
 • review worker-2 r1 │ packaging/installability for npm extension   │ read package.json
-                     │ ↑867 ↓103 R31k $0.023 11.8%/272k (auto)     │ gpt-5.5 • low
+                     │ ↑867 ↓103 R31k CH98.0% $0.023 (sub) 11.8%/272k (auto) │ gpt-5.5 • low
 ```
 
 Each subagent shows two lines: role label, short prompt/assignment description, and current activity first; usage/context metrics and model/thinking second. Orchestrated verifier and reviewer status labels are scoped to the latest worker package as `verify worker-N rM` / `review worker-N rM` (for example, `verify worker-2 r1` and `review worker-2 r1` are verification/review round 1 for `worker-2`) so later packages do not overwrite earlier status rows. The model separator on the second line is aligned with the activity separator on the first line, using one shared detail-column width across descriptions and usage metrics. The description is populated for orchestrator, scout, worker, parallel worker, verifier, reviewer, and synthesis roles so verification/review and delegation fanouts are less opaque.
 
 Tool results and slash-command completion messages also preserve the latest `subagentProgress` snapshot and render the same status block in the final summary. This connects the live progress widget with the stable result card so completed runs are not a black box after the widget clears.
+
+Usage metrics follow Pi's current footer order: input/output tokens (`↑`/`↓`), cache read/write (`R`/`W`), latest cache hit rate (`CH`), cost with `(sub)` when the model provider uses OAuth/subscription credentials, and context usage.
 
 The context percentage is estimated from the latest child response token total and known model-family context windows; child processes do not currently expose Pi's exact parent footer context calculation.

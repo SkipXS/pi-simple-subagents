@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
@@ -82,6 +83,7 @@ interface UsageTotals {
 	cacheWrite: number;
 	cost: number;
 	latestTotalTokens: number;
+	latestCacheHitRate?: number;
 }
 
 function formatTokens(count: number): string {
@@ -97,6 +99,43 @@ function inferContextWindow(model: string | undefined): number | undefined {
 	if (/claude/.test(lower)) return 200_000;
 	if (/gemini/.test(lower)) return 1_000_000;
 	return undefined;
+}
+
+function stripThinkingSuffix(model: string): string {
+	return model.replace(/:(off|minimal|low|medium|high|xhigh)$/, "");
+}
+
+function configuredModelParts(model: string): { provider?: string; model: string } {
+	const base = stripThinkingSuffix(model);
+	const slash = base.indexOf("/");
+	if (slash > 0) return { provider: base.slice(0, slash), model: base.slice(slash + 1) || base };
+	return { model: base };
+}
+
+function expandHomePath(value: string): string {
+	return value === "~" ? os.homedir() : value.startsWith(`~${path.sep}`) || value.startsWith("~/") ? path.join(os.homedir(), value.slice(2)) : value;
+}
+
+function piAuthPath(): string {
+	const envDir = process.env.PI_CODING_AGENT_DIR?.trim();
+	return path.join(envDir ? expandHomePath(envDir) : path.join(os.homedir(), ".pi", "agent"), "auth.json");
+}
+
+function isProviderUsingOAuth(provider: string | undefined): boolean {
+	if (!provider) return false;
+	try {
+		const auth = JSON.parse(fs.readFileSync(piAuthPath(), "utf8")) as unknown;
+		if (!auth || typeof auth !== "object") return false;
+		const credential = (auth as Record<string, unknown>)[provider];
+		return Boolean(credential && typeof credential === "object" && (credential as Record<string, unknown>).type === "oauth");
+	} catch {
+		return false;
+	}
+}
+
+function latestCacheHitRate(usage: { input: number; cacheRead: number; cacheWrite: number }): number | undefined {
+	const promptTokens = usage.input + usage.cacheRead + usage.cacheWrite;
+	return promptTokens > 0 ? (usage.cacheRead / promptTokens) * 100 : undefined;
 }
 
 function compactArgs(value: unknown): string {
@@ -144,13 +183,14 @@ function messageUsage(message: unknown): { input: number; output: number; cacheR
 	};
 }
 
-function statusMetrics(totals: UsageTotals, model: string | undefined, thinking: string | undefined): string {
+function statusMetrics(totals: UsageTotals, model: string | undefined, thinking: string | undefined, usingSubscription: boolean): string {
 	const parts: string[] = [];
 	if (totals.input) parts.push(`↑${formatTokens(totals.input)}`);
 	if (totals.output) parts.push(`↓${formatTokens(totals.output)}`);
 	if (totals.cacheRead) parts.push(`R${formatTokens(totals.cacheRead)}`);
 	if (totals.cacheWrite) parts.push(`W${formatTokens(totals.cacheWrite)}`);
-	if (totals.cost) parts.push(`$${totals.cost.toFixed(3)}`);
+	if ((totals.cacheRead > 0 || totals.cacheWrite > 0) && totals.latestCacheHitRate !== undefined) parts.push(`CH${totals.latestCacheHitRate.toFixed(1)}%`);
+	if (totals.cost || usingSubscription) parts.push(`$${totals.cost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`);
 	const contextWindow = inferContextWindow(model);
 	if (contextWindow) {
 		const percent = totals.latestTotalTokens > 0 ? `${((totals.latestTotalTokens / contextWindow) * 100).toFixed(1)}%` : "?";
@@ -431,7 +471,10 @@ export async function spawnPiRole(input: {
 		let finalOutput = "";
 		let assistantStopReason: string | undefined;
 		let assistantErrorMessage: string | undefined;
-		let childModel = roleConfig.model.split("/").pop()?.replace(/:(off|minimal|low|medium|high|xhigh)$/, "") || roleConfig.model;
+		const configuredModel = configuredModelParts(roleConfig.model);
+		let childProvider = configuredModel.provider;
+		let childModel = configuredModel.model;
+		let childUsingSubscription = isProviderUsingOAuth(childProvider);
 		const usageTotals: UsageTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, latestTotalTokens: 0 };
 		const statusKey = input.statusKey ?? `subagent:${input.role}`;
 		const statusLabel = input.statusLabel ?? input.role;
@@ -467,7 +510,7 @@ export async function spawnPiRole(input: {
 		};
 		const formatStatusText = (action = statusAction) => {
 			const frame = STATUS_SPINNER_FRAMES[statusFrame++ % STATUS_SPINNER_FRAMES.length];
-			const metrics = statusMetrics(usageTotals, childModel, roleConfig.thinking);
+			const metrics = statusMetrics(usageTotals, childModel, roleConfig.thinking, childUsingSubscription);
 			return `${frame} ${statusLabel}: ${metrics ? `${metrics} - ${action}` : action}`;
 		};
 		const emitStatus = (options: { force?: boolean; action?: string } = {}) => {
@@ -519,7 +562,11 @@ export async function spawnPiRole(input: {
 					setStatusAction("thinking");
 				} else if (event.type === "message_end" && event.message?.role === "assistant") {
 					parsedAssistantMessageEnd = true;
-					if (typeof event.message.provider === "string" && typeof event.message.model === "string") childModel = event.message.model;
+					if (typeof event.message.provider === "string") {
+						childProvider = event.message.provider;
+						childUsingSubscription = isProviderUsingOAuth(childProvider);
+					}
+					if (typeof event.message.model === "string") childModel = event.message.model;
 					const usage = messageUsage(event.message);
 					if (usage) {
 						usageTotals.input += usage.input;
@@ -528,6 +575,7 @@ export async function spawnPiRole(input: {
 						usageTotals.cacheWrite += usage.cacheWrite;
 						usageTotals.cost += usage.cost;
 						usageTotals.latestTotalTokens = usage.totalTokens;
+						usageTotals.latestCacheHitRate = latestCacheHitRate(usage);
 					}
 					if (typeof event.message.stopReason === "string") assistantStopReason = event.message.stopReason;
 					if (typeof event.message.errorMessage === "string") assistantErrorMessage = event.message.errorMessage;

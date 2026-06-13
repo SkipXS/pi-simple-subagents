@@ -306,24 +306,34 @@ test("child runs report timeout accurately", async () => {
 });
 
 test("child runs emit per-subagent status with tool activity and usage metrics", async () => {
-	const cwd = tempProject();
-	const runDir = path.join(cwd, ".pi", "run");
-	const cli = path.join(cwd, "fake-pi.js");
-	fs.writeFileSync(cli, `
+	const oldAgentDir = process.env.PI_CODING_AGENT_DIR;
+	try {
+		const cwd = tempProject();
+		const agentDir = path.join(cwd, "agent-home");
+		fs.mkdirSync(agentDir, { recursive: true });
+		fs.writeFileSync(path.join(agentDir, "auth.json"), JSON.stringify({ "openai-codex": { type: "oauth" } }), "utf8");
+		process.env.PI_CODING_AGENT_DIR = agentDir;
+		const runDir = path.join(cwd, ".pi", "run");
+		const cli = path.join(cwd, "fake-pi.js");
+		fs.writeFileSync(cli, `
 console.log(JSON.stringify({ type: "message_start", message: { role: "assistant" } }));
 console.log(JSON.stringify({ type: "tool_execution_start", toolName: "bash", args: { command: "npm test" } }));
 console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", provider: "openai-codex", model: "gpt-5.5", content: [{ type: "text", text: "done" }], stopReason: "stop", usage: { input: 1000, output: 2000, cacheRead: 3000, cacheWrite: 4000, totalTokens: 10000, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.123 } } } }));
 `, "utf8");
-	const config = cloneConfig();
-	config.children.piCliPath = cli;
-	const statuses: Array<{ key: string; text: string | undefined }> = [];
-	const result = await spawnPiRole({ cwd, role: "worker", task: "status test", runDir, config, statusKey: "subagent:test-worker", statusLabel: "test-worker", onStatus: (status) => statuses.push(status) });
+		const config = cloneConfig();
+		config.children.piCliPath = cli;
+		const statuses: Array<{ key: string; text: string | undefined }> = [];
+		const result = await spawnPiRole({ cwd, role: "worker", task: "status test", runDir, config, statusKey: "subagent:test-worker", statusLabel: "test-worker", onStatus: (status) => statuses.push(status) });
 
-	assert.equal(result.exitCode, 0);
-	assert.equal(statuses.at(-1)?.key, "subagent:test-worker");
-	assert.match(statuses.at(-1)?.text ?? "", /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] test-worker: ↑1\.0k ↓2\.0k R3\.0k W4\.0k \$0\.123 .* - finished$/u);
-	assert.equal(statuses.some((status) => /↑1\.0k ↓2\.0k R3\.0k W4\.0k \$0\.123 3\.7%\/272k \(auto\) - gpt-5\.5 • medium - finished/.test(status.text ?? "")), true);
-	assert.equal(statuses.some((status) => /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] /u.test(status.text ?? "")), true);
+		assert.equal(result.exitCode, 0);
+		assert.equal(statuses.at(-1)?.key, "subagent:test-worker");
+		assert.match(statuses.at(-1)?.text ?? "", /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] test-worker: ↑1\.0k ↓2\.0k R3\.0k W4\.0k CH37\.5% \$0\.123 \(sub\) .* - finished$/u);
+		assert.equal(statuses.some((status) => /↑1\.0k ↓2\.0k R3\.0k W4\.0k CH37\.5% \$0\.123 \(sub\) 3\.7%\/272k \(auto\) - gpt-5\.5 • medium - finished/.test(status.text ?? "")), true);
+		assert.equal(statuses.some((status) => /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] /u.test(status.text ?? "")), true);
+	} finally {
+		if (oldAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = oldAgentDir;
+	}
 });
 
 test("orchestrator child forwards nested run_role_agent subagent status", async () => {
