@@ -11,6 +11,11 @@ import type { ReviewersParams, ScoutParams, WorkerParams, WorkersParallelParams,
 
 type WorkflowUpdate = (text: string, status?: ChildStatusUpdate) => void;
 
+type WorkerRunOptions = {
+	statusKey?: string;
+	statusLabel?: string;
+};
+
 export interface WorkflowDeps {
 	loadConfig?: typeof loadConfig;
 	readPlanReference?: typeof readPlanReference;
@@ -373,7 +378,7 @@ function prepareWorkerTask(cwd: string, dir: string, params: WorkerParams | Work
 	return { name, purpose, text: workerTask.text, source: workerTask.source, warnings: workerTask.warnings, outputFile, outputArtifactPath };
 }
 
-async function runWorkerInDir(cwd: string, dir: string, params: WorkerParams | WorkersParallelTaskParams, signal: AbortSignal | undefined, onUpdate: WorkflowUpdate | undefined, progressLabel = "worker", deps?: WorkflowDeps, prepared?: PreparedWorkerTask): Promise<WorkerRunRecord> {
+async function runWorkerInDir(cwd: string, dir: string, params: WorkerParams | WorkersParallelTaskParams, signal: AbortSignal | undefined, onUpdate: WorkflowUpdate | undefined, progressLabel = "worker", deps?: WorkflowDeps, prepared?: PreparedWorkerTask, options: WorkerRunOptions = {}): Promise<WorkerRunRecord> {
 	const dep = workflowDeps(deps);
 	const config = dep.loadConfig(cwd);
 	ensureDir(dir);
@@ -382,12 +387,14 @@ async function runWorkerInDir(cwd: string, dir: string, params: WorkerParams | W
 	writeArtifact(dir, INPUT_WORKER_TASK_FILE, `Source: ${workerTask.source}\nName: ${workerTask.name}\nPurpose: ${workerTask.purpose}\nExpected output artifact: ${workerTask.outputFile}${referenceWarningText}\n\n${workerTask.text}\n`);
 	writeArtifact(dir, CONFIG_EFFECTIVE_FILE, JSON.stringify(config, null, 2));
 	const task = `Worker task source: ${workerTask.source}\nName: ${workerTask.name}\nPurpose: ${workerTask.purpose}\nExpected output artifact: ${workerTask.outputFile}${referenceWarningText}\nRun directory: ${dir}\nRead input-worker-task.md, perform the requested work, run useful checks, and write the expected output artifact with write_run_artifact using path ${JSON.stringify(workerTask.outputFile)}. Do not use absolute paths or the generic write tool for the handoff artifact. If running as part of a parallel worker batch, stay within the assigned task and avoid editing files likely owned by sibling workers. If a product, architecture, or scope decision is missing, stop and report it instead of guessing.`;
-	const result = await dep.spawnPiRole({ cwd, role: "worker", task, runDir: dir, config, signal, onUpdate: (text) => onUpdate?.(`${progressLabel}: ${text}`), onStatus: forwardChildStatus(onUpdate), statusKey: `subagent:${safePathLabel(progressLabel, "worker")}`, statusLabel: progressLabel, statusDescription: compactStatusDescription(`${workerTask.purpose}: ${promptSummary(workerTask.text, workerTask.source, 56)}`) });
+	const statusLabel = options.statusLabel?.trim() || progressLabel;
+	const statusKey = options.statusKey?.trim() || `subagent:${safePathLabel(progressLabel, "worker")}`;
+	const result = await dep.spawnPiRole({ cwd, role: "worker", task, runDir: dir, config, signal, onUpdate: (text) => onUpdate?.(`${statusLabel}: ${text}`), onStatus: forwardChildStatus(onUpdate), statusKey, statusLabel, statusDescription: compactStatusDescription(`${workerTask.purpose}: ${promptSummary(workerTask.text, workerTask.source, 56)}`) });
 	if (result.exitCode === 0) requireExpectedArtifact(dep, dir, workerTask.outputFile, result, `worker ${workerTask.name}`);
 	return { name: workerTask.name, runDir: dir, taskSource: workerTask.source, result: { ...result, outputPath: result.exitCode === 0 ? workerTask.outputArtifactPath : result.outputPath }, outputArtifactPath: workerTask.outputArtifactPath, purpose: workerTask.purpose };
 }
 
-export async function runWorker(cwd: string, params: WorkerParams, signal?: AbortSignal, onUpdate?: WorkflowUpdate, deps?: WorkflowDeps): Promise<WorkerRunRecord> {
+export async function runWorker(cwd: string, params: WorkerParams, signal?: AbortSignal, onUpdate?: WorkflowUpdate, deps?: WorkflowDeps, options: WorkerRunOptions = {}): Promise<WorkerRunRecord> {
 	const dep = workflowDeps(deps);
 	const config = dep.loadConfig(cwd);
 	const baseDir = resolveRunBaseDir(cwd, config);
@@ -396,7 +403,7 @@ export async function runWorker(cwd: string, params: WorkerParams, signal?: Abor
 	markRunActive(dir);
 	try {
 		const cleanupRecord = runConfiguredArtifactCleanup(baseDir, config, dir);
-		const record = await runWorkerInDir(cwd, dir, params, signal, onUpdate, "worker", dep);
+		const record = await runWorkerInDir(cwd, dir, params, signal, onUpdate, "worker", dep, undefined, options);
 		if (record.result.exitCode !== 0) throwChildRunError("worker failed", record.result);
 		return { ...record, ...cleanupRecord };
 	} finally {

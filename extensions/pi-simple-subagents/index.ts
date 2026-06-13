@@ -507,6 +507,7 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 	let nextWorkerSequence = Math.max(1, persistedState?.nextWorkerSequence ?? workerRuns + 1);
 	let roleOutputSequence = 0;
 	let roleStatusSequence = workerRuns + reviewRuns;
+	let standaloneWorkerStatusSequence = 0;
 	const persistState = () => {
 		if (!runDir) return undefined;
 		return writeOrchestrationState(runDir, { workerRuns, reviewRuns, reviewRunsSinceLatestWorker, latestWorkerRunReviewedClean, latestWorkerId, nextWorkerSequence });
@@ -594,20 +595,22 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 			description: "Run a standalone worker subagent for implementation, fixes, or validation without starting a full orchestrator workflow. YOLO mode does not enforce source-write restrictions.",
 			promptSnippet: "Run a standalone worker subagent for implementation, fixes, or validation",
 			promptGuidelines: RUN_WORKER_GUIDELINES,
-			executionMode: "sequential",
+			executionMode: "parallel",
 			parameters: WorkerParams,
 			renderCall: renderWorkerCall,
 			renderResult: renderWorkerResult,
-			async execute(_id, params: WorkerParamsType, signal, onUpdate, ctx) {
+			async execute(toolCallId, params: WorkerParamsType, signal, onUpdate, ctx) {
 				const progress = createSubagentProgress({ onToolUpdate: onUpdate });
+				const statusLabel = `worker ${++standaloneWorkerStatusSequence}`;
+				const statusKey = `subagent:${safeIdLabel(`${statusLabel}-${toolCallId}`, "worker")}`;
 				const result = await runWorker(ctx.cwd, params, signal, (text, status) => {
 					if (text) progress.text(text);
 					if (status) progress.status(status);
-				});
+				}, undefined, { statusKey, statusLabel });
 				const subagentProgress = progress.snapshot();
 				return {
 					content: [{ type: "text", text: childSummary("Worker finished.", [["Run dir", result.runDir], ["Task source", result.taskSource], ["Output", result.outputArtifactPath], ["Transcript", result.result.transcriptPath], ["Artifact cleanup", result.cleanupSummary]], result.result.output, { includeOutput: params.includeOutput, subagentProgress }) }],
-					details: withSubagentProgress(result as unknown as Record<string, unknown>, progress),
+					details: withSubagentProgress({ ...(result as unknown as Record<string, unknown>), statusLabel, statusKey }, progress),
 				};
 			},
 		});

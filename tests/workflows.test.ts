@@ -616,6 +616,27 @@ test("worker surfaces artifact cleanup summary when cleanup is configured", asyn
 	assert.equal(fs.existsSync(path.join(result.runDir, ACTIVE_RUN_MARKER_FILE)), false);
 });
 
+test("standalone worker accepts per-call status labels for parallel tool display", async () => {
+	const cwd = tempProject();
+	const config = cloneConfig();
+	const statuses: Array<{ key: string; text: string | undefined }> = [];
+	let sawSpawnOptions = false;
+
+	await runWorker(cwd, { task: "inline task" }, undefined, (_text, status) => {
+		if (status) statuses.push(status);
+	}, {
+		loadConfig: () => config,
+		async spawnPiRole(input) {
+			sawSpawnOptions = input.statusKey === "subagent:worker-one" && input.statusLabel === "worker 1";
+			input.onStatus?.({ key: input.statusKey ?? "missing", text: `⠋ ${input.statusLabel}: waiting` });
+			return fakeCompliantResult(input);
+		},
+	}, { statusKey: "subagent:worker-one", statusLabel: "worker 1" });
+
+	assert.equal(sawSpawnOptions, true);
+	assert.deepEqual(statuses, [{ key: "subagent:worker-one", text: "⠋ worker 1: waiting" }]);
+});
+
 test("standalone worker rejects oversized tasks before spawning", async () => {
 	const cwd = tempProject();
 	const config = cloneConfig();
@@ -995,10 +1016,11 @@ test("extension registration is role-gated", () => {
 	try {
 		delete process.env.PI_ORCHESTRATOR_AGENT_ROLE;
 		delete process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
-		const rootTools: string[] = [];
+		const rootTools: Array<{ name: string; executionMode?: string }> = [];
 		const rootCommands: string[] = [];
-		orchestratorAgentsExtension({ registerTool: (tool: { name: string }) => rootTools.push(tool.name), registerCommand: (name: string) => rootCommands.push(name), sendMessage() {} } as never);
-		assert.deepEqual(rootTools.slice(0, 5), ["run_orchestrator", "run_reviewers", "run_scout", "run_worker", "run_workers_parallel"]);
+		orchestratorAgentsExtension({ registerTool: (tool: { name: string; executionMode?: string }) => rootTools.push(tool), registerCommand: (name: string) => rootCommands.push(name), sendMessage() {} } as never);
+		assert.deepEqual(rootTools.slice(0, 5).map((tool) => tool.name), ["run_orchestrator", "run_reviewers", "run_scout", "run_worker", "run_workers_parallel"]);
+		assert.equal(rootTools.find((tool) => tool.name === "run_worker")?.executionMode, "parallel");
 		assert.equal(rootCommands.includes("scout"), true);
 		assert.equal(rootCommands.includes("review"), true);
 
