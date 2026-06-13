@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { validateOutputArtifactPath, writeArtifact } from "./artifacts.ts";
+import { requireExpectedOutputArtifact, resolveArtifactPath, validateOutputArtifactPath, writeArtifact } from "./artifacts.ts";
 import { childEnvCounts, childResultText, spawnPiRole } from "./child-runner.ts";
 import { loadConfig } from "./config.ts";
 import {
@@ -54,18 +54,44 @@ function safeIdLabel(value: string, fallback: string): string {
 	return (value || fallback).toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-|-$/g, "").slice(0, 64) || fallback;
 }
 
+function sendStartupWarning(pi: ExtensionAPI, warning: string, details: Record<string, unknown>): void {
+	console.warn(warning);
+	try {
+		pi.sendMessage({ customType: "pi-simple-subagents-config-error", display: true, content: `pi-simple-subagents warning: ${warning}`, details });
+	} catch { /* best-effort startup warning */ }
+}
+
 function parseStartupRole(pi: ExtensionAPI): RoleName | undefined {
 	try {
 		return parseRoleEnv(process.env[ROLE_ENV]);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		const warning = `${message}; loading pi-simple-subagents in root mode instead.`;
-		console.warn(warning);
-		try {
-			pi.sendMessage({ customType: "pi-simple-subagents-config-error", display: true, content: `pi-simple-subagents warning: ${warning}`, details: { env: ROLE_ENV, value: process.env[ROLE_ENV] } });
-		} catch { /* best-effort startup warning */ }
+		sendStartupWarning(pi, warning, { env: ROLE_ENV, value: process.env[ROLE_ENV] });
 		return undefined;
 	}
+}
+
+function startupRunDirFallbackReason(runDir: string | undefined): string | undefined {
+	if (runDir === undefined) return `${RUN_DIR_ENV} is not set`;
+	if (runDir.trim() === "") return `${RUN_DIR_ENV} is empty`;
+	try {
+		const stat = fs.statSync(runDir);
+		if (!stat.isDirectory()) return `${RUN_DIR_ENV} is not a directory: ${runDir}`;
+		return undefined;
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		return `${RUN_DIR_ENV} is invalid: ${runDir} (${message})`;
+	}
+}
+
+function validateStartupRunDir(pi: ExtensionAPI, role: RoleName | undefined, runDir: string | undefined): string | undefined {
+	if (!role) return runDir;
+	const reason = startupRunDirFallbackReason(runDir);
+	if (!reason) return runDir;
+	const warning = `${ROLE_ENV}=${role} is set but ${reason}; loading pi-simple-subagents in root mode instead.`;
+	sendStartupWarning(pi, warning, { roleEnv: ROLE_ENV, role, runDirEnv: RUN_DIR_ENV, runDir });
+	return undefined;
 }
 
 function roleTaskStatusDescription(purpose: string, task: string): string {
@@ -117,11 +143,14 @@ function roleRunLabels(role: string, purpose: string, round: number | undefined,
 }
 
 function requireExpectedRunArtifact(runDir: string, outputFile: string, result: { outputPath: string; transcriptPath: string }, label: string): string {
-	const target = validateOutputArtifactPath(runDir, outputFile);
-	if (!fs.existsSync(target)) {
-		throw new Error(`${label} did not write the expected output artifact.\nExpected output artifact: ${outputFile}\nExpected path: ${target}\nRun dir: ${runDir}\nChild output log: ${result.outputPath}\nTranscript: ${result.transcriptPath}\nUse write_run_artifact with path ${JSON.stringify(outputFile)}; do not write artifacts via absolute paths or the generic write tool.`);
+	let target = outputFile;
+	try {
+		target = resolveArtifactPath(runDir, outputFile);
+		return requireExpectedOutputArtifact(runDir, outputFile);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		throw new Error(`${label} did not write the expected output artifact.\nExpected output artifact: ${outputFile}\nExpected path: ${target}\nRun dir: ${runDir}\nArtifact validation error: ${message}\nChild output log: ${result.outputPath}\nTranscript: ${result.transcriptPath}\nUse write_run_artifact with path ${JSON.stringify(outputFile)}; do not write artifacts via absolute paths or the generic write tool.`);
 	}
-	return validateOutputArtifactPath(runDir, outputFile);
 }
 
 function defaultRoleOutputFile(runDir: string, label: string, nextSequence: () => number): string {
@@ -134,8 +163,10 @@ function defaultRoleOutputFile(runDir: string, label: string, nextSequence: () =
 }
 
 export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
-	const role = parseStartupRole(pi);
-	const runDir = process.env[RUN_DIR_ENV];
+	let role = parseStartupRole(pi);
+	const startupRunDir = process.env[RUN_DIR_ENV];
+	const runDir = validateStartupRunDir(pi, role, startupRunDir);
+	if (role && !runDir) role = undefined;
 	const persistedState = runDir ? readOrchestrationState(runDir) : undefined;
 	let workerRuns = persistedState?.workerRuns ?? (Number(process.env[WORKER_RUNS_ENV] ?? "0") || 0);
 	let reviewRuns = persistedState?.reviewRuns ?? (Number(process.env[REVIEW_RUNS_ENV] ?? "0") || 0);

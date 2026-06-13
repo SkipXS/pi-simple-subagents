@@ -1,5 +1,4 @@
-import * as fs from "node:fs";
-import { cleanupRunArtifacts, formatArtifactCleanupResult, validateOutputArtifactPath, type ArtifactCleanupResult } from "./artifacts.ts";
+import { cleanupRunArtifacts, formatArtifactCleanupResult, requireExpectedOutputArtifact, resolveArtifactPath, type ArtifactCleanupResult } from "./artifacts.ts";
 import { spawnPiRole, type ChildRunResult, type ChildStatusUpdate } from "./child-runner.ts";
 import { loadConfig, type Config } from "./config.ts";
 import { formatReferenceWarnings, readPlanReference, readReference } from "./references.ts";
@@ -16,7 +15,6 @@ export interface WorkflowDeps {
 	readPlanReference?: typeof readPlanReference;
 	readReference?: typeof readReference;
 	spawnPiRole?: typeof spawnPiRole;
-	existsSync?: typeof fs.existsSync;
 }
 
 const defaultWorkflowDeps: Required<WorkflowDeps> = {
@@ -24,7 +22,6 @@ const defaultWorkflowDeps: Required<WorkflowDeps> = {
 	readPlanReference,
 	readReference,
 	spawnPiRole,
-	existsSync: fs.existsSync,
 };
 
 export function workflowDeps(overrides?: WorkflowDeps): Required<WorkflowDeps> {
@@ -68,12 +65,15 @@ export function assertWorkerTaskWithinBudget(taskText: string, source: string, c
 	throw new Error(`${label} is ${bytes} bytes, exceeding orchestration.maxWorkerTaskBytes=${limit}. This usually means an entire milestone, broad plan section, or multiple deliverables were delegated to one worker. Split it into a smaller work package (one concrete deliverable, 1-3 likely files, 3-5 acceptance criteria, explicit non-goals, and one validation check), or set orchestration.maxWorkerTaskBytes=0/increase it intentionally. Task source: ${source}`);
 }
 
-export function requireExpectedArtifact(dep: Required<WorkflowDeps>, runDir: string, outputFile: string, result: ChildRunResult, label: string): string {
-	const target = validateOutputArtifactPath(runDir, outputFile);
-	if (!dep.existsSync(target)) {
-		throw new Error(`${label} did not write the expected output artifact.\nExpected output artifact: ${outputFile}\nExpected path: ${target}\nRun dir: ${runDir}\nChild output log: ${result.outputPath}\nTranscript: ${result.transcriptPath}\nUse write_run_artifact with path ${JSON.stringify(outputFile)}; do not write artifacts via absolute paths or the generic write tool.`);
+export function requireExpectedArtifact(_dep: Required<WorkflowDeps>, runDir: string, outputFile: string, result: ChildRunResult, label: string): string {
+	let target = outputFile;
+	try {
+		target = resolveArtifactPath(runDir, outputFile);
+		return requireExpectedOutputArtifact(runDir, outputFile);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		throw new Error(`${label} did not write the expected output artifact.\nExpected output artifact: ${outputFile}\nExpected path: ${target}\nRun dir: ${runDir}\nArtifact validation error: ${message}\nChild output log: ${result.outputPath}\nTranscript: ${result.transcriptPath}\nUse write_run_artifact with path ${JSON.stringify(outputFile)}; do not write artifacts via absolute paths or the generic write tool.`);
 	}
-	return validateOutputArtifactPath(runDir, outputFile);
 }
 
 export interface CleanupRecord {

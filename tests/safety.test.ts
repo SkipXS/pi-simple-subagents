@@ -6,7 +6,7 @@ import * as path from "node:path";
 import { getRoleTimeoutMs, loadConfig } from "../extensions/pi-simple-subagents/config.ts";
 import { readReference } from "../extensions/pi-simple-subagents/references.ts";
 import { validateRolePurpose } from "../extensions/pi-simple-subagents/roles.ts";
-import { ACTIVE_RUN_MARKER_FILE, appendArtifactFile, cleanupRunArtifacts, clearRunActive, copyArtifactFile, markRunActive, resolveArtifactPath, resolveRoleSessionFile, resolveRunBaseDir, validateOutputArtifactPath, writeArtifact } from "../extensions/pi-simple-subagents/artifacts.ts";
+import { ACTIVE_RUN_MARKER_FILE, OWNED_RUN_MARKER_FILE, appendArtifactFile, cleanupRunArtifacts, clearRunActive, copyArtifactFile, markRunActive, markRunOwned, requireExpectedOutputArtifact, resolveArtifactPath, resolveRoleSessionFile, resolveRunBaseDir, validateOutputArtifactPath, writeArtifact } from "../extensions/pi-simple-subagents/artifacts.ts";
 import { readOrchestrationState } from "../extensions/pi-simple-subagents/state.ts";
 
 function tempProject(): string {
@@ -241,6 +241,7 @@ test("output artifact targets reject reserved dirs, directories, and hard links"
 	assert.throws(() => validateOutputArtifactPath(runDir, "input-plan.md"), /protected run file/);
 	assert.throws(() => validateOutputArtifactPath(runDir, "config-effective.json"), /protected run file/);
 	assert.throws(() => validateOutputArtifactPath(runDir, ".pi-simple-subagents-active-run"), /protected run file/);
+	assert.throws(() => validateOutputArtifactPath(runDir, ".pi-simple-subagents-run.json"), /protected run file/);
 	assert.throws(() => validateOutputArtifactPath(runDir, "input-target.md:evil"), /must not contain ':'/);
 	assert.throws(() => validateOutputArtifactPath(runDir, "reports/review.md:evil"), /must not contain ':'/);
 	assert.equal(validateOutputArtifactPath(runDir, "reports/input-plan.md"), path.join(runDir, "reports", "input-plan.md"));
@@ -252,6 +253,35 @@ test("output artifact targets reject reserved dirs, directories, and hard links"
 	const hardlink = path.join(runDir, "linked-report.md");
 	fs.linkSync(outside, hardlink);
 	assert.throws(() => validateOutputArtifactPath(runDir, "linked-report.md"), /multiple hard links/);
+});
+
+test("expected output artifact validation requires a regular non-hardlinked file", () => {
+	const runDir = tempProject();
+	assert.throws(() => requireExpectedOutputArtifact(runDir, "missing.md"), /does not exist/);
+
+	writeArtifact(runDir, "report.md", "ok");
+	assert.equal(requireExpectedOutputArtifact(runDir, "report.md"), path.join(runDir, "report.md"));
+
+	fs.mkdirSync(path.join(runDir, "directory.md"));
+	assert.throws(() => requireExpectedOutputArtifact(runDir, "directory.md"), /not a regular file/);
+
+	const outside = path.join(tempProject(), "outside-expected.md");
+	fs.writeFileSync(outside, "outside", "utf8");
+	fs.linkSync(outside, path.join(runDir, "hardlinked.md"));
+	assert.throws(() => requireExpectedOutputArtifact(runDir, "hardlinked.md"), /multiple hard links/);
+});
+
+test("expected output artifact validation rejects symlinks when platform permits", (t) => {
+	const runDir = tempProject();
+	const outside = path.join(tempProject(), "outside-expected.md");
+	fs.writeFileSync(outside, "outside", "utf8");
+	try {
+		fs.symlinkSync(outside, path.join(runDir, "linked.md"), "file");
+	} catch (error) {
+		t.skip(`symlink creation unavailable: ${error instanceof Error ? error.message : String(error)}`);
+		return;
+	}
+	assert.throws(() => requireExpectedOutputArtifact(runDir, "linked.md"), /symbolic link/);
 });
 
 test("artifact base dir rejects symlinks and junctions", (t) => {
@@ -271,9 +301,11 @@ test("artifact base dir rejects symlinks and junctions", (t) => {
 function makeOwnedRun(baseDir: string, name: string, contentBytes: number, mtimeMs: number): string {
 	const dir = path.join(baseDir, name);
 	fs.mkdirSync(dir, { recursive: true });
+	markRunOwned(dir);
 	fs.writeFileSync(path.join(dir, "config-effective.json"), "{}", "utf8");
 	fs.writeFileSync(path.join(dir, "payload.txt"), "x".repeat(contentBytes), "utf8");
 	const date = new Date(mtimeMs);
+	fs.utimesSync(path.join(dir, OWNED_RUN_MARKER_FILE), date, date);
 	fs.utimesSync(path.join(dir, "config-effective.json"), date, date);
 	fs.utimesSync(path.join(dir, "payload.txt"), date, date);
 	fs.utimesSync(dir, date, date);
@@ -290,7 +322,7 @@ test("artifact cleanup is disabled by default", () => {
 	assert.equal(fs.existsSync(oldRun), true);
 });
 
-test("artifact cleanup deletes old owned runs while preserving current and foreign dirs", () => {
+test("artifact cleanup deletes old owned runs while preserving current, foreign, and unmarked config dirs", () => {
 	const baseDir = tempProject();
 	const oldRun = makeOwnedRun(baseDir, "old-run", 10, 1000);
 	const activeRun = makeOwnedRun(baseDir, "active-run", 10, 1000);
@@ -298,6 +330,9 @@ test("artifact cleanup deletes old owned runs while preserving current and forei
 	const foreignDir = path.join(baseDir, "foreign-dir");
 	fs.mkdirSync(foreignDir);
 	fs.writeFileSync(path.join(foreignDir, "payload.txt"), "foreign", "utf8");
+	const fakeConfigDir = path.join(baseDir, "fake-config-dir");
+	fs.mkdirSync(fakeConfigDir);
+	fs.writeFileSync(path.join(fakeConfigDir, "config-effective.json"), "{}", "utf8");
 	const config = loadConfig(tempProject());
 	config.artifacts.cleanup.maxAgeMs = 5000;
 
@@ -308,6 +343,7 @@ test("artifact cleanup deletes old owned runs while preserving current and forei
 	assert.equal(fs.existsSync(activeRun), true);
 	assert.equal(fs.existsSync(freshRun), true);
 	assert.equal(fs.existsSync(foreignDir), true);
+	assert.equal(fs.existsSync(fakeConfigDir), true);
 });
 
 test("artifact cleanup enforces total size by deleting oldest non-active runs", () => {
@@ -317,7 +353,7 @@ test("artifact cleanup enforces total size by deleting oldest non-active runs", 
 	const newest = makeOwnedRun(baseDir, "003-newest", 50, 3000);
 	const activeRun = makeOwnedRun(baseDir, "004-active", 100, 4000);
 	const config = loadConfig(tempProject());
-	config.artifacts.cleanup.maxTotalBytes = 175;
+	config.artifacts.cleanup.maxTotalBytes = 500;
 
 	const result = cleanupRunArtifacts(baseDir, config, activeRun, 10_000);
 
@@ -354,7 +390,7 @@ test("artifact cleanup preserves other marked active runs during size cleanup", 
 	const currentRun = makeOwnedRun(baseDir, "004-current", 50, 4000);
 	markRunActive(otherActive);
 	const config = loadConfig(tempProject());
-	config.artifacts.cleanup.maxTotalBytes = 125;
+	config.artifacts.cleanup.maxTotalBytes = 500;
 
 	const result = cleanupRunArtifacts(baseDir, config, currentRun, 10_000);
 
@@ -365,13 +401,52 @@ test("artifact cleanup preserves other marked active runs during size cleanup", 
 	assert.equal(fs.existsSync(currentRun), true);
 });
 
-test("active run markers are created and cleared", () => {
-	const runDir = makeOwnedRun(tempProject(), "run", 1, 1000);
+test("artifact cleanup candidate collection does not recursively size runs before age filtering", () => {
+	const artifactsSource = fs.readFileSync(new URL("../extensions/pi-simple-subagents/artifacts.ts", import.meta.url), "utf8");
+	const cleanupCandidatesBody = artifactsSource.match(/function cleanupCandidates[\s\S]*?\n}\n\nexport function cleanupRunArtifacts/)?.[0] ?? "";
+	assert.ok(cleanupCandidatesBody.includes("candidates.push({ path: target, mtimeMs: stat.mtimeMs })"));
+	assert.equal(cleanupCandidatesBody.includes("directorySizeBytes"), false);
+});
+
+test("artifact cleanup filters by age before recursively sizing retained runs when permissions can prove it", (t) => {
+	const baseDir = tempProject();
+	const oldRun = makeOwnedRun(baseDir, "old-run", 10, 1000);
+	const freshRun = makeOwnedRun(baseDir, "fresh-run", 10, 9000);
+	const unreadable = path.join(freshRun, "unreadable");
+	fs.mkdirSync(unreadable);
+	try {
+		fs.chmodSync(unreadable, 0);
+		try {
+			fs.readdirSync(unreadable);
+			t.skip("directory permissions do not prevent recursive reads on this platform");
+			return;
+		} catch {
+			// Expected on platforms where chmod can make recursive size scans fail.
+		}
+		const config = loadConfig(tempProject());
+		config.artifacts.cleanup.maxAgeMs = 5000;
+
+		const result = cleanupRunArtifacts(baseDir, config, undefined, 10_000);
+
+		assert.equal(result?.deletedRuns, 1);
+		assert.equal(fs.existsSync(oldRun), false);
+		assert.equal(fs.existsSync(freshRun), true);
+		assert.deepEqual(result?.errors, []);
+	} finally {
+		try { fs.chmodSync(unreadable, 0o700); } catch { /* ignore cleanup */ }
+	}
+});
+
+test("active run markers are created and cleared while owned marker remains", () => {
+	const runDir = path.join(tempProject(), "run");
 	const marker = markRunActive(runDir);
+	const ownedMarker = path.join(runDir, OWNED_RUN_MARKER_FILE);
 	assert.equal(marker, path.join(runDir, ACTIVE_RUN_MARKER_FILE));
 	assert.equal(fs.existsSync(marker), true);
+	assert.equal(fs.existsSync(ownedMarker), true);
 	clearRunActive(runDir);
 	assert.equal(fs.existsSync(marker), false);
+	assert.equal(fs.existsSync(ownedMarker), true);
 });
 
 test("role and purpose combinations are validated", () => {

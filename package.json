@@ -12,6 +12,7 @@
   },
   "homepage": "https://github.com/SkipXS/pi-simple-subagents#readme",
   "type": "module",
+  "packageManager": "npm@11.14.1",
   "engines": {
     "node": ">=22.19.0"
   },
@@ -35,7 +36,7 @@
     "smoke:pack": "node scripts/smoke-pack.mjs",
     "release:check": "npm run check && npm run smoke:pack",
     "prepack": "npm run check",
-    "prepublishOnly": "npm run check"
+    "prepublishOnly": "npm run release:check"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": ">=0.78.0 <1",

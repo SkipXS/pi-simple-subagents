@@ -111,6 +111,14 @@ Requirements:
 - Node.js `>=22.19.0`
 - Pi `@earendil-works/pi-coding-agent` and companion Pi packages `>=0.78.0 <1`
 
+Registry install (after the first npm publish):
+
+```bash
+pi install pi-simple-subagents
+```
+
+This package may not be available from the npm registry until its first release is published. Until then, use a local checkout or a pinned Git ref.
+
 Local development install:
 
 ```bash
@@ -119,14 +127,14 @@ pi install /absolute/path/to/pi-simple-subagents
 pi install ./pi-simple-subagents
 ```
 
-Git install after publishing:
+Git install:
 
 ```bash
 # reproducible tag / commit preferred
 pi install git:github.com/SkipXS/pi-simple-subagents@v0.1.0
 pi install git:github.com/SkipXS/pi-simple-subagents@<commit-sha>
 
-# moving default branch for quick testing
+# moving default branch for quick testing only
 pi install git:github.com/SkipXS/pi-simple-subagents
 ```
 
@@ -427,6 +435,13 @@ npm run check
 npm run release:check
 npm pack --dry-run
 ```
+
+Release checklist:
+
+- Keep `packageManager` in `package.json` aligned with the npm version used to refresh `package-lock.json`.
+- Use signed, annotated Git tags for releases where possible, and prefer pinned tags or commit SHAs in install instructions.
+- Run `npm run release:check`; `prepublishOnly` runs the same check so the packed-package smoke test gates manual publishes.
+- Publish with provenance when supported by the release environment, for example `npm publish --provenance`.
 
 Temporary local Pi testing:
 

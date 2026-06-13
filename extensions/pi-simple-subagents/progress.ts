@@ -95,22 +95,63 @@ export function formatSubagentProgress(snapshot: SubagentProgressSnapshot): stri
 	return [header, ...lines].join("\n");
 }
 
-export function createSubagentProgress(options: { onToolUpdate?: ToolProgressOnUpdate; setWidget?: WidgetSetter }) {
+export interface SubagentProgressOptions {
+	onToolUpdate?: ToolProgressOnUpdate;
+	setWidget?: WidgetSetter;
+	throttleMs?: number;
+	now?: () => number;
+	setTimeout?: (callback: () => void, delayMs: number) => unknown;
+	clearTimeout?: (timer: unknown) => void;
+}
+
+const DEFAULT_PROGRESS_THROTTLE_MS = 300;
+
+export function createSubagentProgress(options: SubagentProgressOptions) {
 	const statuses = new Map<string, { text: string; description?: string }>();
+	const throttleMs = Math.max(0, options.throttleMs ?? DEFAULT_PROGRESS_THROTTLE_MS);
+	const now = options.now ?? (() => Date.now());
+	const scheduleTimer = options.setTimeout ?? ((callback: () => void, delayMs: number) => setTimeout(callback, delayMs));
+	const cancelTimer = options.clearTimeout ?? ((timer: unknown) => clearTimeout(timer as ReturnType<typeof setTimeout>));
 	let current: string | undefined;
 	let lastRendered = "";
+	let lastPublishedAt = 0;
+	let pendingTimer: unknown;
 
 	const snapshot = (): SubagentProgressSnapshot => ({
 		statuses: [...statuses.entries()].map(([key, status]) => ({ key, text: status.text, ...(status.description ? { description: status.description } : {}) })),
 		...(current ? { current } : {}),
 	});
-	const publish = () => {
+	const cancelPendingPublish = () => {
+		if (pendingTimer === undefined) return;
+		cancelTimer(pendingTimer);
+		pendingTimer = undefined;
+	};
+	const publishNow = () => {
 		const state = snapshot();
 		const rendered = formatSubagentProgress(state);
 		if (rendered === lastRendered) return;
 		lastRendered = rendered;
+		lastPublishedAt = now();
 		options.onToolUpdate?.({ content: [{ type: "text", text: rendered }], details: { subagentProgress: state } });
 		options.setWidget?.(rendered.split("\n"));
+	};
+	const publish = (terminal = false) => {
+		if (terminal || throttleMs === 0 || lastRendered === "") {
+			cancelPendingPublish();
+			publishNow();
+			return;
+		}
+		const delayMs = Math.max(0, throttleMs - (now() - lastPublishedAt));
+		if (delayMs === 0) {
+			cancelPendingPublish();
+			publishNow();
+			return;
+		}
+		if (pendingTimer !== undefined) return;
+		pendingTimer = scheduleTimer(() => {
+			pendingTimer = undefined;
+			publishNow();
+		}, delayMs);
 	};
 
 	return {
@@ -129,7 +170,7 @@ export function createSubagentProgress(options: { onToolUpdate?: ToolProgressOnU
 				if (finished === existing.text && description === existing.description) return;
 				statuses.set(status.key, { text: finished, ...(description ? { description } : {}) });
 				current = finished;
-				publish();
+				publish(true);
 				return;
 			}
 			const text = status.text.trim();
@@ -137,10 +178,12 @@ export function createSubagentProgress(options: { onToolUpdate?: ToolProgressOnU
 			if (text === existing?.text && description === existing.description) return;
 			statuses.set(status.key, { text, ...(description ? { description } : {}) });
 			current = text;
-			publish();
+			publish(isTerminalStatusAction(parseStatusLine(text, status.key).action));
 		},
 		snapshot,
 		clear() {
+			cancelPendingPublish();
+			lastRendered = "";
 			options.setWidget?.(undefined);
 		},
 	};

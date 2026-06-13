@@ -5,6 +5,7 @@ import { CONFIG_EFFECTIVE_FILE, EXTRA_REVIEW_CONTEXT_FILE, INPUT_SCOUT_TASK_FILE
 import { roleById, type RoleName } from "./role-registry.ts";
 
 export const ACTIVE_RUN_MARKER_FILE = ".pi-simple-subagents-active-run";
+export const OWNED_RUN_MARKER_FILE = ".pi-simple-subagents-run.json";
 
 export function runId(): string {
 	const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\..+/, "");
@@ -89,6 +90,7 @@ function ensureArtifactTarget(runDir: string, target: string): string {
 const RESERVED_OUTPUT_ARTIFACT_DIRS = new Set(["delegations", "logs", "outputs", "prompts", "sessions", "tasks"]);
 const RESERVED_OUTPUT_ARTIFACT_FILES = new Set([
 	ACTIVE_RUN_MARKER_FILE,
+	OWNED_RUN_MARKER_FILE,
 	CONFIG_EFFECTIVE_FILE,
 	EXTRA_REVIEW_CONTEXT_FILE,
 	"input-plan.md",
@@ -112,6 +114,21 @@ export function validateOutputArtifactPath(runDir: string, name: string): string
 	if (parts.length === 1 && firstPart && RESERVED_OUTPUT_ARTIFACT_FILES.has(firstPart)) throw new Error(`Output artifact path uses protected run file: ${firstPart}`);
 	assertExistingParentsAreNotSymlinks(runDir, target);
 	assertNoExistingLink(target, "append");
+	return target;
+}
+
+export function requireExpectedOutputArtifact(runDir: string, name: string): string {
+	const target = validateOutputArtifactPath(runDir, name);
+	let stat: fs.Stats;
+	try {
+		stat = fs.lstatSync(target);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new Error(`Expected output artifact does not exist: ${target}`);
+		throw error;
+	}
+	if (stat.isSymbolicLink()) throw new Error(`Expected output artifact is a symbolic link: ${target}`);
+	if (!stat.isFile()) throw new Error(`Expected output artifact is not a regular file: ${target}`);
+	if (stat.nlink > 1) throw new Error(`Expected output artifact has multiple hard links and cannot be accepted safely: ${target}`);
 	return target;
 }
 
@@ -191,7 +208,7 @@ export interface ArtifactCleanupResult {
 interface CleanupCandidate {
 	path: string;
 	mtimeMs: number;
-	sizeBytes: number;
+	sizeBytes?: number;
 }
 
 function artifactCleanupConfigured(config: Config): boolean {
@@ -213,14 +230,24 @@ function directorySizeBytes(dir: string): number {
 function isExtensionRunDir(dir: string): boolean {
 	try {
 		const stat = fs.lstatSync(dir);
-		return stat.isDirectory() && !stat.isSymbolicLink() && fs.existsSync(path.join(dir, "config-effective.json"));
+		if (!stat.isDirectory() || stat.isSymbolicLink()) return false;
+		const marker = path.join(dir, OWNED_RUN_MARKER_FILE);
+		const markerStat = fs.lstatSync(marker);
+		if (!markerStat.isFile() || markerStat.isSymbolicLink()) return false;
+		const parsed = JSON.parse(fs.readFileSync(marker, "utf8")) as { extension?: unknown; marker?: unknown };
+		return parsed.extension === "pi-simple-subagents" && parsed.marker === "owned-run";
 	} catch {
 		return false;
 	}
 }
 
-export function markRunActive(runDir: string): string {
+export function markRunOwned(runDir: string): string {
 	ensureDir(runDir);
+	return writeArtifact(runDir, OWNED_RUN_MARKER_FILE, JSON.stringify({ extension: "pi-simple-subagents", marker: "owned-run", version: 1, createdAt: new Date().toISOString() }, null, 2));
+}
+
+export function markRunActive(runDir: string): string {
+	markRunOwned(runDir);
 	return writeArtifact(runDir, ACTIVE_RUN_MARKER_FILE, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }, null, 2));
 }
 
@@ -250,7 +277,7 @@ function cleanupCandidates(baseDir: string, activeRunDir: string | undefined, er
 		if (!entry.isDirectory() || !isExtensionRunDir(target) || isRunActive(target)) continue;
 		try {
 			const stat = fs.statSync(target);
-			candidates.push({ path: target, mtimeMs: stat.mtimeMs, sizeBytes: directorySizeBytes(target) });
+			candidates.push({ path: target, mtimeMs: stat.mtimeMs });
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			errors.push(`${target}: ${message}`);
@@ -266,11 +293,18 @@ export function cleanupRunArtifacts(baseDir: string, config: Config, activeRunDi
 	const absoluteBase = path.resolve(baseDir);
 	const active = activeRunDir ? path.resolve(activeRunDir) : undefined;
 	if (active && !isPathInside(absoluteBase, active)) throw new Error(`Active run dir is outside artifact base dir: ${activeRunDir}`);
+	const candidateSize = (candidate: CleanupCandidate): number => {
+		if (candidate.sizeBytes !== undefined) return candidate.sizeBytes;
+		candidate.sizeBytes = directorySizeBytes(candidate.path);
+		return candidate.sizeBytes;
+	};
 	const removeCandidate = (candidate: CleanupCandidate) => {
+		let sizeBytes = 0;
 		try {
+			sizeBytes = candidateSize(candidate);
 			fs.rmSync(candidate.path, { recursive: true, force: true });
 			result.deletedRuns++;
-			result.deletedBytes += candidate.sizeBytes;
+			result.deletedBytes += sizeBytes;
 			return true;
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
@@ -297,11 +331,16 @@ export function cleanupRunArtifacts(baseDir: string, config: Config, activeRunDi
 			try { activeBytes = directorySizeBytes(active); }
 			catch (error) { result.errors.push(`${active}: ${error instanceof Error ? error.message : String(error)}`); }
 		}
-		let totalBytes = activeBytes + candidates.reduce((sum, candidate) => sum + candidate.sizeBytes, 0);
+		let totalBytes = activeBytes;
+		for (const candidate of candidates) {
+			try { totalBytes += candidateSize(candidate); }
+			catch (error) { result.errors.push(`${candidate.path}: ${error instanceof Error ? error.message : String(error)}`); }
+		}
 		const retained: CleanupCandidate[] = [];
 		for (const candidate of candidates) {
+			const sizeBytes = candidate.sizeBytes ?? 0;
 			if (totalBytes > config.artifacts.cleanup.maxTotalBytes && removeCandidate(candidate)) {
-				totalBytes -= candidate.sizeBytes;
+				totalBytes -= sizeBytes;
 			} else {
 				retained.push(candidate);
 			}

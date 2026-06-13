@@ -5,11 +5,22 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
-import { ACTIVE_RUN_MARKER_FILE } from "../extensions/pi-simple-subagents/artifacts.ts";
+import { ACTIVE_RUN_MARKER_FILE, markRunOwned } from "../extensions/pi-simple-subagents/artifacts.ts";
 import { getPiInvocation, quoteAtReferencePath, shouldForwardCurrentExtension, spawnPiRole, wasLoadedWithExtensionFlag, type ChildRunResult } from "../extensions/pi-simple-subagents/child-runner.ts";
 import { DEFAULT_CONFIG, type Config } from "../extensions/pi-simple-subagents/config.ts";
 import orchestratorAgentsExtension from "../extensions/pi-simple-subagents/index.ts";
 import { runReviewers, runScout, runWorker, runWorkersParallel, parseReviewTargetCommand } from "../extensions/pi-simple-subagents/workflows.ts";
+
+const originalWorkerRunsEnv = process.env.PI_ORCHESTRATOR_AGENT_WORKER_RUNS;
+const originalReviewRunsEnv = process.env.PI_ORCHESTRATOR_AGENT_REVIEW_RUNS;
+delete process.env.PI_ORCHESTRATOR_AGENT_WORKER_RUNS;
+delete process.env.PI_ORCHESTRATOR_AGENT_REVIEW_RUNS;
+test.after(() => {
+	if (originalWorkerRunsEnv === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_WORKER_RUNS;
+	else process.env.PI_ORCHESTRATOR_AGENT_WORKER_RUNS = originalWorkerRunsEnv;
+	if (originalReviewRunsEnv === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_REVIEW_RUNS;
+	else process.env.PI_ORCHESTRATOR_AGENT_REVIEW_RUNS = originalReviewRunsEnv;
+});
 
 function tempProject(): string {
 	return fs.mkdtempSync(path.join(os.tmpdir(), "pi-simple-subagents-test-"));
@@ -619,6 +630,7 @@ test("worker surfaces artifact cleanup summary when cleanup is configured", asyn
 	const baseDir = path.join(cwd, ".pi", "runs");
 	const oldRun = path.join(baseDir, "old-run");
 	fs.mkdirSync(oldRun, { recursive: true });
+	markRunOwned(oldRun);
 	fs.writeFileSync(path.join(oldRun, "config-effective.json"), "{}", "utf8");
 	fs.writeFileSync(path.join(oldRun, "payload.txt"), "old", "utf8");
 	const oldDate = new Date(Date.now() - 60_000);
@@ -747,6 +759,7 @@ test("run_role_agent requires the assigned worker output artifact", async () => 
 	try {
 		const cwd = tempProject();
 		const runDir = path.join(cwd, ".pi", "run");
+		fs.mkdirSync(runDir, { recursive: true });
 		const cli = path.join(cwd, "fake-pi.js");
 		fs.writeFileSync(cli, `
 const fs = require("node:fs");
@@ -786,6 +799,7 @@ test("run_role_agent rejects oversized worker delegations before spawning", asyn
 	try {
 		const cwd = tempProject();
 		const runDir = path.join(cwd, ".pi", "run");
+		fs.mkdirSync(runDir, { recursive: true });
 		const cli = path.join(cwd, "fake-pi.js");
 		fs.writeFileSync(cli, `throw new Error("should not spawn");\n`, "utf8");
 		const configPath = path.join(cwd, ".pi", "pi-simple-subagents", "config.json");
@@ -817,6 +831,7 @@ test("run_role_agent assigns one worker session per implementation and reuses it
 	try {
 		const cwd = tempProject();
 		const runDir = path.join(cwd, ".pi", "run");
+		fs.mkdirSync(runDir, { recursive: true });
 		const cli = path.join(cwd, "fake-pi.js");
 		fs.writeFileSync(cli, `
 const fs = require("node:fs");
@@ -881,6 +896,7 @@ test("run_role_agent scopes reviewer status labels to the latest worker", async 
 	try {
 		const cwd = tempProject();
 		const runDir = path.join(cwd, ".pi", "run");
+		fs.mkdirSync(runDir, { recursive: true });
 		const cli = path.join(cwd, "fake-pi.js");
 		fs.writeFileSync(cli, `
 const fs = require("node:fs");
@@ -933,6 +949,7 @@ test("run_role_agent fails instead of copying child output when artifact is miss
 	try {
 		const cwd = tempProject();
 		const runDir = path.join(cwd, ".pi", "run");
+		fs.mkdirSync(runDir, { recursive: true });
 		const cli = path.join(cwd, "fake-pi.js");
 		fs.writeFileSync(cli, `console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", provider: "fake", model: "fake-model", content: [{ type: "text", text: "child output only" }], stopReason: "stop" } }));\n`, "utf8");
 		process.env.PI_ORCHESTRATOR_AGENT_ROLE = "orchestrator";
@@ -1023,6 +1040,35 @@ test("invalid role environment falls back to root registration and warns", () =>
 		assert.equal(tools.includes("run_orchestrator"), true);
 		assert.equal(commands.includes("review"), true);
 		assert.match(warnings.join("\n"), /Invalid PI_ORCHESTRATOR_AGENT_ROLE: orchestratorx/);
+		assert.match(messages.map((message) => message.content ?? "").join("\n"), /root mode/);
+	} finally {
+		console.warn = oldWarn;
+		if (oldRole === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+		else process.env.PI_ORCHESTRATOR_AGENT_ROLE = oldRole;
+		if (oldRunDir === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+		else process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR = oldRunDir;
+	}
+});
+
+test("leaked role environment without run dir falls back to root registration and warns", () => {
+	const oldRole = process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+	const oldRunDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+	const oldWarn = console.warn;
+	try {
+		process.env.PI_ORCHESTRATOR_AGENT_ROLE = "orchestrator";
+		delete process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+		const tools: string[] = [];
+		const commands: string[] = [];
+		const messages: Array<{ content?: string }> = [];
+		const warnings: string[] = [];
+		console.warn = (message?: unknown) => { warnings.push(String(message)); };
+		assert.doesNotThrow(() => orchestratorAgentsExtension({ registerTool: (tool: { name: string }) => tools.push(tool.name), registerCommand: (name: string) => commands.push(name), sendMessage(message: { content?: string }) { messages.push(message); } } as never));
+		assert.equal(tools.includes("run_orchestrator"), true);
+		assert.equal(commands.includes("review"), true);
+		assert.equal(tools.includes("run_role_agent"), false);
+		assert.equal(tools.includes("write_run_artifact"), false);
+		assert.match(warnings.join("\n"), /PI_ORCHESTRATOR_AGENT_ROLE=orchestrator/);
+		assert.match(warnings.join("\n"), /PI_ORCHESTRATOR_AGENT_RUN_DIR is not set/);
 		assert.match(messages.map((message) => message.content ?? "").join("\n"), /root mode/);
 	} finally {
 		console.warn = oldWarn;
