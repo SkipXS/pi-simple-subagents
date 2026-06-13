@@ -12,7 +12,9 @@
 | `summaries.ts` | Shared child/workflow result summary formatting for tool and slash-command responses. |
 | `rendering.ts` | TUI renderers for tool calls/results. Keeps display formatting separate from registration/execution logic. |
 | `progress.ts` | Live subagent status aggregation, status-table formatting, and final progress snapshots embedded in tool details. |
-| `workflows.ts` | Worker, parallel-worker, and review workflow implementations plus compatibility re-exports for all workflow entrypoints. |
+| `workflows.ts` | Compatibility re-exports for workflow entrypoints used by tools, commands, and tests. |
+| `review-workflow.ts` | Review target workflow, optional scout phase, reviewer fanout, failure summaries, synthesis, and cleanup lifecycle. |
+| `worker-workflow.ts` | Standalone and parallel worker workflow setup, expected artifact enforcement, child fanout, and cleanup lifecycle. |
 | `orchestrator-workflow.ts` | Orchestrator workflow setup, plan/reference capture, child spawn, and cleanup lifecycle. |
 | `scout-workflow.ts` | Standalone scout workflow setup, expected artifact enforcement, child spawn, and cleanup lifecycle. |
 | `workflow-common.ts` | Shared workflow dependency injection, validation, status formatting, expected-artifact checks, and cleanup helpers. |
@@ -121,6 +123,6 @@ Keep these seams intact when changing behavior:
 - UI rendering changes belong in `rendering.ts`.
 - Progress/status formatting belongs in `progress.ts`.
 - Child process/protocol/lifecycle changes belong in `child-runner.ts` and should get runtime tests.
-- Workflow sequencing belongs in `workflows.ts` and should preserve run artifact names/contracts.
+- Workflow sequencing belongs in the role-specific `*-workflow.ts` modules and should preserve run artifact names/contracts; keep `workflows.ts` as a compatibility export surface.
 - Child-role tool registration and child-role state belong in `index.ts`; root tool registration belongs in `root-tools.ts`; root slash-command registration belongs in `commands.ts`. Keep all adapter-focused.
 - Safety policy changes need tests in `tests/safety.test.ts` or targeted workflow/runtime tests.
