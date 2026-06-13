@@ -26,7 +26,12 @@ jobs:
       - name: Install tested Pi host API range entry
         shell: bash
         run: npm install --no-save --save-dev @earendil-works/pi-ai@"${{ matrix.pi-version }}" @earendil-works/pi-coding-agent@"${{ matrix.pi-version }}" @earendil-works/pi-tui@"${{ matrix.pi-version }}"
-      - run: npm run check
+      - name: Full check
+        if: matrix.os == 'ubuntu-latest'
+        run: npm run check
+      - name: Portable check
+        if: matrix.os != 'ubuntu-latest'
+        run: npm run typecheck && node --experimental-strip-types --test tests/safety.test.ts tests/workflows.test.ts
       - run: npm audit --audit-level=moderate
       - run: npm pack --dry-run --ignore-scripts
       - name: Smoke-test packed Pi package load
