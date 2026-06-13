@@ -1,156 +1,34 @@
-import * as fs from "node:fs";
 import * as path from "node:path";
-import { cleanupRunArtifacts, clearRunActive, ensureDir, formatArtifactCleanupResult, markRunActive, resolveRunBaseDir, runId, validateOutputArtifactPath, writeArtifact, type ArtifactCleanupResult } from "./artifacts.ts";
-import { childResultText, spawnPiRole, throwChildRunError, type ChildRunResult, type ChildStatusUpdate } from "./child-runner.ts";
-import { CONFIG_EFFECTIVE_FILE, DEFAULT_SCOUT_OUTPUT_FILE, DEFAULT_WORKER_OUTPUT_FILE, EXTRA_REVIEW_CONTEXT_FILE, FINAL_SUMMARY_FILE, INPUT_SCOUT_TASK_FILE, INPUT_TARGET_FILE, INPUT_WORKER_TASK_FILE, PARALLEL_WORKERS_FILE, PARALLEL_WORKERS_SUMMARY_FILE, REVIEW_FAILURE_SUMMARY_FILE, SCOUT_REVIEW_CONTEXT_FILE } from "./constants.ts";
+import { clearRunActive, ensureDir, markRunActive, resolveRunBaseDir, runId, validateOutputArtifactPath, writeArtifact } from "./artifacts.ts";
+import { childResultText, throwChildRunError, type ChildRunResult } from "./child-runner.ts";
+import { CONFIG_EFFECTIVE_FILE, DEFAULT_WORKER_OUTPUT_FILE, EXTRA_REVIEW_CONTEXT_FILE, FINAL_SUMMARY_FILE, INPUT_TARGET_FILE, INPUT_WORKER_TASK_FILE, PARALLEL_WORKERS_FILE, PARALLEL_WORKERS_SUMMARY_FILE, REVIEW_FAILURE_SUMMARY_FILE, SCOUT_REVIEW_CONTEXT_FILE } from "./constants.ts";
 export { parseReviewTargetCommand } from "./command-parsing.ts";
+export { runOrchestrator } from "./orchestrator-workflow.ts";
+export { runScout, type ScoutRunRecord } from "./scout-workflow.ts";
 import { fanoutConcurrency, runFanout } from "./fanout.ts";
-import { loadConfig, type Config } from "./config.ts";
+import type { Config } from "./config.ts";
 import { reviewTargetSystemPrompt } from "./prompts.ts";
-import { formatReferenceWarnings, readPlanReference, readReference } from "./references.ts";
+import { formatReferenceWarnings } from "./references.ts";
 import { DEFAULT_REVIEW_ANGLES } from "./roles.ts";
-import type { ReviewersParams, ScoutParams, WorkerParams, WorkersParallelParams, WorkersParallelTaskParams } from "./schemas.ts";
-
-type WorkflowUpdate = (text: string, status?: ChildStatusUpdate) => void;
-
-type WorkerRunOptions = {
-	statusKey?: string;
-	statusLabel?: string;
-};
-
-export interface WorkflowDeps {
-	loadConfig?: typeof loadConfig;
-	readPlanReference?: typeof readPlanReference;
-	readReference?: typeof readReference;
-	spawnPiRole?: typeof spawnPiRole;
-	existsSync?: typeof fs.existsSync;
-}
+import type { ReviewersParams, WorkerParams, WorkersParallelParams, WorkersParallelTaskParams } from "./schemas.ts";
+import {
+	assertWorkerTaskWithinBudget,
+	compactStatusDescription,
+	forwardChildStatus,
+	promptSummary,
+	requireExpectedArtifact,
+	requireNonEmpty,
+	runConfiguredArtifactCleanup,
+	safePathLabel,
+	workflowDeps,
+	type CleanupRecord,
+	type WorkflowDeps,
+	type WorkflowUpdate,
+	type WorkerRunOptions,
+} from "./workflow-common.ts";
+export { assertWorkerTaskWithinBudget } from "./workflow-common.ts";
 
 const MAX_REVIEWERS = 8;
-
-const defaultWorkflowDeps: Required<WorkflowDeps> = {
-	loadConfig,
-	readPlanReference,
-	readReference,
-	spawnPiRole,
-	existsSync: fs.existsSync,
-};
-
-function workflowDeps(overrides?: WorkflowDeps): Required<WorkflowDeps> {
-	return { ...defaultWorkflowDeps, ...(overrides ?? {}) };
-}
-
-function formatRunTask(planText: string, planSource: string, runDir: string, warnings: readonly string[] = []): string {
-	return `Run directory: ${runDir}\nInstruction source: ${planSource}${formatReferenceWarnings(warnings)}\n\nPlan / review-fix instruction:\n${planText}\n\nStart by writing orchestration.md. Then follow the orchestrator workflow. If the instruction is unclear, stop and ask the user for clarification instead of guessing.`;
-}
-
-function safePathLabel(value: string | undefined, fallback: string): string {
-	return (value ?? fallback).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 48) || fallback;
-}
-
-function compactStatusDescription(value: string, maxLength = 72): string {
-	const normalized = value.trim().replace(/\s+/g, " ");
-	if (normalized.length <= maxLength) return normalized;
-	return `${normalized.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
-}
-
-function promptSummary(text: string, fallback: string, maxLength = 72): string {
-	const firstLine = text.split(/\r?\n/).map((line) => line.trim()).find((line) => line.length > 0) ?? fallback;
-	return compactStatusDescription(firstLine, maxLength);
-}
-
-function forwardChildStatus(onUpdate: WorkflowUpdate | undefined): (status: ChildStatusUpdate) => void {
-	return (status) => onUpdate?.("", status);
-}
-
-function requireNonEmpty(value: string, label: string): string {
-	const trimmed = value.trim();
-	if (!trimmed) throw new Error(`${label} must be a non-empty string`);
-	return trimmed;
-}
-
-export function assertWorkerTaskWithinBudget(taskText: string, source: string, config: Config, label = "worker task"): void {
-	const limit = config.orchestration.maxWorkerTaskBytes;
-	if (limit === 0) return;
-	const bytes = Buffer.byteLength(taskText, "utf8");
-	if (bytes <= limit) return;
-	throw new Error(`${label} is ${bytes} bytes, exceeding orchestration.maxWorkerTaskBytes=${limit}. This usually means an entire milestone, broad plan section, or multiple deliverables were delegated to one worker. Split it into a smaller work package (one concrete deliverable, 1-3 likely files, 3-5 acceptance criteria, explicit non-goals, and one validation check), or set orchestration.maxWorkerTaskBytes=0/increase it intentionally. Task source: ${source}`);
-}
-
-function requireExpectedArtifact(dep: Required<WorkflowDeps>, runDir: string, outputFile: string, result: ChildRunResult, label: string): string {
-	const target = validateOutputArtifactPath(runDir, outputFile);
-	if (!dep.existsSync(target)) {
-		throw new Error(`${label} did not write the expected output artifact.\nExpected output artifact: ${outputFile}\nExpected path: ${target}\nRun dir: ${runDir}\nChild output log: ${result.outputPath}\nTranscript: ${result.transcriptPath}\nUse write_run_artifact with path ${JSON.stringify(outputFile)}; do not write artifacts via absolute paths or the generic write tool.`);
-	}
-	return validateOutputArtifactPath(runDir, outputFile);
-}
-
-export async function runOrchestrator(cwd: string, rawPlan: string, signal?: AbortSignal, onUpdate?: WorkflowUpdate, deps?: WorkflowDeps): Promise<{ result: ChildRunResult; runDir: string; planSource: string } & CleanupRecord> {
-	const dep = workflowDeps(deps);
-	const planInput = requireNonEmpty(rawPlan, "orchestration plan");
-	const config = dep.loadConfig(cwd);
-	const baseDir = resolveRunBaseDir(cwd, config);
-	const dir = path.join(baseDir, runId());
-	ensureDir(dir);
-	markRunActive(dir);
-	try {
-		const cleanupRecord = runConfiguredArtifactCleanup(baseDir, config, dir);
-		const { planText, planSource, warnings } = dep.readPlanReference(cwd, planInput, config);
-		writeArtifact(dir, "input-plan.md", `Source: ${planSource}${formatReferenceWarnings(warnings)}
-
-${planText}
-`);
-		writeArtifact(dir, CONFIG_EFFECTIVE_FILE, JSON.stringify(config, null, 2));
-		const task = formatRunTask(planText, planSource, dir, warnings);
-		const result = await dep.spawnPiRole({ cwd, role: "orchestrator", task, runDir: dir, config, signal, onUpdate, onStatus: forwardChildStatus(onUpdate), statusKey: "subagent:orchestrator", statusLabel: "orchestrator", statusDescription: compactStatusDescription(`coordinate plan: ${planSource}`) });
-		return { result, runDir: dir, planSource, ...cleanupRecord };
-	} finally {
-		clearRunActive(dir);
-	}
-}
-
-interface CleanupRecord {
-	cleanup?: ArtifactCleanupResult;
-	cleanupSummary?: string;
-}
-
-function runConfiguredArtifactCleanup(baseDir: string, config: Config, activeRunDir: string): CleanupRecord {
-	const cleanup = cleanupRunArtifacts(baseDir, config, activeRunDir);
-	return cleanup ? { cleanup, cleanupSummary: formatArtifactCleanupResult(cleanup) } : {};
-}
-
-interface ScoutRunRecord extends CleanupRecord {
-	runDir: string;
-	taskSource: string;
-	result: ChildRunResult;
-	outputArtifactPath: string;
-}
-
-export async function runScout(cwd: string, params: ScoutParams, signal?: AbortSignal, onUpdate?: WorkflowUpdate, deps?: WorkflowDeps): Promise<ScoutRunRecord> {
-	const dep = workflowDeps(deps);
-	const config = dep.loadConfig(cwd);
-	const baseDir = resolveRunBaseDir(cwd, config);
-	const dir = path.join(baseDir, runId());
-	ensureDir(dir);
-	markRunActive(dir);
-	try {
-		const cleanupRecord = runConfiguredArtifactCleanup(baseDir, config, dir);
-		const taskInput = requireNonEmpty(params.task, "scout task");
-		const scoutTask = dep.readReference(cwd, taskInput, "scout task", config, { allowDirectory: true });
-		const outputFile = params.outputFile?.trim() || DEFAULT_SCOUT_OUTPUT_FILE;
-		const outputArtifactPath = validateOutputArtifactPath(dir, outputFile);
-		const referenceWarningText = formatReferenceWarnings(scoutTask.warnings);
-		writeArtifact(dir, INPUT_SCOUT_TASK_FILE, `Source: ${scoutTask.source}\nExpected output artifact: ${outputFile}${referenceWarningText}\n\n${scoutTask.text}\n`);
-		writeArtifact(dir, CONFIG_EFFECTIVE_FILE, JSON.stringify(config, null, 2));
-		const task = `Scout task source: ${scoutTask.source}\nExpected output artifact: ${outputFile}${referenceWarningText}\nRun directory: ${dir}\nRead input-scout-task.md, gather relevant context, inspect files directly when useful, and write the expected output artifact with write_run_artifact using path ${JSON.stringify(outputFile)}. Do not use absolute paths or the generic write tool for the handoff artifact. Do not implement changes. Do not intentionally modify project/source files; if a command may write generated output, prefer read-only alternatives or explain the risk before running it. Produce a compact handoff for the parent agent.`;
-		const result = await dep.spawnPiRole({ cwd, role: "scout", task, runDir: dir, config, signal, onUpdate: (text) => onUpdate?.(`scout: ${text}`), onStatus: forwardChildStatus(onUpdate), statusKey: "subagent:scout", statusLabel: "scout", statusDescription: promptSummary(scoutTask.text, `scout ${scoutTask.source}`) });
-		if (result.exitCode !== 0) throwChildRunError("scout failed", result);
-		requireExpectedArtifact(dep, dir, outputFile, result, "scout");
-		return { runDir: dir, taskSource: scoutTask.source, result: { ...result, outputPath: outputArtifactPath }, outputArtifactPath, ...cleanupRecord };
-	} finally {
-		clearRunActive(dir);
-	}
-}
 
 type WorkerPurpose = NonNullable<WorkerParams["purpose"]>;
 

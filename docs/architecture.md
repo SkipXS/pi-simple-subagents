@@ -12,7 +12,10 @@
 | `summaries.ts` | Shared child/workflow result summary formatting for tool and slash-command responses. |
 | `rendering.ts` | TUI renderers for tool calls/results. Keeps display formatting separate from registration/execution logic. |
 | `progress.ts` | Live subagent status aggregation, status-table formatting, and final progress snapshots embedded in tool details. |
-| `workflows.ts` | High-level workflow implementations for orchestrator, review, scout, worker, and parallel-worker runs. Owns run directory setup, task/reference preparation, fanout, expected artifact checks, and cleanup summaries. |
+| `workflows.ts` | Worker, parallel-worker, and review workflow implementations plus compatibility re-exports for all workflow entrypoints. |
+| `orchestrator-workflow.ts` | Orchestrator workflow setup, plan/reference capture, child spawn, and cleanup lifecycle. |
+| `scout-workflow.ts` | Standalone scout workflow setup, expected artifact enforcement, child spawn, and cleanup lifecycle. |
+| `workflow-common.ts` | Shared workflow dependency injection, validation, status formatting, expected-artifact checks, and cleanup helpers. |
 | `child-runner.ts` | Spawns child Pi processes, builds CLI invocations, streams/parses JSONL events, captures transcripts/stderr/output artifacts, forwards status/usage, and cleans up process trees on abort/timeout or lingering terminal output. |
 | `artifacts.ts` | Run/artifact path resolution, symlink/hardlink protections, atomic writes, active-run markers, and configurable cleanup of extension-owned run directories. |
 | `config.ts` | Default config, strict global/project config parsing, role timeouts, extension forwarding config, and project-local safety restrictions. |
