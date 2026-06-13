@@ -178,6 +178,45 @@ console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", 
 	assert.match(stderr, /stderr-39/);
 });
 
+test("buffered transcript and stderr caps write one marker and preserve utf8", async () => {
+	const cwd = tempProject();
+	const runDir = path.join(cwd, ".pi", "run");
+	const cli = path.join(cwd, "fake-pi.js");
+	fs.writeFileSync(cli, `
+async function write(stream, text) {
+  if (!stream.write(text)) await new Promise((resolve) => stream.once("drain", resolve));
+}
+(async () => {
+  const transcriptPayload = "😀".repeat(2048);
+  for (let index = 0; index < 560; index++) {
+    await write(process.stdout, JSON.stringify({ type: "message_start", index, transcriptPayload }) + "\\n");
+  }
+  const stderrPayload = "é".repeat(4096);
+  for (let index = 0; index < 300; index++) {
+    await write(process.stderr, ` + "`stderr-${index}-${stderrPayload}\\n`" + `);
+  }
+  await write(process.stdout, JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "capped final" }], stopReason: "stop" } }) + "\\n");
+})().catch((error) => { console.error(error); process.exitCode = 1; });
+`, "utf8");
+	const config = cloneConfig();
+	config.children.piCliPath = cli;
+
+	const result = await spawnPiRole({ cwd, role: "worker", task: "buffered artifact caps", runDir, config });
+
+	assert.equal(result.exitCode, 0);
+	assert.equal(result.stopReason, "stop");
+	assert.match(result.output, /capped final/);
+	const capMarker = /\[Artifact cap reached at \d+ bytes; further output omitted\.\]/g;
+	const transcript = fs.readFileSync(result.transcriptPath, "utf8");
+	assert.equal(transcript.match(capMarker)?.length, 1);
+	assert.doesNotMatch(transcript, /\uFFFD/);
+	assert.match(transcript, /"index":0/);
+	const stderr = fs.readFileSync(result.stderrPath, "utf8");
+	assert.equal(stderr.match(capMarker)?.length, 1);
+	assert.doesNotMatch(stderr, /\uFFFD/);
+	assert.match(stderr, /stderr-0/);
+});
+
 test("orchestrator default timeout is disabled while child role timeout remains configured", async () => {
 	const cwd = tempProject();
 	const runDir = path.join(cwd, ".pi", "run");
