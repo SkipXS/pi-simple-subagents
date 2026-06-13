@@ -186,9 +186,15 @@ function readSubagentProgressSnapshot(value: unknown): SubagentProgressSnapshot 
 	return { statuses, ...(current ? { current } : {}) };
 }
 
-function renderSubagentProgressDetails(details: Record<string, unknown> | undefined): string[] {
+function renderSubagentProgressDetails(details: Record<string, unknown> | undefined, content?: string): string[] {
 	const progress = readSubagentProgressSnapshot(details?.subagentProgress);
-	return progress ? ["", formatSubagentProgress(progress)] : [];
+	if (!progress) return [];
+	// Expanded tool output can already contain the same live/final progress block in
+	// `content` (updates publish it for the TUI, final summaries include it for the
+	// transcript/model). Rendering the details copy as well makes Ctrl+O show the
+	// whole subagent table twice.
+	if (content && /^Subagents:\s/m.test(content)) return [];
+	return ["", formatSubagentProgress(progress)];
 }
 
 function renderString(record: Record<string, unknown> | undefined, key: string): string | undefined {
@@ -269,7 +275,7 @@ function createResultRenderer(title: string, summarize: (details: Record<string,
 		const optionRecord = asRecord(options);
 		const expanded = renderBoolean(optionRecord, "expanded") === true;
 		const content = expanded ? resultContentText(resultRecord) : undefined;
-		return renderToolText(theme, title, summary.fields, [...(summary.details ?? []), ...renderSubagentProgressDetails(details), ...(content ? ["", content] : [])], summary.status ?? "success");
+		return renderToolText(theme, title, summary.fields, [...(summary.details ?? []), ...renderSubagentProgressDetails(details, content), ...(content ? ["", content] : [])], summary.status ?? "success");
 	};
 }
 

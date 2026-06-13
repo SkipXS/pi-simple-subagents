@@ -1010,6 +1010,34 @@ test("invalid role environment falls back to root registration and warns", () =>
 	}
 });
 
+test("expanded tool renderer does not duplicate subagent progress already present in content", () => {
+	const oldRole = process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+	const oldRunDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+	try {
+		delete process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+		delete process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+		let runWorker: { renderResult?: (result: unknown, options: unknown, theme: unknown) => { render(width: number): string[] } } | undefined;
+		orchestratorAgentsExtension({ registerTool: (tool: { name: string; renderResult?: (result: unknown, options: unknown, theme: unknown) => { render(width: number): string[] } }) => { if (tool.name === "run_worker") runWorker = tool; }, registerCommand() {}, sendMessage() {} } as never);
+		assert.ok(runWorker?.renderResult);
+
+		const rendered = runWorker.renderResult({
+			content: [{ type: "text", text: "Worker finished.\n\nSubagents: ✓ done\n✓ worker │ implementation: ok │ finished\n\nFull child output is preserved." }],
+			details: {
+				runDir: "run-dir",
+				result: { exitCode: 0 },
+				subagentProgress: { statuses: [{ key: "subagent:worker", text: "⠋ worker: ↑1k - gpt-5 - finished", description: "implementation: ok" }] },
+			},
+		}, { expanded: true }, { fg: (_name: string, text: string) => text, bold: (text: string) => text }).render(240).join("\n");
+
+		assert.equal((rendered.match(/Subagents:/g) ?? []).length, 1);
+	} finally {
+		if (oldRole === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+		else process.env.PI_ORCHESTRATOR_AGENT_ROLE = oldRole;
+		if (oldRunDir === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+		else process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR = oldRunDir;
+	}
+});
+
 test("extension registration is role-gated", () => {
 	const oldRole = process.env.PI_ORCHESTRATOR_AGENT_ROLE;
 	const oldRunDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
