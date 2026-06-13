@@ -514,7 +514,7 @@ test("review target writes and passes extra context to scout, reviewers, and syn
 		},
 	});
 
-	assert.equal(result.extraContextSource, contextPath);
+	assert.equal(result.extraContextSource, fs.realpathSync.native(contextPath));
 	assert.equal(fs.readFileSync(path.join(result.runDir, "extra-review-context.md"), "utf8").includes("prior scout context"), true);
 	assert.equal(tasks.length, 3);
 	assert.equal(tasks.every((task) => task.includes("extra-review-context.md")), true);

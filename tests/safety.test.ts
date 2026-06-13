@@ -176,11 +176,11 @@ test("references can intentionally allow outside, binary, and truncate large fil
 	const large = readReference(cwd, `@${largePath}`, "plan", config);
 	const binary = readReference(cwd, `@${binaryPath}`, "plan", config);
 
-	assert.equal(large.source, largePath);
+	assert.equal(large.source, fs.realpathSync.native(largePath));
 	assert.match(large.text, /^x{10}/);
 	assert.match(large.text, /Reference truncated/);
 	assert.match(large.warnings.join("\n"), /truncated|outside/);
-	assert.equal(binary.source, binaryPath);
+	assert.equal(binary.source, fs.realpathSync.native(binaryPath));
 	assert.match(binary.warnings.join("\n"), /binary|non-text/);
 });
 
