@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { requireExpectedOutputArtifact, resolveArtifactPath, validateOutputArtifactPath, writeArtifact } from "./artifacts.ts";
+import { validateOutputArtifactPath, writeArtifact } from "./artifacts.ts";
 import { childEnvCounts, childResultText, spawnPiRole } from "./child-runner.ts";
 import { loadConfig } from "./config.ts";
 import {
@@ -26,7 +26,6 @@ import { DELEGABLE_ROLE_NAMES } from "./role-registry.ts";
 import { readOrchestrationState, writeOrchestrationState } from "./state.ts";
 import {
 	createSubagentProgress,
-	trimStatusField,
 	withSubagentProgress,
 } from "./progress.ts";
 import {
@@ -43,16 +42,15 @@ import { childSummary } from "./summaries.ts";
 import { registerRootCommands } from "./commands.ts";
 import { registerRootTools } from "./root-tools.ts";
 import { assertWorkerTaskWithinBudget } from "./workflows.ts";
-
-function requireNonEmpty(value: string, label: string): string {
-	const trimmed = value.trim();
-	if (!trimmed) throw new Error(`${label} must be a non-empty string`);
-	return trimmed;
-}
-
-function safeIdLabel(value: string, fallback: string): string {
-	return (value || fallback).toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-|-$/g, "").slice(0, 64) || fallback;
-}
+import {
+	defaultRoleOutputFile,
+	requireExpectedRunArtifact,
+	requireNonEmpty,
+	roleRunLabels,
+	roleStatusKey,
+	roleTaskStatusDescription,
+	safeIdLabel,
+} from "./role-run-labels.ts";
 
 function sendStartupWarning(pi: ExtensionAPI, warning: string, details: Record<string, unknown>): void {
 	console.warn(warning);
@@ -92,74 +90,6 @@ function validateStartupRunDir(pi: ExtensionAPI, role: RoleName | undefined, run
 	const warning = `${ROLE_ENV}=${role} is set but ${reason}; loading pi-simple-subagents in root mode instead.`;
 	sendStartupWarning(pi, warning, { roleEnv: ROLE_ENV, role, runDirEnv: RUN_DIR_ENV, runDir });
 	return undefined;
-}
-
-function roleTaskStatusDescription(purpose: string, task: string): string {
-	const firstLine = task.split(/\r?\n/).map((line) => line.trim()).find((line) => line.length > 0) ?? "delegated task";
-	return trimStatusField(`${purpose}: ${firstLine}`, 72);
-}
-
-function workerDisplaySegment(workerId: string | undefined): string | undefined {
-	if (!workerId) return undefined;
-	return /^worker-(.+)$/.exec(workerId)?.[1] ?? workerId;
-}
-
-function workerScopedEphemeralLabels(role: "verifier" | "reviewer", latestWorkerId: string | undefined, round: number | undefined, fallbackRound: number): { artifactLabel?: string; statusLabel?: string } {
-	const workerSegment = workerDisplaySegment(latestWorkerId);
-	if (!workerSegment) return {};
-	const workerId = latestWorkerId ?? `worker-${workerSegment}`;
-	const effectiveRound = round ?? fallbackRound;
-	return {
-		artifactLabel: `${role}-${workerSegment}-round-${effectiveRound}`,
-		statusLabel: `${role === "verifier" ? "verify" : "review"} ${workerId} r${effectiveRound}`,
-	};
-}
-
-function workerPurposeLabel(purpose: string): string {
-	return purpose === "implementation" ? "impl" : purpose;
-}
-
-function workerStatusLabel(workerId: string, purpose: string, round: number | undefined): string {
-	return `${workerId} ${workerPurposeLabel(purpose)}${round ? ` r${round}` : ""}`;
-}
-
-function roleStatusKey(statusLabel: string, sequence: number): string {
-	return `subagent:${safeIdLabel(statusLabel, "role")}-${sequence}`;
-}
-
-function roleRunLabels(role: string, purpose: string, round: number | undefined, workerId: string | undefined, latestWorkerId: string | undefined, fallbackReviewRound: number): { artifactLabel: string; statusLabel: string } {
-	if (workerId) {
-		const label = `${workerId}${round ? `-round-${round}` : ""}`;
-		return { artifactLabel: label, statusLabel: workerStatusLabel(workerId, purpose, round) };
-	}
-	if (role === "verifier" || role === "reviewer") {
-		const scoped = workerScopedEphemeralLabels(role, latestWorkerId, round, fallbackReviewRound);
-		if (scoped.artifactLabel && scoped.statusLabel) return { artifactLabel: scoped.artifactLabel, statusLabel: scoped.statusLabel };
-	}
-	return {
-		artifactLabel: `${role}${round ? `-round-${round}` : ""}`,
-		statusLabel: `${role}${round ? ` r${round}` : ""}`,
-	};
-}
-
-function requireExpectedRunArtifact(runDir: string, outputFile: string, result: { outputPath: string; transcriptPath: string }, label: string): string {
-	let target = outputFile;
-	try {
-		target = resolveArtifactPath(runDir, outputFile);
-		return requireExpectedOutputArtifact(runDir, outputFile);
-	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		throw new Error(`${label} did not write the expected output artifact.\nExpected output artifact: ${outputFile}\nExpected path: ${target}\nRun dir: ${runDir}\nArtifact validation error: ${message}\nChild output log: ${result.outputPath}\nTranscript: ${result.transcriptPath}\nUse write_run_artifact with path ${JSON.stringify(outputFile)}; do not write artifacts via absolute paths or the generic write tool.`);
-	}
-}
-
-function defaultRoleOutputFile(runDir: string, label: string, nextSequence: () => number): string {
-	const firstCandidate = `${label}.md`;
-	if (!fs.existsSync(validateOutputArtifactPath(runDir, firstCandidate))) return firstCandidate;
-	for (;;) {
-		const candidate = `${label}-${nextSequence()}.md`;
-		if (!fs.existsSync(validateOutputArtifactPath(runDir, candidate))) return candidate;
-	}
 }
 
 export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
