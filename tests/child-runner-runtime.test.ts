@@ -150,6 +150,34 @@ writeOversizedLineThenLaterOutput();
 	assert.equal(result.output.includes("later output masked error"), false);
 });
 
+test("buffered transcript and stderr chunks are flushed on normal completion", async () => {
+	const cwd = tempProject();
+	const runDir = path.join(cwd, ".pi", "run");
+	const cli = path.join(cwd, "fake-pi.js");
+	fs.writeFileSync(cli, `
+for (let index = 0; index < 40; index++) {
+  process.stdout.write(JSON.stringify({ type: "message_start", index }) + "\\n");
+  process.stderr.write(` + "`stderr-${index}\\n`" + `);
+}
+console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "buffered final" }], stopReason: "stop" } }));
+`, "utf8");
+	const config = cloneConfig();
+	config.children.piCliPath = cli;
+
+	const result = await spawnPiRole({ cwd, role: "worker", task: "buffered artifact flush", runDir, config });
+
+	assert.equal(result.exitCode, 0);
+	assert.equal(result.stopReason, "stop");
+	assert.match(result.output, /buffered final/);
+	const transcript = fs.readFileSync(result.transcriptPath, "utf8");
+	assert.match(transcript, /"index":0/);
+	assert.match(transcript, /"index":39/);
+	assert.match(transcript, /buffered final/);
+	const stderr = fs.readFileSync(result.stderrPath, "utf8");
+	assert.match(stderr, /stderr-0/);
+	assert.match(stderr, /stderr-39/);
+});
+
 test("orchestrator default timeout is disabled while child role timeout remains configured", async () => {
 	const cwd = tempProject();
 	const runDir = path.join(cwd, ".pi", "run");

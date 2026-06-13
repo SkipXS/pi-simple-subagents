@@ -6,7 +6,9 @@
 
 | Module | Responsibility |
 | --- | --- |
-| `index.ts` | Thin extension entrypoint: detects root/child role mode, registers tools and slash commands, adapts workflow results to Pi tool/command responses. |
+| `index.ts` | Extension entrypoint: detects root/child role mode, registers tool groups, and owns child-role delegation/state tools. |
+| `commands.ts` | Root-mode slash command registration and command-to-workflow adapters. |
+| `summaries.ts` | Shared child/workflow result summary formatting for tool and slash-command responses. |
 | `rendering.ts` | TUI renderers for tool calls/results. Keeps display formatting separate from registration/execution logic. |
 | `progress.ts` | Live subagent status aggregation, status-table formatting, and final progress snapshots embedded in tool details. |
 | `workflows.ts` | High-level workflow implementations for orchestrator, review, scout, worker, and parallel-worker runs. Owns run directory setup, task/reference preparation, fanout, expected artifact checks, and cleanup summaries. |
@@ -116,5 +118,5 @@ Keep these seams intact when changing behavior:
 - Progress/status formatting belongs in `progress.ts`.
 - Child process/protocol/lifecycle changes belong in `child-runner.ts` and should get runtime tests.
 - Workflow sequencing belongs in `workflows.ts` and should preserve run artifact names/contracts.
-- Tool/slash-command registration belongs in `index.ts`; keep it adapter-focused.
+- Tool registration and child-role state belong in `index.ts`; root slash-command registration belongs in `commands.ts`. Keep both adapter-focused.
 - Safety policy changes need tests in `tests/safety.test.ts` or targeted workflow/runtime tests.
