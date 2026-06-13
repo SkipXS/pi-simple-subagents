@@ -36,6 +36,15 @@ async function waitForProcessExit(pid: number, timeoutMs: number): Promise<boole
 	return !isProcessAlive(pid);
 }
 
+async function waitForFile(filePath: string, timeoutMs: number): Promise<boolean> {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		if (fs.existsSync(filePath)) return true;
+		await sleep(25);
+	}
+	return fs.existsSync(filePath);
+}
+
 test("pre-aborted child runs do not create artifacts or spawn a child", async () => {
 	const cwd = tempProject();
 	const runDir = path.join(cwd, ".pi", "run");
@@ -264,6 +273,7 @@ setTimeout(() => process.exit(0), 250);
 		assert.equal(fs.existsSync(result.outputPath), true);
 		assert.equal(fs.existsSync(result.transcriptPath), true);
 		assert.equal(fs.existsSync(result.stderrPath), true);
+		assert.equal(await waitForFile(taskkillLog, 1000), true);
 		const taskkillArgs = JSON.parse(fs.readFileSync(taskkillLog, "utf8")) as string[];
 		assert.equal(taskkillArgs[0]?.toLowerCase(), "/pid");
 		assert.match(taskkillArgs[1] ?? "", /^\d+$/);
@@ -315,10 +325,10 @@ setInterval(() => {}, 1000);
 	fs.writeFileSync(cli, `
 const { spawn } = require("node:child_process");
 const fs = require("node:fs");
-console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "terminal output" }], stopReason: "stop" } }));
 const child = spawn(process.execPath, [${JSON.stringify(lingering)}], { stdio: "ignore" });
 fs.writeFileSync(${JSON.stringify(lingeringPidFile)}, String(child.pid));
 child.unref();
+console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "terminal output" }], stopReason: "stop" } }));
 setInterval(() => {}, 1000);
 `, "utf8");
 	let lingeringPid: number | undefined;
