@@ -415,6 +415,8 @@ Update .pi/pi-simple-subagents/config.json. Preserve any existing non-role setti
 
 Full table: [Configuration reference](docs/reference.md#configuration-reference).
 
+For contributor-facing module boundaries and lifecycle notes, see [Architecture](docs/architecture.md).
+
 ## Development
 
 ```bash

@@ -1,8 +1,7 @@
 import * as fs from "node:fs";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
 import { validateOutputArtifactPath, writeArtifact } from "./artifacts.ts";
-import { childEnvCounts, childResultText, throwChildRunError, spawnPiRole, type ChildStatusUpdate } from "./child-runner.ts";
+import { childEnvCounts, childResultText, throwChildRunError, spawnPiRole } from "./child-runner.ts";
 import { WORK_PARALLEL_ROOT_KEYS, WORK_PARALLEL_TASK_KEYS, WORKER_PURPOSES } from "./constants.ts";
 import { loadConfig } from "./config.ts";
 import {
@@ -36,15 +35,34 @@ import {
 } from "./schemas.ts";
 import { DELEGABLE_ROLE_NAMES } from "./role-registry.ts";
 import { readOrchestrationState, writeOrchestrationState } from "./state.ts";
+import {
+	createSubagentProgress,
+	formatSubagentProgress,
+	trimStatusField,
+	withSubagentProgress,
+	type SubagentProgressSnapshot,
+} from "./progress.ts";
+import {
+	renderArtifactCall,
+	renderArtifactResult,
+	renderCompactCall,
+	renderCompactResult,
+	renderMarkReviewCleanCall,
+	renderMarkReviewCleanResult,
+	renderOrchestratorCall,
+	renderOrchestratorResult,
+	renderParallelWorkersCall,
+	renderParallelWorkersResult,
+	renderReviewersCall,
+	renderReviewersResult,
+	renderRoleAgentCall,
+	renderRoleAgentResult,
+	renderScoutCall,
+	renderScoutResult,
+	renderWorkerCall,
+	renderWorkerResult,
+} from "./rendering.ts";
 import { assertWorkerTaskWithinBudget, parseReviewTargetCommand, runOrchestrator, runReviewers, runScout, runWorker, runWorkersParallel } from "./workflows.ts";
-
-type ToolProgressOnUpdate = ((update: { content: Array<{ type: "text"; text: string }>; details: { subagentProgress: SubagentProgressSnapshot } }) => void) | undefined;
-type WidgetSetter = (content: string[] | undefined) => void;
-
-interface SubagentProgressSnapshot {
-	statuses: Array<{ key: string; text: string; description?: string }>;
-	current?: string;
-}
 
 const RUN_ORCHESTRATOR_GUIDELINES = [
 	"Use run_orchestrator for plan-driven implementation or review/fix workflows that need scout/worker/verifier/reviewer coordination.",
@@ -76,45 +94,6 @@ const RUN_WORKERS_PARALLEL_GUIDELINES = [
 	"Use run_workers_parallel only for clearly independent tasks unlikely to edit the same files.",
 	"Do not use run_workers_parallel for overlapping refactors, shared-file edits, or tasks that need one worker's result before another starts.",
 ];
-
-const STATUS_SPINNER_PATTERN = /^([⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏])\s+(.+)$/u;
-
-interface ParsedStatusLine {
-	spinner?: string;
-	label: string;
-	status: string;
-	action: string;
-}
-
-function parseStatusLine(text: string, fallback: string): ParsedStatusLine {
-	const trimmed = text.trim();
-	const spinnerMatch = STATUS_SPINNER_PATTERN.exec(trimmed);
-	const spinner = spinnerMatch?.[1];
-	const body = spinnerMatch?.[2] ?? trimmed;
-	const separatorIndex = body.indexOf(":");
-	if (separatorIndex < 0) return { spinner, label: fallback, status: "", action: body };
-	const label = body.slice(0, separatorIndex).trim() || fallback;
-	const rest = body.slice(separatorIndex + 1).trim();
-	const actionSeparator = rest.lastIndexOf(" - ");
-	if (actionSeparator < 0) return { spinner, label, status: "", action: rest };
-	return {
-		spinner,
-		label,
-		status: rest.slice(0, actionSeparator).trim(),
-		action: rest.slice(actionSeparator + " - ".length).trim(),
-	};
-}
-
-function isTerminalStatusAction(action: string): boolean {
-	return action === "finished" || action === "failed" || action === "timed out" || action === "aborted";
-}
-
-function finishStatusText(existing: string | undefined, fallback: string): string {
-	if (!existing) return `${fallback}: finished`;
-	const parsed = parseStatusLine(existing, fallback);
-	const prefix = parsed.spinner ? `${parsed.spinner} ` : "";
-	return `${prefix}${parsed.label}: ${parsed.status ? `${parsed.status} - finished` : "finished"}`;
-}
 
 function requireNonEmpty(value: string, label: string): string {
 	const trimmed = value.trim();
@@ -156,176 +135,6 @@ function childSummary(prefix: string, fields: Array<[string, string | number | u
 	if (verboseResultsRequested(options.includeOutput)) return `${header}\n\n${output}`;
 	return `${header}\n\n${outputLocationNote(options.kind ?? "child")}`;
 }
-
-type RenderField = [label: string, value: string | number | boolean | undefined];
-
-type ToolRenderSummary = {
-	status?: "success" | "error" | "pending";
-	fields: RenderField[];
-	details?: string[];
-};
-
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-	return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
-}
-
-function readSubagentProgressSnapshot(value: unknown): SubagentProgressSnapshot | undefined {
-	const record = asRecord(value);
-	const rawStatuses = record?.statuses;
-	if (!Array.isArray(rawStatuses)) return undefined;
-	const statuses = rawStatuses.flatMap((entry) => {
-		const status = asRecord(entry);
-		const key = typeof status?.key === "string" && status.key.trim() ? status.key : undefined;
-		const text = typeof status?.text === "string" && status.text.trim() ? status.text : undefined;
-		if (!key || !text) return [];
-		const description = typeof status?.description === "string" && status.description.trim() ? status.description : undefined;
-		return [{ key, text, ...(description ? { description } : {}) }];
-	});
-	if (statuses.length === 0) return undefined;
-	const current = typeof record?.current === "string" && record.current.trim() ? record.current : undefined;
-	return { statuses, ...(current ? { current } : {}) };
-}
-
-function renderSubagentProgressDetails(details: Record<string, unknown> | undefined, content?: string): string[] {
-	const progress = readSubagentProgressSnapshot(details?.subagentProgress);
-	if (!progress) return [];
-	// Expanded tool output can already contain the same live/final progress block in
-	// `content` (updates publish it for the TUI, final summaries include it for the
-	// transcript/model). Rendering the details copy as well makes Ctrl+O show the
-	// whole subagent table twice.
-	if (content && /^Subagents:\s/m.test(content)) return [];
-	return ["", formatSubagentProgress(progress)];
-}
-
-function renderString(record: Record<string, unknown> | undefined, key: string): string | undefined {
-	const value = record?.[key];
-	return typeof value === "string" && value.trim() ? value : undefined;
-}
-
-function renderNumber(record: Record<string, unknown> | undefined, key: string): number | undefined {
-	const value = record?.[key];
-	return typeof value === "number" ? value : undefined;
-}
-
-function renderBoolean(record: Record<string, unknown> | undefined, key: string): boolean | undefined {
-	const value = record?.[key];
-	return typeof value === "boolean" ? value : undefined;
-}
-
-function renderNested(record: Record<string, unknown> | undefined, key: string): Record<string, unknown> | undefined {
-	return asRecord(record?.[key]);
-}
-
-function renderArrayLength(record: Record<string, unknown> | undefined, key: string): number | undefined {
-	const value = record?.[key];
-	return Array.isArray(value) ? value.length : undefined;
-}
-
-function previewValue(value: unknown, fallback = "—", maxLength = 96): string {
-	const raw = typeof value === "string" ? value : value === undefined || value === null ? fallback : String(value);
-	const normalized = raw.trim().replace(/\s+/g, " ");
-	if (!normalized) return fallback;
-	if (normalized.length <= maxLength) return normalized;
-	return `${normalized.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
-}
-
-function renderToolText(theme: any, title: string, fields: RenderField[], details: string[] = [], status: ToolRenderSummary["status"] = "pending"): Text {
-	const marker = status === "success" ? theme.fg("success", "✓") : status === "error" ? theme.fg("error", "✗") : theme.fg("accent", "•");
-	const lines = [`${marker} ${theme.fg("toolTitle", theme.bold(title))}`];
-	for (const [label, value] of fields) {
-		if (value === undefined || value === "") continue;
-		lines.push(`${theme.fg("muted", `${label}:`)} ${String(value)}`);
-	}
-	for (const detail of details) {
-		if (detail.trim()) lines.push(theme.fg("dim", detail));
-	}
-	return new Text(lines.join("\n"), 0, 0);
-}
-
-function resultContentText(result: Record<string, unknown> | undefined): string | undefined {
-	const content = result?.content;
-	if (!Array.isArray(content)) return undefined;
-	const text = content.flatMap((part) => {
-		const record = asRecord(part);
-		return record?.type === "text" && typeof record.text === "string" ? [record.text] : [];
-	}).join("\n").trim();
-	return text || undefined;
-}
-
-function childRunFields(details: Record<string, unknown> | undefined): RenderField[] {
-	const child = renderNested(details, "result") ?? renderNested(details, "synthesis") ?? details;
-	return [
-		["Exit", renderNumber(child, "exitCode")],
-		["Stop", renderString(child, "stopReason")],
-		["Output", renderString(details, "outputArtifactPath") ?? renderString(details, "finalSummaryPath") ?? renderString(details, "outputPath") ?? renderString(child, "outputPath")],
-		["Transcript", renderString(child, "transcriptPath")],
-		["Stderr", renderString(child, "stderrPath")],
-	];
-}
-
-function createCallRenderer(title: string, fieldsForArgs: (args: Record<string, unknown> | undefined) => RenderField[]) {
-	return (args: unknown, theme: any) => renderToolText(theme, title, fieldsForArgs(asRecord(args)));
-}
-
-function createResultRenderer(title: string, summarize: (details: Record<string, unknown> | undefined, result: Record<string, unknown> | undefined) => ToolRenderSummary) {
-	return (result: unknown, options: unknown, theme: any) => {
-		const resultRecord = asRecord(result);
-		const details = renderNested(resultRecord, "details");
-		const summary = summarize(details, resultRecord);
-		const optionRecord = asRecord(options);
-		const expanded = renderBoolean(optionRecord, "expanded") === true;
-		const content = expanded ? resultContentText(resultRecord) : undefined;
-		return renderToolText(theme, title, summary.fields, [...(summary.details ?? []), ...renderSubagentProgressDetails(details, content), ...(content ? ["", content] : [])], summary.status ?? "success");
-	};
-}
-
-const renderOrchestratorCall = createCallRenderer("Run Orchestrator", (args) => [["Plan", previewValue(args?.plan)]]);
-const renderReviewersCall = createCallRenderer("Run Reviewers", (args) => [["Target", previewValue(args?.target)], ["Focus", previewValue(args?.focus, undefined)], ["Reviewers", renderArrayLength(args, "reviewers")], ["Scout", args?.includeScout === false ? "disabled" : "enabled"]]);
-const renderScoutCall = createCallRenderer("Run Scout", (args) => [["Task", previewValue(args?.task)], ["Output", renderString(args, "outputFile")]]);
-const renderWorkerCall = createCallRenderer("Run Worker", (args) => [["Purpose", renderString(args, "purpose") ?? "implementation"], ["Task", previewValue(args?.task)], ["Output", renderString(args, "outputFile")]]);
-const renderParallelWorkersCall = createCallRenderer("Run Workers Parallel", (args) => [["Workers", renderArrayLength(args, "tasks")]]);
-const renderRoleAgentCall = createCallRenderer("Run Role Agent", (args) => [["Role", renderString(args, "role")], ["Purpose", renderString(args, "purpose")], ["Worker", renderString(args, "workerId")], ["Task", previewValue(args?.task)], ["Output", renderString(args, "outputFile")]]);
-const renderArtifactCall = createCallRenderer("Write Run Artifact", (args) => [["Path", renderString(args, "path")], ["Bytes", typeof args?.content === "string" ? Buffer.byteLength(args.content, "utf8") : undefined]]);
-const renderCompactCall = createCallRenderer("Compact Session", (args) => [["Instructions", previewValue(args?.instructions, "default role-aware summary")]]);
-const renderMarkReviewCleanCall = createCallRenderer("Mark Review Clean", (args) => [["Round", renderNumber(args, "round")], ["Summary", previewValue(args?.summary)]]);
-
-const renderOrchestratorResult = createResultRenderer("Orchestration", (details, result) => ({
-	status: renderNumber(renderNested(details, "result"), "exitCode") === 0 ? "success" : renderBoolean(result, "isError") ? "error" : "pending",
-	fields: [["Run dir", renderString(details, "runDir")], ["Plan source", renderString(details, "planSource")], ...childRunFields(details), ["Cleanup", renderString(details, "cleanupSummary")]],
-}));
-
-const renderReviewersResult = createResultRenderer("Review", (details, result) => ({
-	status: renderNumber(renderNested(details, "synthesis"), "exitCode") === 0 ? "success" : renderBoolean(result, "isError") ? "error" : "pending",
-	fields: [["Run dir", renderString(details, "runDir")], ["Target", renderString(details, "targetSource")], ["Reviews", renderArrayLength(details, "reviews")], ["Failures", renderArrayLength(details, "reviewFailures")], ["Final summary", renderString(details, "finalSummaryPath")], ["Transcript", renderString(renderNested(details, "synthesis"), "transcriptPath")], ["Cleanup", renderString(details, "cleanupSummary")]],
-}));
-
-const renderScoutResult = createResultRenderer("Scout", (details, result) => ({
-	status: renderNumber(renderNested(details, "result"), "exitCode") === 0 ? "success" : renderBoolean(result, "isError") ? "error" : "pending",
-	fields: [["Run dir", renderString(details, "runDir")], ["Task source", renderString(details, "taskSource")], ...childRunFields(details), ["Cleanup", renderString(details, "cleanupSummary")]],
-}));
-
-const renderWorkerResult = createResultRenderer("Worker", (details, result) => ({
-	status: renderNumber(renderNested(details, "result"), "exitCode") === 0 ? "success" : renderBoolean(result, "isError") ? "error" : "pending",
-	fields: [["Run dir", renderString(details, "runDir")], ["Task source", renderString(details, "taskSource")], ["Purpose", renderString(details, "purpose")], ...childRunFields(details), ["Cleanup", renderString(details, "cleanupSummary")]],
-}));
-
-const renderParallelWorkersResult = createResultRenderer("Parallel Workers", (details, result) => ({
-	status: renderArrayLength(details, "failed") && renderArrayLength(details, "failed")! > 0 ? "error" : renderBoolean(result, "isError") ? "error" : "success",
-	fields: [["Run dir", renderString(details, "runDir")], ["Workers", renderArrayLength(details, "workers")], ["Failed", renderArrayLength(details, "failed")], ["Cleanup", renderString(details, "cleanupSummary")]],
-	details: Array.isArray(details?.workers) ? details.workers.slice(0, 6).flatMap((worker, index) => {
-		const record = asRecord(worker);
-		return [`${index + 1}. ${renderString(record, "name") ?? "worker"}: ${renderString(record, "outputArtifactPath") ?? "no output artifact"}`];
-	}) : [],
-}));
-
-const renderRoleAgentResult = createResultRenderer("Role Agent", (details, result) => ({
-	status: renderNumber(details, "exitCode") === 0 ? "success" : renderBoolean(result, "isError") ? "error" : "pending",
-	fields: [["Purpose", renderString(details, "purpose")], ["Worker", renderString(details, "workerId")], ["Round", renderNumber(details, "round")], ...childRunFields(details), ["Worker runs", renderNumber(details, "workerRuns")], ["Review runs", renderNumber(details, "reviewRuns")]],
-}));
-
-const renderArtifactResult = createResultRenderer("Run Artifact", (details) => ({ status: "success", fields: [["Path", renderString(details, "path")]] }));
-const renderCompactResult = createResultRenderer("Compaction", (details) => ({ status: renderBoolean(details, "requested") ? "success" : "pending", fields: [["Requested", renderBoolean(details, "requested")], ["Run dir", renderString(details, "runDir")]] }));
-const renderMarkReviewCleanResult = createResultRenderer("Review Clean", (details) => ({ status: "success", fields: [["Artifact", renderString(details, "path")], ["State", renderString(details, "statePath")], ["Worker runs", renderNumber(details, "workerRuns")], ["Review runs", renderNumber(details, "reviewRuns")]] }));
 
 function roleTaskStatusDescription(purpose: string, task: string): string {
 	const firstLine = task.split(/\r?\n/).map((line) => line.trim()).find((line) => line.length > 0) ?? "delegated task";
@@ -395,110 +204,6 @@ function defaultRoleOutputFile(runDir: string, label: string, nextSequence: () =
 function assertKnownKeys(record: Record<string, unknown>, allowedKeys: readonly string[], label: string): void {
 	const unknown = Object.keys(record).filter((key) => !allowedKeys.includes(key));
 	if (unknown.length > 0) throw new Error(`${label} has unknown field${unknown.length === 1 ? "" : "s"}: ${unknown.join(", ")}`);
-}
-
-function trimStatusField(value: string, maxLength: number): string {
-	const normalized = value.trim().replace(/\s+/g, " ");
-	if (normalized.length <= maxLength) return normalized;
-	return `${normalized.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
-}
-
-function splitStatusDetails(status: string): { usage: string; model: string } {
-	const trimmed = status.trim();
-	if (!trimmed) return { usage: "usage pending", model: "model pending" };
-	const separator = trimmed.lastIndexOf(" - ");
-	if (separator >= 0) {
-		return {
-			usage: trimmed.slice(0, separator).trim() || "usage pending",
-			model: trimmed.slice(separator + " - ".length).trim() || "model pending",
-		};
-	}
-	if (trimmed.startsWith("- ")) return { usage: "usage pending", model: trimmed.slice(2).trim() || "model pending" };
-	return { usage: trimmed, model: "model pending" };
-}
-
-function formatSubagentProgress(snapshot: SubagentProgressSnapshot): string {
-	if (snapshot.statuses.length === 0) return ["Subagents: ⠋ working", "- starting"].join("\n");
-	const parsed = snapshot.statuses.map((status) => ({ key: status.key, description: status.description, ...parseStatusLine(status.text, status.key) }));
-	const active = parsed.find((status) => !isTerminalStatusAction(status.action));
-	const workingIndicator = active?.spinner ?? (parsed.length > 0 && parsed.every((status) => isTerminalStatusAction(status.action)) ? "✓" : "⠋");
-	const header = `Subagents: ${workingIndicator} ${active ? "working" : "done"}`;
-	const roleWidth = Math.max(...parsed.map((status) => status.label.length));
-	const parsedDetails = parsed.map((status) => splitStatusDetails(status.status));
-	const detailColumnWidth = Math.max(
-		...parsed.map((status) => trimStatusField(status.description ?? "—", 56).length),
-		...parsedDetails.map((details, index) => parsed[index].status ? details.usage.length : 0),
-	);
-	const lines = parsed.flatMap((status, index) => {
-		const marker = status.action === "finished" ? "✓" : isTerminalStatusAction(status.action) ? "!" : "•";
-		const role = status.label.padEnd(roleWidth);
-		const description = trimStatusField(status.description ?? "—", 56).padEnd(detailColumnWidth);
-		const details = parsedDetails[index];
-		const detailIndent = " ".repeat(roleWidth + 3);
-		return status.status
-			? [
-				`${marker} ${role} │ ${description} │ ${status.action}`,
-				`${detailIndent}│ ${details.usage.padEnd(detailColumnWidth)} │ ${details.model}`,
-			]
-			: [`${marker} ${role} │ ${description} │ ${status.action}`];
-	});
-	return [header, ...lines].join("\n");
-}
-
-function createSubagentProgress(options: { onToolUpdate?: ToolProgressOnUpdate; setWidget?: WidgetSetter }) {
-	const statuses = new Map<string, { text: string; description?: string }>();
-	let current: string | undefined;
-	let lastRendered = "";
-
-	const snapshot = (): SubagentProgressSnapshot => ({
-		statuses: [...statuses.entries()].map(([key, status]) => ({ key, text: status.text, ...(status.description ? { description: status.description } : {}) })),
-		...(current ? { current } : {}),
-	});
-	const publish = () => {
-		const state = snapshot();
-		const rendered = formatSubagentProgress(state);
-		if (rendered === lastRendered) return;
-		lastRendered = rendered;
-		options.onToolUpdate?.({ content: [{ type: "text", text: rendered }], details: { subagentProgress: state } });
-		options.setWidget?.(rendered.split("\n"));
-	};
-
-	return {
-		text(text: string) {
-			const normalized = text.trim();
-			if (!normalized) return;
-			current = normalized;
-			publish();
-		},
-		status(status: ChildStatusUpdate) {
-			const existing = statuses.get(status.key);
-			const description = status.description?.trim() || existing?.description;
-			if (status.text === undefined) {
-				if (!existing) return;
-				const finished = finishStatusText(existing.text, status.key);
-				if (finished === existing.text && description === existing.description) return;
-				statuses.set(status.key, { text: finished, ...(description ? { description } : {}) });
-				current = finished;
-				publish();
-				return;
-			}
-			const text = status.text.trim();
-			if (!text) return;
-			if (text === existing?.text && description === existing.description) return;
-			statuses.set(status.key, { text, ...(description ? { description } : {}) });
-			current = text;
-			publish();
-		},
-		snapshot,
-		clear() {
-			options.setWidget?.(undefined);
-		},
-	};
-}
-
-function withSubagentProgress<T extends Record<string, unknown>>(details: T, progress: ReturnType<typeof createSubagentProgress>): T & { subagentProgress?: SubagentProgressSnapshot } {
-	const subagentProgress = progress.snapshot();
-	return subagentProgress.statuses.length > 0 ? { ...details, subagentProgress } : details;
 }
 
 export default function orchestratorAgentsExtension(pi: ExtensionAPI) {

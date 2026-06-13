@@ -208,6 +208,33 @@ setTimeout(() => process.exit(0), 250);
 	}
 });
 
+test("non-terminal toolUse assistant output does not trigger lingering-process cleanup", async () => {
+	const cwd = tempProject();
+	const runDir = path.join(cwd, ".pi", "run");
+	const cli = path.join(cwd, "fake-pi.js");
+	fs.writeFileSync(cli, `
+console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [], stopReason: "toolUse" } }));
+setTimeout(() => {
+  console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "final after tool use" }], stopReason: "stop" } }));
+}, 120);
+`, "utf8");
+	try {
+		setChildRunnerTerminalCloseGraceMsForTests(50);
+		const config = cloneConfig();
+		config.children.piCliPath = cli;
+		config.children.timeoutMs = 5000;
+
+		const result = await spawnPiRole({ cwd, role: "worker", task: "tool use then final", runDir, config });
+
+		assert.equal(result.exitCode, 0);
+		assert.equal(result.stopReason, "stop");
+		assert.match(result.output, /final after tool use/);
+		assert.doesNotMatch(fs.readFileSync(result.stderrPath, "utf8"), /stayed alive after terminal assistant output/);
+	} finally {
+		setChildRunnerTerminalCloseGraceMsForTests(undefined);
+	}
+});
+
 test("terminal assistant output terminates lingering child process tree without failing the run", async () => {
 	const cwd = tempProject();
 	const runDir = path.join(cwd, ".pi", "run");

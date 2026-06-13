@@ -25,6 +25,7 @@ const MAX_TRANSCRIPT_ARTIFACT_BYTES = 4 * 1024 * 1024;
 const MAX_STDERR_ARTIFACT_BYTES = 1024 * 1024;
 const MAX_PENDING_STDOUT_LINE_BYTES = MAX_TRANSCRIPT_ARTIFACT_BYTES;
 const MAX_MALFORMED_STDOUT_DIAGNOSTIC_BYTES = 8 * 1024;
+const ARTIFACT_APPEND_FLUSH_BYTES = 16 * 1024;
 const DEFAULT_KILL_FALLBACK_MS = 5000;
 const DEFAULT_TERMINAL_CLOSE_GRACE_MS = 2000;
 let platformOverrideForTests: NodeJS.Platform | undefined;
@@ -82,6 +83,10 @@ export interface ChildRunResult {
 
 function isFailedStopReason(stopReason: string | undefined): boolean {
 	return stopReason === "error" || stopReason === "aborted";
+}
+
+function isTerminalAssistantStopReason(stopReason: string | undefined): boolean {
+	return Boolean(stopReason && !["toolUse", "tool_use", "tool_calls", "functionCall", "function_call"].includes(stopReason));
 }
 
 const STATUS_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -354,23 +359,6 @@ export function shouldForwardCurrentExtension(mode: ExtensionForwardMode, argv: 
 	return wasLoadedWithExtensionFlag(argv);
 }
 
-function appendCappedArtifactFile(runDir: string, target: string, content: string, state: { bytes: number; capped: boolean }, maxBytes: number): void {
-	if (content.length === 0 || state.capped) return;
-	const contentBytes = Buffer.byteLength(content, "utf8");
-	if (state.bytes + contentBytes <= maxBytes) {
-		appendArtifactFile(runDir, target, content);
-		state.bytes += contentBytes;
-		return;
-	}
-	const remaining = Math.max(0, maxBytes - state.bytes);
-	if (remaining > 0) {
-		appendArtifactFile(runDir, target, takeUtf8Head(content, remaining));
-		state.bytes = maxBytes;
-	}
-	appendArtifactFile(runDir, target, `\n[Artifact cap reached at ${maxBytes} bytes; further output omitted.]\n`);
-	state.capped = true;
-}
-
 export async function spawnPiRole(input: {
 	cwd: string;
 	role: RoleName;
@@ -550,9 +538,46 @@ export async function spawnPiRole(input: {
 			artifactErrorMessage = `Child artifact write failed (${context}): ${message}`;
 			stderr = appendBoundedTail(stderr, `${artifactErrorMessage}\n`, MAX_STDERR_BYTES);
 		};
+		const appendBuffers = new Map<string, { content: string; bytes: number; context: string }>();
+		const flushAppendBuffer = (target: string) => {
+			const pending = appendBuffers.get(target);
+			if (!pending || pending.content.length === 0) return;
+			appendBuffers.set(target, { ...pending, content: "", bytes: 0 });
+			appendArtifactFile(input.runDir, target, pending.content);
+		};
+		const flushAppendBuffers = () => {
+			for (const target of [...appendBuffers.keys()]) {
+				try {
+					flushAppendBuffer(target);
+				} catch (error) {
+					rememberArtifactError(appendBuffers.get(target)?.context ?? "artifact", error);
+				}
+			}
+		};
 		const safeAppendCappedArtifactFile = (target: string, content: string, state: { bytes: number; capped: boolean }, maxBytes: number, context: string) => {
 			try {
-				appendCappedArtifactFile(input.runDir, target, content, state, maxBytes);
+				if (content.length === 0 || state.capped) return;
+				let pending = appendBuffers.get(target) ?? { content: "", bytes: 0, context };
+				const appendBuffered = (text: string) => {
+					if (text.length === 0) return;
+					pending = { content: pending.content + text, bytes: pending.bytes + Buffer.byteLength(text, "utf8"), context };
+					appendBuffers.set(target, pending);
+				};
+				const contentBytes = Buffer.byteLength(content, "utf8");
+				if (state.bytes + contentBytes <= maxBytes) {
+					appendBuffered(content);
+					state.bytes += contentBytes;
+				} else {
+					const remaining = Math.max(0, maxBytes - state.bytes);
+					if (remaining > 0) {
+						const head = takeUtf8Head(content, remaining);
+						appendBuffered(head);
+						state.bytes = maxBytes;
+					}
+					appendBuffered(`\n[Artifact cap reached at ${maxBytes} bytes; further output omitted.]\n`);
+					state.capped = true;
+				}
+				if (pending.bytes >= ARTIFACT_APPEND_FLUSH_BYTES || state.capped) flushAppendBuffer(target);
 			} catch (error) {
 				rememberArtifactError(context, error);
 			}
@@ -608,7 +633,7 @@ export async function spawnPiRole(input: {
 					} else {
 						setStatusAction("waiting");
 					}
-					if (assistantStopReason && !["tool_calls", "tool_use", "function_call"].includes(assistantStopReason)) terminateLingeringChildAfterTerminalOutput();
+					if (isTerminalAssistantStopReason(assistantStopReason)) terminateLingeringChildAfterTerminalOutput();
 				}
 			} catch {
 				malformedStdoutLineCount++;
@@ -696,6 +721,7 @@ export async function spawnPiRole(input: {
 				stderr = appendBoundedTail(stderr, stderrTail, MAX_STDERR_BYTES);
 			}
 			if (buffer.trim()) processLine(buffer);
+			flushAppendBuffers();
 			const protocolErrors = [
 				malformedStdoutLineCount > 0 ? `Child stdout contained ${malformedStdoutLineCount} non-JSON line${malformedStdoutLineCount === 1 ? "" : "s"} while --mode json was expected.\nTranscript: ${transcriptPath}\n\n${malformedStdoutTail.trimEnd()}` : undefined,
 				!parsedAssistantMessageEnd ? `Child exited without a parsed assistant message_end event.\nTranscript: ${transcriptPath}` : undefined,

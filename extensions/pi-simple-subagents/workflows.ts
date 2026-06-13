@@ -3,6 +3,8 @@ import * as path from "node:path";
 import { cleanupRunArtifacts, clearRunActive, ensureDir, formatArtifactCleanupResult, markRunActive, resolveRunBaseDir, runId, validateOutputArtifactPath, writeArtifact, type ArtifactCleanupResult } from "./artifacts.ts";
 import { childResultText, spawnPiRole, throwChildRunError, type ChildRunResult, type ChildStatusUpdate } from "./child-runner.ts";
 import { CONFIG_EFFECTIVE_FILE, DEFAULT_SCOUT_OUTPUT_FILE, DEFAULT_WORKER_OUTPUT_FILE, EXTRA_REVIEW_CONTEXT_FILE, FINAL_SUMMARY_FILE, INPUT_SCOUT_TASK_FILE, INPUT_TARGET_FILE, INPUT_WORKER_TASK_FILE, PARALLEL_WORKERS_FILE, PARALLEL_WORKERS_SUMMARY_FILE, REVIEW_FAILURE_SUMMARY_FILE, SCOUT_REVIEW_CONTEXT_FILE } from "./constants.ts";
+export { parseReviewTargetCommand } from "./command-parsing.ts";
+import { fanoutConcurrency, runFanout } from "./fanout.ts";
 import { loadConfig, type Config } from "./config.ts";
 import { reviewTargetSystemPrompt } from "./prompts.ts";
 import { formatReferenceWarnings, readPlanReference, readReference } from "./references.ts";
@@ -42,51 +44,6 @@ function formatRunTask(planText: string, planSource: string, runDir: string, war
 	return `Run directory: ${runDir}\nInstruction source: ${planSource}${formatReferenceWarnings(warnings)}\n\nPlan / review-fix instruction:\n${planText}\n\nStart by writing orchestration.md. Then follow the orchestrator workflow. If the instruction is unclear, stop and ask the user for clarification instead of guessing.`;
 }
 
-function tokenizeCommand(input: string): string[] {
-	const tokens: string[] = [];
-	let current = "";
-	let quote: "'" | "\"" | undefined;
-	for (let index = 0; index < input.length; index++) {
-		const char = input[index];
-		if (quote) {
-			if (char === quote) {
-				quote = undefined;
-			} else if (char === "\\" && quote === "\"" && index + 1 < input.length) {
-				const next = input[index + 1];
-				if (next === "\"" || next === "\\") {
-					current += next;
-					index++;
-				} else {
-					current += char;
-				}
-			} else {
-				current += char;
-			}
-			continue;
-		}
-		if (char === "'" || char === "\"") {
-			quote = char;
-			continue;
-		}
-		if (/\s/.test(char)) {
-			if (current) {
-				tokens.push(current);
-				current = "";
-			}
-			continue;
-		}
-		current += char;
-	}
-	if (quote) throw new Error(`/review has unmatched ${quote === "\"" ? "double" : "single"} quote`);
-	if (current) tokens.push(current);
-	return tokens;
-}
-
-function quoteTargetIfNeeded(target: string): string {
-	if (!target.startsWith("@") || !/\s/.test(target)) return target;
-	return `@"${target.slice(1).replace(/"/g, "\\\"")}"`;
-}
-
 function safePathLabel(value: string | undefined, fallback: string): string {
 	return (value ?? fallback).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 48) || fallback;
 }
@@ -112,67 +69,6 @@ function requireNonEmpty(value: string, label: string): string {
 	return trimmed;
 }
 
-function fanoutConcurrency(config: Config, itemCount: number): number {
-	return Math.max(1, Math.min(itemCount, config.children.maxConcurrentSubagents));
-}
-
-async function allSettledWithConcurrency<T>(count: number, concurrency: number, run: (index: number) => Promise<T>, shouldStartMore: () => boolean = () => true): Promise<Array<PromiseSettledResult<T>>> {
-	const settled = new Array<PromiseSettledResult<T>>(count);
-	let next = 0;
-	let active = 0;
-	return await new Promise<Array<PromiseSettledResult<T>>>((resolve) => {
-		const finishSkipped = () => {
-			while (next < count) {
-				settled[next++] = { status: "rejected", reason: new Error("not started because a sibling subagent failed or the run was aborted") };
-			}
-		};
-		const pump = () => {
-			if (!shouldStartMore()) finishSkipped();
-			while (active < concurrency && next < count && shouldStartMore()) {
-				const index = next++;
-				active++;
-				Promise.resolve(run(index)).then(
-					(value) => { settled[index] = { status: "fulfilled", value }; },
-					(reason) => { settled[index] = { status: "rejected", reason }; },
-				).finally(() => {
-					active--;
-					if (next >= count && active === 0) resolve(settled);
-					else pump();
-				});
-			}
-			if (next >= count && active === 0) resolve(settled);
-		};
-		pump();
-	});
-}
-
-async function runFanout<T>(input: {
-	count: number;
-	concurrency: number;
-	signal?: AbortSignal;
-	abortOnError: boolean;
-	run: (index: number, signal: AbortSignal) => Promise<T>;
-}): Promise<Array<PromiseSettledResult<T>>> {
-	const localAbort = new AbortController();
-	const forwardAbort = () => localAbort.abort(input.signal?.reason);
-	if (input.signal) {
-		if (input.signal.aborted) forwardAbort();
-		else input.signal.addEventListener("abort", forwardAbort, { once: true });
-	}
-	try {
-		return await allSettledWithConcurrency(input.count, input.concurrency, async (index) => {
-			try {
-				return await input.run(index, localAbort.signal);
-			} catch (error) {
-				if (input.abortOnError && !localAbort.signal.aborted) localAbort.abort(error);
-				throw error;
-			}
-		}, () => !localAbort.signal.aborted);
-	} finally {
-		if (input.signal) input.signal.removeEventListener("abort", forwardAbort);
-	}
-}
-
 export function assertWorkerTaskWithinBudget(taskText: string, source: string, config: Config, label = "worker task"): void {
 	const limit = config.orchestration.maxWorkerTaskBytes;
 	if (limit === 0) return;
@@ -187,96 +83,6 @@ function requireExpectedArtifact(dep: Required<WorkflowDeps>, runDir: string, ou
 		throw new Error(`${label} did not write the expected output artifact.\nExpected output artifact: ${outputFile}\nExpected path: ${target}\nRun dir: ${runDir}\nChild output log: ${result.outputPath}\nTranscript: ${result.transcriptPath}\nUse write_run_artifact with path ${JSON.stringify(outputFile)}; do not write artifacts via absolute paths or the generic write tool.`);
 	}
 	return validateOutputArtifactPath(runDir, outputFile);
-}
-
-function unknownOptionError(command: string, token: string): Error {
-	return new Error(`${command} unknown option: ${token}`);
-}
-
-export function parseReviewTargetCommand(input: string): ReviewersParams {
-	const trimmed = input.trim();
-	const tokens = tokenizeCommand(trimmed);
-	const reviewers: string[] = [];
-	let includeScout: boolean | undefined;
-	let continueOnReviewerFailure: boolean | undefined;
-	let extraContext: string | undefined;
-	let cursor = 0;
-	while (cursor < tokens.length) {
-		const token = tokens[cursor];
-		if (token === "--") {
-			cursor++;
-			break;
-		}
-		if (token === "--no-scout") {
-			includeScout = false;
-			cursor++;
-			continue;
-		}
-		if (token === "--scout") {
-			includeScout = true;
-			cursor++;
-			continue;
-		}
-		if (token === "--continue-on-reviewer-failure") {
-			continueOnReviewerFailure = true;
-			cursor++;
-			continue;
-		}
-		if (token === "--fail-on-reviewer-failure") {
-			continueOnReviewerFailure = false;
-			cursor++;
-			continue;
-		}
-		if (token === "--reviewer") {
-			const reviewer = tokens[cursor + 1];
-			if (!reviewer) throw new Error("/review --reviewer requires an angle/focus value");
-			reviewers.push(reviewer);
-			cursor += 2;
-			continue;
-		}
-		if (token === "--context") {
-			const context = tokens[cursor + 1];
-			if (!context) throw new Error("/review --context requires an inline value or @file");
-			extraContext = context;
-			cursor += 2;
-			continue;
-		}
-		if (token.startsWith("--reviewer=")) {
-			const reviewer = token.slice("--reviewer=".length).trim();
-			if (!reviewer) throw new Error("/review --reviewer requires an angle/focus value");
-			reviewers.push(reviewer);
-			cursor++;
-			continue;
-		}
-		if (token.startsWith("--context=")) {
-			const context = token.slice("--context=".length).trim();
-			if (!context) throw new Error("/review --context requires an inline value or @file");
-			extraContext = context;
-			cursor++;
-			continue;
-		}
-		if (token.startsWith("--")) throw unknownOptionError("/review", token);
-		break;
-	}
-	if (tokens[0]?.startsWith("--") && cursor === 0) throw unknownOptionError("/review", tokens[0]);
-	if (cursor > 0) {
-		const target = tokens[cursor];
-		if (!target) throw new Error("/review requires a target after options");
-		if (target.startsWith("--") && tokens[cursor - 1] !== "--") throw unknownOptionError("/review", target);
-		const focus = tokens.slice(cursor + 1).join(" ").trim();
-		return {
-			target: quoteTargetIfNeeded(target),
-			...(focus ? { focus } : {}),
-			...(extraContext !== undefined ? { extraContext: quoteTargetIfNeeded(extraContext) } : {}),
-			...(reviewers.length > 0 ? { reviewers } : {}),
-			...(includeScout !== undefined ? { includeScout } : {}),
-			...(continueOnReviewerFailure !== undefined ? { continueOnReviewerFailure } : {}),
-		};
-	}
-	const match = /^(@(?:"[^"]+"|'[^']+'|\S+))(?:\s+([\s\S]+))?$/.exec(trimmed);
-	if (!match) return { target: trimmed };
-	const focus = match[2]?.trim();
-	return focus ? { target: match[1], focus } : { target: match[1] };
 }
 
 export async function runOrchestrator(cwd: string, rawPlan: string, signal?: AbortSignal, onUpdate?: WorkflowUpdate, deps?: WorkflowDeps): Promise<{ result: ChildRunResult; runDir: string; planSource: string } & CleanupRecord> {

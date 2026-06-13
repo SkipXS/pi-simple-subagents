@@ -27,6 +27,7 @@ jobs:
         shell: bash
         run: npm install --no-save --save-dev @earendil-works/pi-ai@"${{ matrix.pi-version }}" @earendil-works/pi-coding-agent@"${{ matrix.pi-version }}" @earendil-works/pi-tui@"${{ matrix.pi-version }}"
       - run: npm run check
+      - run: npm audit --audit-level=moderate
       - run: npm pack --dry-run --ignore-scripts
       - name: Smoke-test packed Pi package load
         if: matrix.os == 'ubuntu-latest'
