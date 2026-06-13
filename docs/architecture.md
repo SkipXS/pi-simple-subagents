@@ -6,7 +6,8 @@
 
 | Module | Responsibility |
 | --- | --- |
-| `index.ts` | Extension entrypoint: detects root/child role mode, registers tool groups, and owns child-role delegation/state tools. |
+| `index.ts` | Extension entrypoint: detects root/child role mode and owns child-role delegation/state tools. |
+| `root-tools.ts` | Root-mode tool registration and tool-to-workflow adapters. |
 | `commands.ts` | Root-mode slash command registration and command-to-workflow adapters. |
 | `summaries.ts` | Shared child/workflow result summary formatting for tool and slash-command responses. |
 | `rendering.ts` | TUI renderers for tool calls/results. Keeps display formatting separate from registration/execution logic. |
@@ -118,5 +119,5 @@ Keep these seams intact when changing behavior:
 - Progress/status formatting belongs in `progress.ts`.
 - Child process/protocol/lifecycle changes belong in `child-runner.ts` and should get runtime tests.
 - Workflow sequencing belongs in `workflows.ts` and should preserve run artifact names/contracts.
-- Tool registration and child-role state belong in `index.ts`; root slash-command registration belongs in `commands.ts`. Keep both adapter-focused.
+- Child-role tool registration and child-role state belong in `index.ts`; root tool registration belongs in `root-tools.ts`; root slash-command registration belongs in `commands.ts`. Keep all adapter-focused.
 - Safety policy changes need tests in `tests/safety.test.ts` or targeted workflow/runtime tests.
