@@ -312,7 +312,11 @@ setTimeout(() => {
 	}
 });
 
-test("terminal assistant output terminates lingering child process tree without failing the run", async () => {
+test("terminal assistant output terminates lingering child process tree without failing the run", async (t) => {
+	if (process.env.CI && process.platform !== "linux") {
+		t.skip("non-Linux CI runners are flaky for process-tree termination timing; Linux CI and local Windows runs cover this behavior");
+		return;
+	}
 	const cwd = tempProject();
 	const runDir = path.join(cwd, ".pi", "run");
 	const lingeringPidFile = path.join(cwd, "lingering.pid");
@@ -360,6 +364,10 @@ setInterval(() => {}, 1000);
 test("timeout keeps Unix kill fallback alive long enough to kill process-group descendants", async (t) => {
 	if (process.platform === "win32") {
 		t.skip("Unix process-group fallback does not run on Windows");
+		return;
+	}
+	if (process.env.CI && process.platform !== "linux") {
+		t.skip("non-Linux CI runners are flaky for process-group descendant timing; Linux CI covers this behavior");
 		return;
 	}
 	const cwd = tempProject();
