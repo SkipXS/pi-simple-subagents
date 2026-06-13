@@ -402,9 +402,9 @@ test("artifact cleanup preserves other marked active runs during size cleanup", 
 });
 
 test("artifact cleanup candidate collection does not recursively size runs before age filtering", () => {
-	const artifactsSource = fs.readFileSync(new URL("../extensions/pi-simple-subagents/artifacts.ts", import.meta.url), "utf8");
+	const artifactsSource = fs.readFileSync(new URL("../extensions/pi-simple-subagents/artifacts.ts", import.meta.url), "utf8").replace(/\r\n/g, "\n");
 	const cleanupCandidatesBody = artifactsSource.match(/function cleanupCandidates[\s\S]*?\n}\n\nexport function cleanupRunArtifacts/)?.[0] ?? "";
-	assert.ok(cleanupCandidatesBody.includes("candidates.push({ path: target, mtimeMs: stat.mtimeMs })"));
+	assert.match(cleanupCandidatesBody, /candidates\.push\(\{\s*path:\s*target,\s*mtimeMs:\s*stat\.mtimeMs\s*}\)/);
 	assert.equal(cleanupCandidatesBody.includes("directorySizeBytes"), false);
 });
 
