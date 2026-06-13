@@ -25,8 +25,12 @@ const MAX_TRANSCRIPT_ARTIFACT_BYTES = 4 * 1024 * 1024;
 const MAX_STDERR_ARTIFACT_BYTES = 1024 * 1024;
 const MAX_PENDING_STDOUT_LINE_BYTES = MAX_TRANSCRIPT_ARTIFACT_BYTES;
 const MAX_MALFORMED_STDOUT_DIAGNOSTIC_BYTES = 8 * 1024;
+const DEFAULT_KILL_FALLBACK_MS = 5000;
+const DEFAULT_TERMINAL_CLOSE_GRACE_MS = 2000;
 let platformOverrideForTests: NodeJS.Platform | undefined;
 let taskkillOverrideForTests: { command: string; argsPrefix?: string[] } | undefined;
+let killFallbackMsOverrideForTests: number | undefined;
+let terminalCloseGraceMsOverrideForTests: number | undefined;
 
 export function setChildRunnerPlatformForTests(platform: NodeJS.Platform | undefined): void {
 	platformOverrideForTests = platform;
@@ -34,6 +38,14 @@ export function setChildRunnerPlatformForTests(platform: NodeJS.Platform | undef
 
 export function setChildRunnerTaskkillForTests(invocation: { command: string; argsPrefix?: string[] } | undefined): void {
 	taskkillOverrideForTests = invocation;
+}
+
+export function setChildRunnerKillFallbackMsForTests(ms: number | undefined): void {
+	killFallbackMsOverrideForTests = ms;
+}
+
+export function setChildRunnerTerminalCloseGraceMsForTests(ms: number | undefined): void {
+	terminalCloseGraceMsOverrideForTests = ms;
 }
 
 function runtimePlatform(): NodeJS.Platform {
@@ -487,12 +499,14 @@ export async function spawnPiRole(input: {
 		let settled = false;
 		let aborted = false;
 		let timedOut = false;
+		let terminatedAfterTerminalOutput = false;
 		let stdoutLineTooLarge = false;
 		let parsedAssistantMessageEnd = false;
 		let malformedStdoutLineCount = 0;
 		let malformedStdoutTail = "";
 		let artifactErrorMessage: string | undefined;
 		let killFallbackTimer: ReturnType<typeof setTimeout> | undefined;
+		let terminalCloseTimer: ReturnType<typeof setTimeout> | undefined;
 		const transcriptCap = { bytes: 0, capped: false };
 		const stderrCap = { bytes: 0, capped: false };
 		if (stderr) {
@@ -594,6 +608,7 @@ export async function spawnPiRole(input: {
 					} else {
 						setStatusAction("waiting");
 					}
+					if (assistantStopReason && !["tool_calls", "tool_use", "function_call"].includes(assistantStopReason)) terminateLingeringChildAfterTerminalOutput();
 				}
 			} catch {
 				malformedStdoutLineCount++;
@@ -612,6 +627,37 @@ export async function spawnPiRole(input: {
 			}
 			child.kill(signalName);
 		};
+		const taskkillChildTree = () => {
+			if (runtimePlatform() === "win32" && child.pid) {
+				const taskkill = taskkillInvocation();
+				const killer = spawn(taskkill.command, [...taskkill.argsPrefix, "/pid", String(child.pid), "/t", "/f"], { stdio: "ignore", windowsHide: true });
+				killer.on("error", () => child.kill());
+				killer.on("close", (code) => { if (code !== 0) child.kill(); });
+				return true;
+			}
+			return false;
+		};
+		const terminateLingeringChildAfterTerminalOutput = () => {
+			if (terminalCloseTimer || settled) return;
+			terminalCloseTimer = setTimeout(() => {
+				terminalCloseTimer = undefined;
+				if (settled) return;
+				terminatedAfterTerminalOutput = true;
+				const line = "Child process stayed alive after terminal assistant output; terminating lingering process tree.\n";
+				const artifactLine = stderr.endsWith("\n") || stderr.length === 0 ? line : `\n${line}`;
+				stderr = appendBoundedTail(stderr, artifactLine, MAX_STDERR_BYTES);
+				safeAppendCappedArtifactFile(stderrPath, artifactLine, stderrCap, MAX_STDERR_ARTIFACT_BYTES, "stderr");
+				setStatusAction("cleaning up child process", { force: true });
+				if (taskkillChildTree()) return;
+				signalChildTree("SIGTERM");
+				killFallbackTimer = setTimeout(() => {
+					signalChildTree("SIGKILL");
+					killFallbackTimer = undefined;
+				}, killFallbackMsOverrideForTests ?? DEFAULT_KILL_FALLBACK_MS);
+				(killFallbackTimer as { unref?: () => void }).unref?.();
+			}, terminalCloseGraceMsOverrideForTests ?? DEFAULT_TERMINAL_CLOSE_GRACE_MS);
+			(terminalCloseTimer as { unref?: () => void }).unref?.();
+		};
 		const abortChild = (reason = "Child run aborted.", options: { timeout?: boolean } = {}) => {
 			if (aborted) return;
 			if (options.timeout) timedOut = true;
@@ -620,18 +666,12 @@ export async function spawnPiRole(input: {
 			const artifactLine = stderr.endsWith("\n") || stderr.length === 0 ? line : `\n${line}`;
 			stderr = appendBoundedTail(stderr, artifactLine, MAX_STDERR_BYTES);
 			safeAppendCappedArtifactFile(stderrPath, artifactLine, stderrCap, MAX_STDERR_ARTIFACT_BYTES, "stderr");
-			if (runtimePlatform() === "win32" && child.pid) {
-				const taskkill = taskkillInvocation();
-				const killer = spawn(taskkill.command, [...taskkill.argsPrefix, "/pid", String(child.pid), "/t", "/f"], { stdio: "ignore", windowsHide: true });
-				killer.on("error", () => child.kill());
-				killer.on("close", (code) => { if (code !== 0) child.kill(); });
-				return;
-			}
+			if (taskkillChildTree()) return;
 			signalChildTree("SIGTERM");
 			killFallbackTimer = setTimeout(() => {
 				signalChildTree("SIGKILL");
 				killFallbackTimer = undefined;
-			}, 5000);
+			}, killFallbackMsOverrideForTests ?? DEFAULT_KILL_FALLBACK_MS);
 			(killFallbackTimer as { unref?: () => void }).unref?.();
 		};
 		const onAbort = () => abortChild();
@@ -643,7 +683,8 @@ export async function spawnPiRole(input: {
 			settled = true;
 			if (statusTimer) clearInterval(statusTimer);
 			if (timeoutTimer) clearTimeout(timeoutTimer);
-			if (killFallbackTimer) {
+			if (terminalCloseTimer) clearTimeout(terminalCloseTimer);
+			if (killFallbackTimer && !aborted && !terminatedAfterTerminalOutput) {
 				clearTimeout(killFallbackTimer);
 				killFallbackTimer = undefined;
 			}
@@ -675,7 +716,8 @@ export async function spawnPiRole(input: {
 				rememberArtifactError("output", error);
 				fullOutput = `${fullOutput}\n\nChild run infrastructure error:\n${artifactErrorMessage}`;
 			}
-			const effectiveExitCode = timedOut || aborted ? exitCode : artifactErrorMessage || stdoutLineTooLarge || protocolErrorMessage ? 1 : exitCode === 0 && isFailedStopReason(assistantStopReason) ? 1 : exitCode;
+			const rawExitCode = terminatedAfterTerminalOutput ? 0 : exitCode;
+			const effectiveExitCode = timedOut || aborted ? rawExitCode : artifactErrorMessage || stdoutLineTooLarge || protocolErrorMessage ? 1 : rawExitCode === 0 && isFailedStopReason(assistantStopReason) ? 1 : rawExitCode;
 			const finalStopReason = timedOut ? "timed_out" : stdoutLineTooLarge || artifactErrorMessage || protocolErrorMessage ? "error" : aborted ? "aborted" : assistantStopReason;
 			const finalErrorMessage = timedOut ? `Child run timed out after ${timeoutMs} ms.` : stdoutLineTooLarge ? assistantErrorMessage : artifactErrorMessage ?? protocolErrorMessage ?? (aborted ? "Child run aborted." : assistantErrorMessage);
 			const finalStatus = timedOut ? "timed out"

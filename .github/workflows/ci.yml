@@ -4,32 +4,30 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
         node-version: ['22.19.0']
         pi-version: ['0.78.0', '>=0.78.0 <1']
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ matrix.node-version }}
           cache: npm
       - run: npm ci
       - name: Install tested Pi host API range entry
-        run: npm install --no-save --save-dev @earendil-works/pi-ai@"${{ matrix.pi-version }}" @earendil-works/pi-coding-agent@"${{ matrix.pi-version }}"
+        shell: bash
+        run: npm install --no-save --save-dev @earendil-works/pi-ai@"${{ matrix.pi-version }}" @earendil-works/pi-coding-agent@"${{ matrix.pi-version }}" @earendil-works/pi-tui@"${{ matrix.pi-version }}"
       - run: npm run check
       - run: npm pack --dry-run --ignore-scripts
       - name: Smoke-test packed Pi package load
-        shell: bash
-        run: |
-          set -euo pipefail
-          tarball="$(npm pack --ignore-scripts --silent)"
-          tmp="$(mktemp -d)"
-          trap 'rm -rf "$tmp" "$tarball"' EXIT
-          npm install --prefix "$tmp/install" "$PWD/$tarball" --ignore-scripts --legacy-peer-deps
-          pkg_dir="$tmp/install/node_modules/pi-simple-subagents"
-          ./node_modules/.bin/pi -e "$pkg_dir" --list-models "pi-simple-subagents-smoke-no-model"
+        if: matrix.os == 'ubuntu-latest'
+        run: npm run smoke:pack

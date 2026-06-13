@@ -281,10 +281,15 @@ export function cleanupRunArtifacts(baseDir: string, config: Config, activeRunDi
 	let candidates = cleanupCandidates(absoluteBase, active, result.errors);
 	if (config.artifacts.cleanup.maxAgeMs > 0) {
 		const cutoff = nowMs - config.artifacts.cleanup.maxAgeMs;
+		const retained: CleanupCandidate[] = [];
 		for (const candidate of candidates) {
-			if (candidate.mtimeMs < cutoff) removeCandidate(candidate);
+			if (candidate.mtimeMs < cutoff) {
+				if (!removeCandidate(candidate)) retained.push(candidate);
+			} else {
+				retained.push(candidate);
+			}
 		}
-		candidates = cleanupCandidates(absoluteBase, active, result.errors);
+		candidates = retained;
 	}
 	if (config.artifacts.cleanup.maxTotalBytes > 0) {
 		let activeBytes = 0;
@@ -293,12 +298,17 @@ export function cleanupRunArtifacts(baseDir: string, config: Config, activeRunDi
 			catch (error) { result.errors.push(`${active}: ${error instanceof Error ? error.message : String(error)}`); }
 		}
 		let totalBytes = activeBytes + candidates.reduce((sum, candidate) => sum + candidate.sizeBytes, 0);
+		const retained: CleanupCandidate[] = [];
 		for (const candidate of candidates) {
-			if (totalBytes <= config.artifacts.cleanup.maxTotalBytes) break;
-			if (removeCandidate(candidate)) totalBytes -= candidate.sizeBytes;
+			if (totalBytes > config.artifacts.cleanup.maxTotalBytes && removeCandidate(candidate)) {
+				totalBytes -= candidate.sizeBytes;
+			} else {
+				retained.push(candidate);
+			}
 		}
+		candidates = retained;
 	}
-	result.skippedRuns = cleanupCandidates(absoluteBase, active, result.errors).length;
+	result.skippedRuns = candidates.length;
 	return result;
 }
 

@@ -109,7 +109,7 @@ Pi should report a run directory under `.pi/agent-runs/<run-id>/`.
 Requirements:
 
 - Node.js `>=22.19.0`
-- Pi `@earendil-works/pi-coding-agent` `0.78.x` or compatible newer `0.x` version
+- Pi `@earendil-works/pi-coding-agent` and companion Pi packages `>=0.78.0 <1`
 
 Local development install:
 
@@ -390,6 +390,7 @@ Use these thinking levels unless they are unsupported by the selected model/prov
 - orchestrator: high
 - scout: minimal
 - worker: medium
+- verifier: low
 - reviewer: low
 - synthesis: medium
 
@@ -405,6 +406,7 @@ Use these role settings:
 - orchestrator: model <provider/model-for-orchestrator>, thinking high
 - scout: model <provider/model-for-scout>, thinking minimal
 - worker: model <provider/model-for-worker>, thinking medium
+- verifier: model <provider/model-for-verifier>, thinking low
 - reviewer: model <provider/model-for-reviewer>, thinking low
 - synthesis: model <provider/model-for-synthesis>, thinking medium
 

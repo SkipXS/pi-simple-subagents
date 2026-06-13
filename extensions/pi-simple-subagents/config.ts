@@ -142,7 +142,27 @@ function rejectUnknownKeys(object: Record<string, unknown>, source: string, path
 	if (unknown.length > 0) throw configError(source, `${pathName} contains unknown key${unknown.length === 1 ? "" : "s"}: ${unknown.join(", ")}`);
 }
 
-function mergeConfig(base: Config, override: unknown, source = "unknown", options: { allowPiCliPath?: boolean } = {}): Config {
+function isPathInside(parent: string, child: string): boolean {
+	const relative = path.relative(parent, child);
+	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function resolveArtifactBaseForConfig(cwd: string, baseDir: string): string {
+	return path.isAbsolute(baseDir) ? path.resolve(baseDir) : path.resolve(cwd, baseDir);
+}
+
+function assertProjectArtifactBaseAllowed(baseDir: string, source: string, cwd: string): void {
+	if (path.isAbsolute(baseDir)) throw configError(source, "artifacts.baseDir must be relative in project config; absolute artifact bases are only allowed in the global config");
+	const resolved = resolveArtifactBaseForConfig(cwd, baseDir);
+	if (!isPathInside(path.resolve(cwd), resolved)) throw configError(source, "artifacts.baseDir must stay inside the project cwd; configure external artifact bases in the global config");
+}
+
+function assertProjectArtifactCleanupAllowed(baseDir: string, source: string, cwd: string): void {
+	const resolved = resolveArtifactBaseForConfig(cwd, baseDir);
+	if (!isPathInside(path.resolve(cwd), resolved)) throw configError(source, "artifacts.cleanup is only allowed in project config when artifacts.baseDir resolves inside the project cwd; configure cleanup for external artifact bases in the global config");
+}
+
+function mergeConfig(base: Config, override: unknown, source = "unknown", options: { allowPiCliPath?: boolean; projectCwd?: string } = {}): Config {
 	if (override === undefined) return cloneConfig(base);
 	const overrideObject = expectObject(override, source, "root");
 	rejectUnknownKeys(overrideObject, source, "root", ["roles", "children", "orchestration", "references", "artifacts"]);
@@ -192,8 +212,13 @@ function mergeConfig(base: Config, override: unknown, source = "unknown", option
 	if (overrideObject.artifacts !== undefined) {
 		const artifacts = expectObject(overrideObject.artifacts, source, "artifacts");
 		rejectUnknownKeys(artifacts, source, "artifacts", ["baseDir", "cleanup"]);
-		if (artifacts.baseDir !== undefined) next.artifacts.baseDir = expectString(artifacts.baseDir, source, "artifacts.baseDir");
+		if (artifacts.baseDir !== undefined) {
+			const baseDir = expectString(artifacts.baseDir, source, "artifacts.baseDir");
+			if (options.projectCwd) assertProjectArtifactBaseAllowed(baseDir, source, options.projectCwd);
+			next.artifacts.baseDir = baseDir;
+		}
 		if (artifacts.cleanup !== undefined) {
+			if (options.projectCwd) assertProjectArtifactCleanupAllowed(next.artifacts.baseDir, source, options.projectCwd);
 			const cleanup = expectObject(artifacts.cleanup, source, "artifacts.cleanup");
 			rejectUnknownKeys(cleanup, source, "artifacts.cleanup", ["maxAgeMs", "maxTotalBytes"]);
 			if (cleanup.maxAgeMs !== undefined) next.artifacts.cleanup.maxAgeMs = expectNonNegativeInteger(cleanup.maxAgeMs, source, "artifacts.cleanup.maxAgeMs");
@@ -219,7 +244,7 @@ export function loadConfig(cwd: string): Config {
 	const projectConfigPath = path.join(cwd, ".pi", "pi-simple-subagents", "config.json");
 	let config = cloneConfig(DEFAULT_CONFIG);
 	config = mergeConfig(config, readJsonIfExists(globalConfigPath), globalConfigPath, { allowPiCliPath: true });
-	config = mergeConfig(config, readJsonIfExists(projectConfigPath), projectConfigPath);
+	config = mergeConfig(config, readJsonIfExists(projectConfigPath), projectConfigPath, { projectCwd: cwd });
 	return config;
 }
 

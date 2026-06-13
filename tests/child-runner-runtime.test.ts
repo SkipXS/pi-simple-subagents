@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { setChildRunnerPlatformForTests, setChildRunnerTaskkillForTests, spawnPiRole } from "../extensions/pi-simple-subagents/child-runner.ts";
+import { setChildRunnerKillFallbackMsForTests, setChildRunnerPlatformForTests, setChildRunnerTaskkillForTests, setChildRunnerTerminalCloseGraceMsForTests, spawnPiRole } from "../extensions/pi-simple-subagents/child-runner.ts";
 import { DEFAULT_CONFIG, type Config } from "../extensions/pi-simple-subagents/config.ts";
 
 function tempProject(): string {
@@ -12,6 +12,28 @@ function tempProject(): string {
 
 function cloneConfig(): Config {
 	return JSON.parse(JSON.stringify(DEFAULT_CONFIG)) as Config;
+}
+
+function sleep(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isProcessAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+async function waitForProcessExit(pid: number, timeoutMs: number): Promise<boolean> {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		if (!isProcessAlive(pid)) return true;
+		await sleep(25);
+	}
+	return !isProcessAlive(pid);
 }
 
 test("pre-aborted child runs do not create artifacts or spawn a child", async () => {
@@ -183,5 +205,94 @@ setTimeout(() => process.exit(0), 250);
 	} finally {
 		setChildRunnerPlatformForTests(undefined);
 		setChildRunnerTaskkillForTests(undefined);
+	}
+});
+
+test("terminal assistant output terminates lingering child process tree without failing the run", async () => {
+	const cwd = tempProject();
+	const runDir = path.join(cwd, ".pi", "run");
+	const lingeringPidFile = path.join(cwd, "lingering.pid");
+	const lingering = path.join(cwd, "lingering.js");
+	fs.writeFileSync(lingering, `
+process.on("SIGTERM", () => {});
+setInterval(() => {}, 1000);
+`, "utf8");
+	const cli = path.join(cwd, "fake-pi.js");
+	fs.writeFileSync(cli, `
+const { spawn } = require("node:child_process");
+const fs = require("node:fs");
+console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "terminal output" }], stopReason: "stop" } }));
+const child = spawn(process.execPath, [${JSON.stringify(lingering)}], { stdio: "ignore" });
+fs.writeFileSync(${JSON.stringify(lingeringPidFile)}, String(child.pid));
+child.unref();
+setInterval(() => {}, 1000);
+`, "utf8");
+	let lingeringPid: number | undefined;
+	try {
+		setChildRunnerTerminalCloseGraceMsForTests(50);
+		setChildRunnerKillFallbackMsForTests(100);
+		const config = cloneConfig();
+		config.children.piCliPath = cli;
+		config.children.timeoutMs = 5000;
+
+		const result = await spawnPiRole({ cwd, role: "worker", task: "terminal cleanup", runDir, config });
+
+		assert.equal(result.exitCode, 0);
+		assert.equal(result.stopReason, "stop");
+		assert.match(result.output, /terminal output/);
+		lingeringPid = Number(fs.readFileSync(lingeringPidFile, "utf8"));
+		assert.ok(Number.isInteger(lingeringPid) && lingeringPid > 0);
+		assert.equal(await waitForProcessExit(lingeringPid, 1000), true);
+		assert.match(fs.readFileSync(result.stderrPath, "utf8"), /stayed alive after terminal assistant output/);
+	} finally {
+		setChildRunnerTerminalCloseGraceMsForTests(undefined);
+		setChildRunnerKillFallbackMsForTests(undefined);
+		if (lingeringPid && isProcessAlive(lingeringPid)) {
+			try { process.kill(lingeringPid, "SIGKILL"); } catch {}
+		}
+	}
+});
+
+test("timeout keeps Unix kill fallback alive long enough to kill process-group descendants", async (t) => {
+	if (process.platform === "win32") {
+		t.skip("Unix process-group fallback does not run on Windows");
+		return;
+	}
+	const cwd = tempProject();
+	const runDir = path.join(cwd, ".pi", "run");
+	const descendantPidFile = path.join(cwd, "descendant.pid");
+	const descendant = path.join(cwd, "descendant.js");
+	fs.writeFileSync(descendant, `
+process.on("SIGTERM", () => {});
+setInterval(() => {}, 1000);
+`, "utf8");
+	const cli = path.join(cwd, "fake-pi.js");
+	fs.writeFileSync(cli, `
+const { spawn } = require("node:child_process");
+const fs = require("node:fs");
+const child = spawn(process.execPath, [${JSON.stringify(descendant)}], { stdio: "ignore" });
+fs.writeFileSync(${JSON.stringify(descendantPidFile)}, String(child.pid));
+child.unref();
+setInterval(() => {}, 1000);
+`, "utf8");
+	let descendantPid: number | undefined;
+	try {
+		setChildRunnerKillFallbackMsForTests(100);
+		const config = cloneConfig();
+		config.children.piCliPath = cli;
+		config.children.timeoutMs = 50;
+
+		const result = await spawnPiRole({ cwd, role: "worker", task: "timeout descendant cleanup", runDir, config });
+
+		assert.equal(result.timedOut, true);
+		assert.equal(result.exitCode, 124);
+		descendantPid = Number(fs.readFileSync(descendantPidFile, "utf8"));
+		assert.ok(Number.isInteger(descendantPid) && descendantPid > 0);
+		assert.equal(await waitForProcessExit(descendantPid, 1000), true);
+	} finally {
+		setChildRunnerKillFallbackMsForTests(undefined);
+		if (descendantPid && isProcessAlive(descendantPid)) {
+			try { process.kill(descendantPid, "SIGKILL"); } catch {}
+		}
 	}
 });

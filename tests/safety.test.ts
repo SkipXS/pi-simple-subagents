@@ -86,6 +86,23 @@ test("guardrail config keys are parsed and pre-1.0 legacy keys are not accepted"
 	assert.throws(() => loadConfig(cwd), /piCliPath is only allowed in the global config/);
 });
 
+test("project config cannot move artifact cleanup outside the workspace", () => {
+	const cwd = tempProject();
+	const configPath = path.join(cwd, ".pi", "pi-simple-subagents", "config.json");
+	fs.mkdirSync(path.dirname(configPath), { recursive: true });
+
+	fs.writeFileSync(configPath, JSON.stringify({ artifacts: { baseDir: path.join(cwd, "external-runs") } }), "utf8");
+	assert.throws(() => loadConfig(cwd), /artifacts\.baseDir must be relative in project config/);
+
+	fs.writeFileSync(configPath, JSON.stringify({ artifacts: { baseDir: "../external-runs" } }), "utf8");
+	assert.throws(() => loadConfig(cwd), /artifacts\.baseDir must stay inside the project cwd/);
+
+	fs.writeFileSync(configPath, JSON.stringify({ artifacts: { baseDir: ".pi/custom-runs", cleanup: { maxAgeMs: 1 } } }), "utf8");
+	const config = loadConfig(cwd);
+	assert.equal(config.artifacts.baseDir, ".pi/custom-runs");
+	assert.equal(config.artifacts.cleanup.maxAgeMs, 1);
+});
+
 test("config rejects unknown keys so typos are visible", () => {
 	const cwd = tempProject();
 	const configPath = path.join(cwd, ".pi", "pi-simple-subagents", "config.json");
