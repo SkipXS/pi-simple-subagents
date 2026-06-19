@@ -172,7 +172,7 @@ Parallel workers accept JSON only:
 /work-parallel [{"name":"docs","task":"Update README usage examples"},{"name":"tests","task":"Add parser regression tests"}]
 ```
 
-Review/fix loops are intentionally orchestrator-steered: use `/orchestrate` for work that should verify worker output against the plan, run independent reviewers, hand evidence-backed accepted fixes to worker, validate, and review again. The orchestrator does not verify or review itself; it coordinates verifiers/reviewers/workers and decides from child-agent evidence whether an item is worth fixing now or merely optional/suboptimal LLM churn.
+Review/fix loops are intentionally orchestrator-steered: use `/orchestrate` for work that should verify worker output against the plan, run independent reviewers, hand evidence-backed accepted fixes to worker, validate, and review again. For implementation/fix runs, the orchestrator also chooses the final whole-change review angles from the actual diff and risks, then delegates one reviewer per angle before `final-summary.md`. The orchestrator does not verify or review itself; it coordinates verifiers/reviewers/workers and decides from child-agent evidence whether an item is worth fixing now or merely optional/suboptimal LLM churn.
 
 See [Command reference](docs/reference.md#command-reference) for full slash-command options.
 
@@ -210,12 +210,19 @@ sequenceDiagram
     alt review fixes worth doing now
       O->>W: accepted fixes (same workerId)
     else clean enough
-      O->>A: mark_review_clean + final-summary.md
+      O->>A: mark_review_clean
     end
   end
+
+  opt changed files
+    O->>O: choose final review angles/count
+    O->>R: final whole-change reviewer per angle
+    R->>A: final-review-*.md
+  end
+  O->>A: final-summary.md
 ```
 
-The orchestrator is prompted to split large milestones into small worker packages, verify each package against its acceptance criteria, and then review after verification passes. Each new implementation package gets its own worker session (`worker-1`, `worker-2`, ...), and verifier gap fixes or accepted review fixes reuse that package's `workerId`. If the orchestrator batches reviews, the tool emits a soft warning and the rationale should be recorded in `orchestration.md`. A worker handoff should contain one deliverable, likely files, acceptance criteria, non-goals, and validation.
+The orchestrator is prompted to split large milestones into small worker packages, verify each package against its acceptance criteria, and then review after verification passes. Each new implementation package gets its own worker session (`worker-1`, `worker-2`, ...), and verifier gap fixes or accepted review fixes reuse that package's `workerId`. If the orchestrator batches reviews, the tool emits a soft warning and the rationale should be recorded in `orchestration.md`. Before the final summary for runs that changed files, the orchestrator selects and records the final review angles/count itself (typically 2-4 distinct angles, fewer for trivial changes, more only for independent risks) and delegates reviewers over the complete change set. Accepted final-review findings are sent back to a worker too: reuse the affected package's `workerId` when ownership is clear, or create a narrow final-fix worker package for cross-cutting findings, then verify/validate and final-review again. A worker handoff should contain one deliverable, likely files, acceptance criteria, non-goals, and validation.
 
 ## Run artifacts
 

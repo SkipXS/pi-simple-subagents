@@ -31,6 +31,7 @@ import { runOrchestrator, runReviewers, runScout, runWorker, runWorkersParallel 
 const RUN_ORCHESTRATOR_GUIDELINES = [
 	"Use run_orchestrator for plan-driven implementation or review/fix workflows that need scout/worker/verifier/reviewer coordination.",
 	"The orchestrator coordinates verification plus review/fix loops; verifiers check worker packages against the plan before review, reviewers perform the review, and the orchestrator routes concrete gaps/fixes to worker.",
+	"For implementation/fix runs, the orchestrator should finish with a whole-change multi-angle review and choose the final reviewer angles/count itself from the actual diff and risks; the root caller does not preselect these angles.",
 	"Do not use run_orchestrator for review-only work with no intended fixes; use run_reviewers instead.",
 ];
 

@@ -19,6 +19,7 @@ Notes:
 - The orchestrator does not perform verification or review itself; it coordinates fresh verifiers and reviewers, reads their artifacts, routes concrete implementation gaps to the same worker before review, and routes evidence-backed accepted review fixes to worker.
 - Before the first worker call it is instructed to break milestones or accepted fixes into small work packages.
 - Worker, verifier, and reviewer loop while useful; there is no default hard verification/review-round cap.
+- For implementation/fix runs that changed files, the orchestrator is instructed to finish with a whole-change multi-angle review before `final-summary.md`. The orchestrator chooses and records the final reviewer angles/count from the actual diff, plan risk, validation evidence, and prior findings; the root caller does not preselect these angles. Accepted final-review findings are delegated back to a worker, followed by relevant verification/validation and another final review round unless findings repeat or a decision is needed.
 - Each plan/task/target/context value supports **at most one** `@file` or `@directory` reference. Extra `@...` tokens are rejected to avoid accidental partial context loading.
 
 ### `/scout`
@@ -334,7 +335,7 @@ Orchestration reviewers use:
 ## Verdict
 ```
 
-Review-only target reviewers replace `Validation gaps` with `Evidence`. Synthesis artifacts use:
+Final orchestration review artifacts are usually named `final-review-*.md`; the orchestrator picks explicit angles and gives each reviewer the complete change set/current files plus relevant run artifacts. Review-only target reviewers replace `Validation gaps` with `Evidence`. Synthesis artifacts use:
 
 ```md
 # Review Synthesis

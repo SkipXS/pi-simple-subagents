@@ -51,7 +51,7 @@ A typical standalone workflow follows this sequence:
 
 Review workflows add an optional scout phase, parallel reviewer fanout, partial failure summary support, and final synthesis.
 
-Orchestrator workflows keep state across delegated role calls so accepted fixes can reuse the right worker session and review/verification rounds can be tracked.
+Orchestrator workflows keep state across delegated role calls so accepted fixes can reuse the right worker session and review/verification rounds can be tracked. The orchestrator prompt also directs implementation/fix runs to choose their own final whole-change review angles/count from the completed diff and delegate one reviewer per angle before writing the final summary.
 
 ## Child process lifecycle
 

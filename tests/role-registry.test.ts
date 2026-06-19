@@ -43,6 +43,13 @@ test("orchestrator prompt preserves worker package and review policy semantics",
 	assert.match(prompt, /worker -> verifier -> gap-fix worker/i);
 	assert.match(prompt, /evidence-backed fixes/i);
 	assert.match(prompt, /route those to worker/i);
+	assert.match(prompt, /final whole-change multi-angle review/i);
+	assert.match(prompt, /orchestrator chooses the final review angles/i);
+	assert.match(prompt, /do not ask the root caller to choose them/i);
+	assert.match(prompt, /final-review-\*\.md/i);
+	assert.match(prompt, /final whole-change review finds accepted fixes/i);
+	assert.match(prompt, /reuse the affected package's workerId/i);
+	assert.match(prompt, /new narrow final-fix worker package/i);
 });
 
 test("prompts preserve artifact, reviewer safety, and finding-threshold semantics", () => {
