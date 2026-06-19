@@ -251,12 +251,14 @@ test("package uses tested Pi/typebox runtime imports as bounded peers", () => {
 	const manifest = JSON.parse(fs.readFileSync(path.join(process.cwd(), "package.json"), "utf8")) as { dependencies?: Record<string, string>; peerDependencies?: Record<string, string>; devDependencies?: Record<string, string> };
 	assert.equal(manifest.dependencies, undefined);
 	assert.deepEqual(manifest.peerDependencies, {
-		"@earendil-works/pi-ai": ">=0.78.0 <1",
-		"@earendil-works/pi-coding-agent": ">=0.78.0 <1",
-		"@earendil-works/pi-tui": ">=0.78.0 <1",
+		"@earendil-works/pi-ai": ">=0.79.8 <1",
+		"@earendil-works/pi-coding-agent": ">=0.79.8 <1",
+		"@earendil-works/pi-tui": ">=0.79.8 <1",
 		typebox: "^1.1.39",
 	});
-	assert.match(manifest.devDependencies?.["@earendil-works/pi-tui"] ?? "", /^\^0\.78\./);
+	assert.match(manifest.devDependencies?.["@earendil-works/pi-ai"] ?? "", /^\^0\.79\./);
+	assert.match(manifest.devDependencies?.["@earendil-works/pi-coding-agent"] ?? "", /^\^0\.79\./);
+	assert.match(manifest.devDependencies?.["@earendil-works/pi-tui"] ?? "", /^\^0\.79\./);
 	assert.equal(manifest.devDependencies?.typebox, "^1.1.39");
 });
 

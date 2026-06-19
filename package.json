@@ -39,15 +39,15 @@
     "prepublishOnly": "npm run release:check"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": ">=0.78.0 <1",
-    "@earendil-works/pi-coding-agent": ">=0.78.0 <1",
-    "@earendil-works/pi-tui": ">=0.78.0 <1",
+    "@earendil-works/pi-ai": ">=0.79.8 <1",
+    "@earendil-works/pi-coding-agent": ">=0.79.8 <1",
+    "@earendil-works/pi-tui": ">=0.79.8 <1",
     "typebox": "^1.1.39"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "^0.78.0",
-    "@earendil-works/pi-coding-agent": "^0.78.0",
-    "@earendil-works/pi-tui": "^0.78.1",
+    "@earendil-works/pi-ai": "^0.79.8",
+    "@earendil-works/pi-coding-agent": "^0.79.8",
+    "@earendil-works/pi-tui": "^0.79.8",
     "@types/node": "^24.0.0",
     "typebox": "^1.1.39",
     "typescript": "^5.9.3"
