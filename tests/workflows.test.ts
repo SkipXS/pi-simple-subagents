@@ -893,7 +893,7 @@ console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", 
 	}
 });
 
-test("run_role_agent scopes reviewer status labels to the latest worker", async () => {
+test("run_role_agent scopes package reviewer labels but names final whole-change reviews", async () => {
 	const oldRole = process.env.PI_ORCHESTRATOR_AGENT_ROLE;
 	const oldRunDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
 	const oldCli = process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
@@ -925,17 +925,23 @@ console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", 
 		const firstReview = await runRole.execute("id", { role: "reviewer", purpose: "review", round: 1, task: "review worker one" }, new AbortController().signal, undefined, { cwd } as never);
 		await runRole.execute("id", { role: "worker", purpose: "implementation", task: "worker two" }, new AbortController().signal, undefined, { cwd } as never);
 		const secondReview = await runRole.execute("id", { role: "reviewer", purpose: "review", round: 1, task: "review worker two" }, new AbortController().signal, undefined, { cwd } as never);
+		const finalReview = await runRole.execute("id", { role: "reviewer", purpose: "review", task: "final whole-change review across the complete diff", outputFile: "final-review-runtime-correctness.md" }, new AbortController().signal, undefined, { cwd } as never);
 
 		const firstStatus = firstReview.details.subagentProgress.statuses[0];
 		const secondStatus = secondReview.details.subagentProgress.statuses[0];
+		const finalStatus = finalReview.details.subagentProgress.statuses[0];
 		assert.equal(firstReview.details.statusLabel, "review worker-1 r1");
 		assert.equal(secondReview.details.statusLabel, "review worker-2 r1");
 		assert.match(firstStatus.key, /^subagent:review-worker-1-r1-\d+$/);
 		assert.match(firstStatus.text, /review worker-1 r1:/);
 		assert.match(secondStatus.key, /^subagent:review-worker-2-r1-\d+$/);
 		assert.match(secondStatus.text, /review worker-2 r1:/);
+		assert.equal(finalReview.details.statusLabel, "final review runtime correctness");
+		assert.match(finalStatus.key, /^subagent:final-review-runtime-correctness-\d+$/);
+		assert.match(finalStatus.text, /final review runtime correctness:/);
 		assert.equal(firstReview.details.outputPath, path.join(runDir, "reviewer-1-round-1.md"));
 		assert.equal(secondReview.details.outputPath, path.join(runDir, "reviewer-2-round-1.md"));
+		assert.equal(finalReview.details.outputPath, path.join(runDir, "final-review-runtime-correctness.md"));
 	} finally {
 		if (oldRole === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_ROLE;
 		else process.env.PI_ORCHESTRATOR_AGENT_ROLE = oldRole;

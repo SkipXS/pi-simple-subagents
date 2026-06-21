@@ -145,13 +145,14 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 				if (params.workerId !== undefined && params.role !== "worker") throw new Error("workerId is only valid when role=worker");
 				const config = loadConfig(ctx.cwd);
 				const workerAllocation = params.role === "worker" ? allocateWorkerId(params.workerId, params.purpose) : undefined;
-				const labels = roleRunLabels(params.role, params.purpose, params.round, workerAllocation?.workerId, latestWorkerId, reviewRunsSinceLatestWorker + 1);
+				const taskInput = requireNonEmpty(params.task, "role task");
+				if (params.role === "worker") assertWorkerTaskWithinBudget(taskInput, "run_role_agent.task", config, "worker delegation task");
+				const requestedOutputFile = params.outputFile?.trim();
+				const labels = roleRunLabels(params.role, params.purpose, params.round, workerAllocation?.workerId, latestWorkerId, reviewRunsSinceLatestWorker + 1, requestedOutputFile, taskInput);
 				const statusLabel = labels.statusLabel;
 				const statusKey = roleStatusKey(statusLabel, ++roleStatusSequence);
 				const label = labels.artifactLabel;
-				const taskInput = requireNonEmpty(params.task, "role task");
-				if (params.role === "worker") assertWorkerTaskWithinBudget(taskInput, "run_role_agent.task", config, "worker delegation task");
-				const outputFile = params.outputFile?.trim() || defaultRoleOutputFile(runDir, label, () => ++roleOutputSequence);
+				const outputFile = requestedOutputFile || defaultRoleOutputFile(runDir, label, () => ++roleOutputSequence);
 				const outputArtifactPath = validateOutputArtifactPath(runDir, outputFile);
 				const reviewBatchingWarning = params.role === "worker" && params.purpose === "implementation" && workerAllocation?.allocatedNew && latestWorkerId && !latestWorkerRunReviewedClean
 					? `Starting ${workerAllocation.workerId} while ${latestWorkerId} is not marked cleanly reviewed. This is allowed, but record the rationale for batching/skipping review in orchestration.md and review the pending package(s) before final validation.`

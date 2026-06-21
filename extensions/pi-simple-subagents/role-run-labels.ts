@@ -33,6 +33,27 @@ function workerScopedEphemeralLabels(role: "verifier" | "reviewer", latestWorker
 	};
 }
 
+function reviewAngleFromOutputFile(outputFile: string | undefined): string | undefined {
+	const fileName = outputFile?.trim().split(/[\\/]/).pop()?.replace(/\.md$/i, "") ?? "";
+	const match = /^final-review-(.+)$/.exec(fileName);
+	return match?.[1]?.replace(/[-_]+/g, " ").trim() || undefined;
+}
+
+function isFinalReview(role: string, purpose: string, outputFile: string | undefined, task: string | undefined): boolean {
+	if (role !== "reviewer" || purpose !== "review") return false;
+	if (/^(?:.*[\\/])?final-review(?:[-_.].*)?$/i.test(outputFile?.trim().replace(/\.md$/i, "") ?? "")) return true;
+	return /\bfinal\s+(?:whole-change\s+)?(?:multi-angle\s+)?review\b/i.test(task ?? "") || /\bwhole-change\s+review\b/i.test(task ?? "");
+}
+
+function finalReviewLabels(round: number | undefined, fallbackRound: number, outputFile: string | undefined): { artifactLabel: string; statusLabel: string } {
+	const effectiveRound = round ?? fallbackRound;
+	const angle = reviewAngleFromOutputFile(outputFile);
+	return {
+		artifactLabel: angle ? `final-review-${safeIdLabel(angle, "review")}` : `final-review-round-${effectiveRound}`,
+		statusLabel: `${angle ? `final review ${angle}` : "final review"}${round ? ` r${round}` : ""}`,
+	};
+}
+
 function workerPurposeLabel(purpose: string): string {
 	return purpose === "implementation" ? "impl" : purpose;
 }
@@ -45,11 +66,12 @@ export function roleStatusKey(statusLabel: string, sequence: number): string {
 	return `subagent:${safeIdLabel(statusLabel, "role")}-${sequence}`;
 }
 
-export function roleRunLabels(role: string, purpose: string, round: number | undefined, workerId: string | undefined, latestWorkerId: string | undefined, fallbackReviewRound: number): { artifactLabel: string; statusLabel: string } {
+export function roleRunLabels(role: string, purpose: string, round: number | undefined, workerId: string | undefined, latestWorkerId: string | undefined, fallbackReviewRound: number, outputFile?: string, task?: string): { artifactLabel: string; statusLabel: string } {
 	if (workerId) {
 		const label = `${workerId}${round ? `-round-${round}` : ""}`;
 		return { artifactLabel: label, statusLabel: workerStatusLabel(workerId, purpose, round) };
 	}
+	if (isFinalReview(role, purpose, outputFile, task)) return finalReviewLabels(round, fallbackReviewRound, outputFile);
 	if (role === "verifier" || role === "reviewer") {
 		const scoped = workerScopedEphemeralLabels(role, latestWorkerId, round, fallbackReviewRound);
 		if (scoped.artifactLabel && scoped.statusLabel) return { artifactLabel: scoped.artifactLabel, statusLabel: scoped.statusLabel };
