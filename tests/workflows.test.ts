@@ -1111,6 +1111,33 @@ test("expanded tool renderer does not duplicate subagent progress already presen
 	}
 });
 
+test("progress-only tool updates omit redundant result title", () => {
+	const oldRole = process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+	const oldRunDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+	try {
+		delete process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+		delete process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+		let runWorker: { renderResult?: (result: unknown, options: unknown, theme: unknown) => { render(width: number): string[] } } | undefined;
+		orchestratorAgentsExtension({ registerTool: (tool: { name: string; renderResult?: (result: unknown, options: unknown, theme: unknown) => { render(width: number): string[] } }) => { if (tool.name === "run_worker") runWorker = tool; }, registerCommand() {}, sendMessage() {} } as never);
+		assert.ok(runWorker?.renderResult);
+
+		const rendered = runWorker.renderResult({
+			content: [{ type: "text", text: "Subagents: ⠸ working\n• worker │ implementation: ok │ running" }],
+			details: {
+				subagentProgress: { statuses: [{ key: "subagent:worker", text: "⠸ worker: ↑1k - gpt-5 - running", description: "implementation: ok" }] },
+			},
+		}, {}, { fg: (_name: string, text: string) => text, bold: (text: string) => text }).render(240).join("\n");
+
+		assert.match(rendered, /^Subagents: /);
+		assert.doesNotMatch(rendered, /^• Worker$/m);
+	} finally {
+		if (oldRole === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+		else process.env.PI_ORCHESTRATOR_AGENT_ROLE = oldRole;
+		if (oldRunDir === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+		else process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR = oldRunDir;
+	}
+});
+
 test("extension registration is role-gated", () => {
 	const oldRole = process.env.PI_ORCHESTRATOR_AGENT_ROLE;
 	const oldRunDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;

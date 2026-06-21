@@ -73,9 +73,13 @@ function previewValue(value: unknown, fallback = "—", maxLength = 96): string 
 	return `${normalized.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
 }
 
-function renderToolText(theme: any, title: string, fields: RenderField[], details: string[] = [], status: ToolRenderSummary["status"] = "pending"): Text {
+function hasRenderableField([, value]: RenderField): boolean {
+	return value !== undefined && value !== "";
+}
+
+function renderToolText(theme: any, title: string | undefined, fields: RenderField[], details: string[] = [], status: ToolRenderSummary["status"] = "pending"): Text {
 	const marker = status === "success" ? theme.fg("success", "✓") : status === "error" ? theme.fg("error", "✗") : theme.fg("accent", "•");
-	const lines = [`${marker} ${theme.fg("toolTitle", theme.bold(title))}`];
+	const lines = title ? [`${marker} ${theme.fg("toolTitle", theme.bold(title))}`] : [];
 	for (const [label, value] of fields) {
 		if (value === undefined || value === "") continue;
 		lines.push(`${theme.fg("muted", `${label}:`)} ${String(value)}`);
@@ -119,7 +123,13 @@ function createResultRenderer(title: string, summarize: (details: Record<string,
 		const optionRecord = asRecord(options);
 		const expanded = renderBoolean(optionRecord, "expanded") === true;
 		const content = expanded ? resultContentText(resultRecord) : undefined;
-		return renderToolText(theme, title, summary.fields, [...(summary.details ?? []), ...renderSubagentProgressDetails(details, content), ...(content ? ["", content] : [])], summary.status ?? "success");
+		const summaryDetails = summary.details ?? [];
+		const progressDetails = renderSubagentProgressDetails(details, content);
+		const contentIsProgressOnly = content?.trimStart().startsWith("Subagents:") === true;
+		const hasNonProgressContent = Boolean(content && !contentIsProgressOnly);
+		const hasNonProgressSummary = summary.fields.some(hasRenderableField) || summaryDetails.some((detail) => detail.trim()) || hasNonProgressContent;
+		const renderedTitle = hasNonProgressSummary ? title : undefined;
+		return renderToolText(theme, renderedTitle, summary.fields, [...summaryDetails, ...progressDetails, ...(content ? ["", content] : [])], summary.status ?? "success");
 	};
 }
 
