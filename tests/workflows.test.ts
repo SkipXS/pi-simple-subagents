@@ -6,10 +6,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import { ACTIVE_RUN_MARKER_FILE, markRunOwned } from "../extensions/pi-simple-subagents/artifacts.ts";
-import { getPiInvocation, quoteAtReferencePath, shouldForwardCurrentExtension, spawnPiRole, wasLoadedWithExtensionFlag, type ChildRunResult } from "../extensions/pi-simple-subagents/child-runner.ts";
+import { getPiInvocation, quoteAtReferencePath, setChildRunnerStatusTimerForTests, shouldForwardCurrentExtension, spawnPiRole, wasLoadedWithExtensionFlag, type ChildRunResult } from "../extensions/pi-simple-subagents/child-runner.ts";
 import { DEFAULT_CONFIG, type Config } from "../extensions/pi-simple-subagents/config.ts";
 import orchestratorAgentsExtension from "../extensions/pi-simple-subagents/index.ts";
 import { runReviewers, runScout, runWorker, runWorkersParallel, parseReviewTargetCommand } from "../extensions/pi-simple-subagents/workflows.ts";
+import { createSubagentProgress } from "../extensions/pi-simple-subagents/progress.ts";
 
 const originalWorkerRunsEnv = process.env.PI_ORCHESTRATOR_AGENT_WORKER_RUNS;
 const originalReviewRunsEnv = process.env.PI_ORCHESTRATOR_AGENT_REVIEW_RUNS;
@@ -21,6 +22,36 @@ test.after(() => {
 	if (originalReviewRunsEnv === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_REVIEW_RUNS;
 	else process.env.PI_ORCHESTRATOR_AGENT_REVIEW_RUNS = originalReviewRunsEnv;
 });
+
+interface FakeTimer {
+	callback: () => void;
+	delayMs: number;
+	active: boolean;
+}
+
+function createFakeScheduler() {
+	let currentTime = 0;
+	const timers: FakeTimer[] = [];
+	return {
+		now: () => currentTime,
+		advance: (ms: number) => { currentTime += ms; },
+		setTimeout(callback: () => void, delayMs: number) {
+			const timer = { callback, delayMs, active: true };
+			timers.push(timer);
+			return timer;
+		},
+		clearTimeout(timer: unknown) {
+			(timer as FakeTimer).active = false;
+		},
+		fireActiveTimers() {
+			for (const timer of [...timers]) {
+				if (!timer.active) continue;
+				timer.active = false;
+				timer.callback();
+			}
+		},
+	};
+}
 
 function tempProject(): string {
 	return fs.mkdtempSync(path.join(os.tmpdir(), "pi-simple-subagents-test-"));
@@ -392,24 +423,422 @@ for (const event of events) console.log(JSON.stringify(event));
 	assert.equal(statuses.some((status) => status.key === "subagent:orchestrator" && /run_role_agent worker\/implementation/.test(status.text ?? "")), true);
 });
 
+test("orchestrator child preserves nested subagent currentKey for duplicate progress rows", async () => {
+	const cwd = tempProject();
+	const runDir = path.join(cwd, ".pi", "run");
+	const cli = path.join(cwd, "fake-pi.js");
+	fs.writeFileSync(cli, `
+const args = { role: "worker", purpose: "implementation", task: "do work" };
+const progress = {
+	details: {
+		subagentProgress: {
+			statuses: [
+				{ key: "subagent:worker-a", text: "worker: ↑1 - running", description: "first duplicate" },
+				{ key: "subagent:worker-b", text: "worker: ↑1 - running", description: "second duplicate" },
+			],
+			current: "worker: ↑1 - running",
+			currentKey: "subagent:worker-a",
+		},
+	},
+};
+const events = [
+	{ type: "tool_execution_update", toolName: "run_role_agent", args, partialResult: progress },
+	{ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "orchestration done" }], stopReason: "stop" } },
+];
+for (const event of events) console.log(JSON.stringify(event));
+`, "utf8");
+	const config = cloneConfig();
+	config.children.piCliPath = cli;
+	const updates: Array<Parameters<NonNullable<import("../extensions/pi-simple-subagents/progress.ts").ToolProgressOnUpdate>>[0]> = [];
+	const scheduler = createFakeScheduler();
+	const progress = createSubagentProgress({ now: scheduler.now, setTimeout: scheduler.setTimeout, clearTimeout: scheduler.clearTimeout, onToolUpdate: (update) => updates.push(update) });
+
+	const result = await spawnPiRole({ cwd, role: "orchestrator", task: "nested duplicate status test", runDir, config, statusKey: "subagent:orchestrator", statusLabel: "orchestrator", onStatus: (status) => progress.status(status) });
+	scheduler.fireActiveTimers();
+
+	assert.equal(result.exitCode, 0);
+	const nestedDuplicateUpdate = [...updates].reverse().find((update) => {
+		const text = update.content[0]?.text ?? "";
+		return text.includes("first duplicate") && text.includes("second duplicate");
+	});
+	assert.ok(nestedDuplicateUpdate, "parent progress rendered both nested duplicate rows");
+	assert.equal(nestedDuplicateUpdate.details.subagentProgress.currentKey, "subagent:worker-a");
+	assert.match(nestedDuplicateUpdate.content[0]?.text ?? "", /• worker\s+│ first duplicate\s+│ running/);
+	assert.match(nestedDuplicateUpdate.content[0]?.text ?? "", /· worker\s+│ second duplicate\s+│ running/);
+});
+
+test("orchestrator child falls back from stale nested currentKey to legacy current", async () => {
+	const cwd = tempProject();
+	const runDir = path.join(cwd, ".pi", "run");
+	const cli = path.join(cwd, "fake-pi.js");
+	fs.writeFileSync(cli, `
+const fs = require("node:fs");
+const path = require("node:path");
+const args = { role: "worker", purpose: "implementation", task: "do work" };
+const activeProgress = {
+	details: {
+		subagentProgress: {
+			statuses: [
+				{ key: "subagent:worker", text: "worker: ↑1 - running", description: "nested worker" },
+				{ key: "subagent:scout", text: "scout: ↑1 - finished", description: "nested scout" },
+			],
+			current: "worker: ↑1 - running",
+			currentKey: "subagent:missing",
+		},
+	},
+};
+const terminalProgress = {
+	details: {
+		subagentProgress: {
+			statuses: [{ key: "subagent:worker", text: "worker: ↑1 - finished", description: "nested worker" }],
+			current: "worker: ↑1 - finished",
+			currentKey: "subagent:worker",
+		},
+	},
+};
+const finishFile = process.env.FINISH_FILE;
+const finish = () => {
+	console.log(JSON.stringify({ type: "tool_execution_end", toolName: "run_role_agent", args, result: terminalProgress }));
+	console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "orchestration done" }], stopReason: "stop" } }));
+};
+console.log(JSON.stringify({ type: "tool_execution_update", toolName: "run_role_agent", args, partialResult: activeProgress }));
+if (!finishFile) finish();
+else {
+	const finishDir = path.dirname(finishFile);
+	const finishBase = path.basename(finishFile);
+	let finished = false;
+	const maybeFinish = () => {
+		if (finished || !fs.existsSync(finishFile)) return;
+		finished = true;
+		watcher.close();
+		finish();
+	};
+	const watcher = fs.watch(finishDir, (_event, filename) => {
+		if (!filename || filename.toString() === finishBase) maybeFinish();
+	});
+	maybeFinish();
+}
+`, "utf8");
+	const config = cloneConfig();
+	config.children.piCliPath = cli;
+	const updates: Array<Parameters<NonNullable<import("../extensions/pi-simple-subagents/progress.ts").ToolProgressOnUpdate>>[0]> = [];
+	const progress = createSubagentProgress({ throttleMs: 0, onToolUpdate: (update) => updates.push(update) });
+	const finishFile = path.join(cwd, "finish-child");
+	let spinnerTick: (() => void) | undefined;
+	let triggeredSpinnerTick = false;
+
+	setChildRunnerStatusTimerForTests({
+		setInterval(callback) {
+			spinnerTick = callback;
+			return { unref() {} };
+		},
+		clearInterval() {},
+	});
+	try {
+		const result = await spawnPiRole({
+			cwd,
+			role: "orchestrator",
+			task: "nested stale currentKey test",
+			runDir,
+			config,
+			envExtra: { FINISH_FILE: finishFile },
+			statusKey: "subagent:orchestrator",
+			statusLabel: "orchestrator",
+			onStatus: (status) => {
+				progress.status(status);
+				if (!triggeredSpinnerTick && status.key === "subagent:orchestrator" && /run_role_agent worker\/implementation/.test(status.text ?? "")) {
+					triggeredSpinnerTick = true;
+					assert.ok(spinnerTick, "child-runner registered a spinner interval callback");
+					spinnerTick();
+					fs.writeFileSync(finishFile, "done", "utf8");
+				}
+			},
+		});
+		assert.equal(result.exitCode, 0);
+	} finally {
+		setChildRunnerStatusTimerForTests(undefined);
+	}
+
+	assert.equal(triggeredSpinnerTick, true, "test explicitly triggered the parent spinner tick while nested progress was active");
+	const updatesDuringNestedRun = updates.filter((update) => {
+		const text = update.content[0]?.text ?? "";
+		return text.includes("nested worker") && text.includes("running") && text.includes("run_role_agent worker/implementation");
+	});
+	assert.ok(updatesDuringNestedRun.length > 0, "expected parent spinner/status updates while nested worker is active");
+	assert.equal(updatesDuringNestedRun.some((update) => update.details.subagentProgress.currentKey === "subagent:orchestrator"), false, "parent spinner tick must not steal active currentKey");
+	assert.equal(updatesDuringNestedRun.some((update) => update.details.subagentProgress.currentKey === "subagent:worker"), true, "legacy current fallback should keep nested worker active");
+	const latestNestedRunUpdate = updatesDuringNestedRun.at(-1)?.content[0]?.text ?? "";
+	assert.match(latestNestedRunUpdate, /• worker\s+│ nested worker\s+│ running/);
+	assert.match(latestNestedRunUpdate, /· orchestrator\s+│ —\s+│ run_role_agent worker\/implementation/);
+});
+
+test("orchestrator child keeps statuses-only nested running row active", async () => {
+	const cwd = tempProject();
+	const runDir = path.join(cwd, ".pi", "run");
+	const cli = path.join(cwd, "fake-pi.js");
+	fs.writeFileSync(cli, `
+const fs = require("node:fs");
+const path = require("node:path");
+const args = { role: "worker", purpose: "implementation", task: "do work" };
+const activeProgress = {
+	details: {
+		subagentProgress: {
+			statuses: [
+				{ key: "subagent:scout", text: "scout: ↑1 - finished", description: "nested scout" },
+				{ key: "subagent:worker", text: "worker: ↑1 - running", description: "nested worker" },
+			],
+		},
+	},
+};
+const terminalProgress = {
+	details: {
+		subagentProgress: {
+			statuses: [{ key: "subagent:worker", text: "worker: ↑1 - finished", description: "nested worker" }],
+			current: "worker: ↑1 - finished",
+			currentKey: "subagent:worker",
+		},
+	},
+};
+const finishFile = process.env.FINISH_FILE;
+const finish = () => {
+	console.log(JSON.stringify({ type: "tool_execution_end", toolName: "run_role_agent", args, result: terminalProgress }));
+	console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "orchestration done" }], stopReason: "stop" } }));
+};
+console.log(JSON.stringify({ type: "tool_execution_update", toolName: "run_role_agent", args, partialResult: activeProgress }));
+if (!finishFile) finish();
+else {
+	const finishDir = path.dirname(finishFile);
+	const finishBase = path.basename(finishFile);
+	let finished = false;
+	const maybeFinish = () => {
+		if (finished || !fs.existsSync(finishFile)) return;
+		finished = true;
+		watcher.close();
+		finish();
+	};
+	const watcher = fs.watch(finishDir, (_event, filename) => {
+		if (!filename || filename.toString() === finishBase) maybeFinish();
+	});
+	maybeFinish();
+}
+`, "utf8");
+	const config = cloneConfig();
+	config.children.piCliPath = cli;
+	const updates: Array<Parameters<NonNullable<import("../extensions/pi-simple-subagents/progress.ts").ToolProgressOnUpdate>>[0]> = [];
+	const progress = createSubagentProgress({ throttleMs: 0, onToolUpdate: (update) => updates.push(update) });
+	const finishFile = path.join(cwd, "finish-child");
+	let spinnerTick: (() => void) | undefined;
+	let triggeredSpinnerTick = false;
+
+	setChildRunnerStatusTimerForTests({
+		setInterval(callback) {
+			spinnerTick = callback;
+			return { unref() {} };
+		},
+		clearInterval() {},
+	});
+	try {
+		const result = await spawnPiRole({
+			cwd,
+			role: "orchestrator",
+			task: "nested statuses-only test",
+			runDir,
+			config,
+			envExtra: { FINISH_FILE: finishFile },
+			statusKey: "subagent:orchestrator",
+			statusLabel: "orchestrator",
+			onStatus: (status) => {
+				progress.status(status);
+				if (!triggeredSpinnerTick && status.key === "subagent:orchestrator" && /run_role_agent worker\/implementation/.test(status.text ?? "")) {
+					triggeredSpinnerTick = true;
+					assert.ok(spinnerTick, "child-runner registered a spinner interval callback");
+					spinnerTick();
+					fs.writeFileSync(finishFile, "done", "utf8");
+				}
+			},
+		});
+		assert.equal(result.exitCode, 0);
+	} finally {
+		setChildRunnerStatusTimerForTests(undefined);
+	}
+
+	assert.equal(triggeredSpinnerTick, true, "test explicitly triggered the parent spinner tick while nested progress was active");
+	const updatesDuringNestedRun = updates.filter((update) => {
+		const text = update.content[0]?.text ?? "";
+		return text.includes("nested worker") && text.includes("running") && text.includes("run_role_agent worker/implementation");
+	});
+	assert.ok(updatesDuringNestedRun.length > 0, "expected parent spinner/status updates while nested worker is active");
+	assert.equal(updatesDuringNestedRun.some((update) => update.details.subagentProgress.currentKey === "subagent:orchestrator"), false, "parent spinner tick must not steal active currentKey");
+	assert.equal(updatesDuringNestedRun.some((update) => update.details.subagentProgress.currentKey === "subagent:worker"), true, "statuses-only fallback should keep nested worker active");
+	const latestNestedRunUpdate = updatesDuringNestedRun.at(-1)?.content[0]?.text ?? "";
+	assert.match(latestNestedRunUpdate, /✓ scout\s+│ nested scout\s+│ finished/);
+	assert.match(latestNestedRunUpdate, /• worker\s+│ nested worker\s+│ running/);
+	assert.match(latestNestedRunUpdate, /· orchestrator\s+│ —\s+│ run_role_agent worker\/implementation/);
+});
+
+test("orchestrator child keeps nested currentKey active across parent spinner ticks", async () => {
+	const cwd = tempProject();
+	const runDir = path.join(cwd, ".pi", "run");
+	const cli = path.join(cwd, "fake-pi.js");
+	fs.writeFileSync(cli, `
+const args = { role: "worker", purpose: "implementation", task: "do work" };
+const activeProgress = {
+	details: {
+		subagentProgress: {
+			statuses: [{ key: "subagent:worker", text: "⠋ worker: ↑1 - running", description: "nested worker" }],
+			current: "⠋ worker: ↑1 - running",
+			currentKey: "subagent:worker",
+		},
+	},
+};
+const terminalProgress = {
+	details: {
+		subagentProgress: {
+			statuses: [{ key: "subagent:worker", text: "⠙ worker: ↑1 - finished", description: "nested worker" }],
+			current: "⠙ worker: ↑1 - finished",
+			currentKey: "subagent:worker",
+		},
+	},
+};
+const fs = require("node:fs");
+const path = require("node:path");
+const finishFile = process.env.FINISH_FILE;
+const finish = () => {
+	console.log(JSON.stringify({ type: "tool_execution_end", toolName: "run_role_agent", args, result: terminalProgress }));
+	console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "orchestration done" }], stopReason: "stop" } }));
+};
+console.log(JSON.stringify({ type: "tool_execution_update", toolName: "run_role_agent", args, partialResult: activeProgress }));
+if (!finishFile) finish();
+else {
+	const finishDir = path.dirname(finishFile);
+	const finishBase = path.basename(finishFile);
+	let finished = false;
+	const maybeFinish = () => {
+		if (finished || !fs.existsSync(finishFile)) return;
+		finished = true;
+		watcher.close();
+		finish();
+	};
+	const watcher = fs.watch(finishDir, (_event, filename) => {
+		if (!filename || filename.toString() === finishBase) maybeFinish();
+	});
+	maybeFinish();
+}
+`, "utf8");
+	const config = cloneConfig();
+	config.children.piCliPath = cli;
+	const updates: Array<Parameters<NonNullable<import("../extensions/pi-simple-subagents/progress.ts").ToolProgressOnUpdate>>[0]> = [];
+	const progress = createSubagentProgress({ throttleMs: 0, onToolUpdate: (update) => updates.push(update) });
+	const finishFile = path.join(cwd, "finish-child");
+	let spinnerTick: (() => void) | undefined;
+	let triggeredSpinnerTick = false;
+
+	setChildRunnerStatusTimerForTests({
+		setInterval(callback) {
+			spinnerTick = callback;
+			return { unref() {} };
+		},
+		clearInterval() {},
+	});
+	try {
+		const result = await spawnPiRole({
+			cwd,
+			role: "orchestrator",
+			task: "nested spinner status test",
+			runDir,
+			config,
+			envExtra: { FINISH_FILE: finishFile },
+			statusKey: "subagent:orchestrator",
+			statusLabel: "orchestrator",
+			onStatus: (status) => {
+				progress.status(status);
+				if (!triggeredSpinnerTick && status.key === "subagent:orchestrator" && /run_role_agent worker\/implementation/.test(status.text ?? "")) {
+					triggeredSpinnerTick = true;
+					assert.ok(spinnerTick, "child-runner registered a spinner interval callback");
+					spinnerTick();
+					fs.writeFileSync(finishFile, "done", "utf8");
+				}
+			},
+		});
+		assert.equal(result.exitCode, 0);
+	} finally {
+		setChildRunnerStatusTimerForTests(undefined);
+	}
+
+	assert.equal(triggeredSpinnerTick, true, "test explicitly triggered the parent spinner tick while nested progress was active");
+
+	const updatesDuringNestedRun = updates.filter((update) => {
+		const text = update.content[0]?.text ?? "";
+		return text.includes("nested worker") && text.includes("running") && text.includes("run_role_agent worker/implementation");
+	});
+	assert.ok(updatesDuringNestedRun.length > 0, "expected parent spinner/status updates while nested worker is active");
+	assert.equal(updatesDuringNestedRun.some((update) => update.details.subagentProgress.currentKey === "subagent:orchestrator"), false, "parent spinner tick must not steal active currentKey");
+	assert.equal(updatesDuringNestedRun.some((update) => update.details.subagentProgress.currentKey === "subagent:worker"), true, "nested worker remains the active currentKey");
+	const latestNestedRunUpdate = updatesDuringNestedRun.at(-1)?.content[0]?.text ?? "";
+	assert.match(latestNestedRunUpdate, /• worker\s+│ nested worker\s+│ running/);
+	assert.match(latestNestedRunUpdate, /· orchestrator\s+│ —\s+│ run_role_agent worker\/implementation/);
+});
+
 test("child status spinner updates faster than model status cadence", async () => {
 	const cwd = tempProject();
 	const runDir = path.join(cwd, ".pi", "run");
 	const cli = path.join(cwd, "fake-pi.js");
 	fs.writeFileSync(cli, `
-setTimeout(() => {
+const fs = require("node:fs");
+const path = require("node:path");
+const finishFile = process.env.FINISH_FILE;
+const finish = () => {
 	console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", provider: "fake", model: "fake-model", content: [{ type: "text", text: "done" }], stopReason: "stop" } }));
-}, 450);
+};
+if (!finishFile) finish();
+else {
+	const finishDir = path.dirname(finishFile);
+	const finishBase = path.basename(finishFile);
+	let finished = false;
+	const maybeFinish = () => {
+		if (finished || !fs.existsSync(finishFile)) return;
+		finished = true;
+		watcher.close();
+		finish();
+	};
+	const watcher = fs.watch(finishDir, (_event, filename) => {
+		if (!filename || filename.toString() === finishBase) maybeFinish();
+	});
+	maybeFinish();
+}
 `, "utf8");
 	const config = cloneConfig();
 	config.children.piCliPath = cli;
 	const statuses: Array<{ key: string; text: string | undefined }> = [];
-	const result = await spawnPiRole({ cwd, role: "worker", task: "spinner test", runDir, config, statusKey: "subagent:test-worker", statusLabel: "test-worker", onStatus: (status) => statuses.push(status) });
-	const spinnerFrames = new Set(statuses.flatMap((status) => /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/u.exec(status.text ?? "")?.[0] ?? []));
+	const finishFile = path.join(cwd, "finish-child");
+	let spinnerTick: (() => void) | undefined;
+	let resolveSpinnerCaptured: (() => void) | undefined;
+	const spinnerCaptured = new Promise<void>((resolve) => { resolveSpinnerCaptured = resolve; });
 
-	assert.equal(result.exitCode, 0);
-	assert.ok(statuses.length >= 3, `expected multiple fast spinner updates, got ${statuses.length}: ${statuses.map((status) => status.text).join(" | ")}`);
-	assert.ok(spinnerFrames.size >= 2, `expected spinner to advance frames, got ${[...spinnerFrames].join("")}`);
+	setChildRunnerStatusTimerForTests({
+		setInterval(callback) {
+			spinnerTick = callback;
+			resolveSpinnerCaptured?.();
+			return { unref() {} };
+		},
+		clearInterval() {},
+	});
+	try {
+		const resultPromise = spawnPiRole({ cwd, role: "worker", task: "spinner test", runDir, config, envExtra: { FINISH_FILE: finishFile }, statusKey: "subagent:test-worker", statusLabel: "test-worker", onStatus: (status) => statuses.push(status) });
+		await spinnerCaptured;
+		assert.ok(spinnerTick, "child-runner registered a spinner interval callback");
+		spinnerTick();
+		spinnerTick();
+		fs.writeFileSync(finishFile, "done", "utf8");
+		const result = await resultPromise;
+		const spinnerFrames = new Set(statuses.flatMap((status) => /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/u.exec(status.text ?? "")?.[0] ?? []));
+
+		assert.equal(result.exitCode, 0);
+		assert.ok(statuses.length >= 3, `expected multiple deterministic spinner updates, got ${statuses.length}: ${statuses.map((status) => status.text).join(" | ")}`);
+		assert.ok(spinnerFrames.size >= 2, `expected spinner to advance frames, got ${[...spinnerFrames].join("")}`);
+	} finally {
+		setChildRunnerStatusTimerForTests(undefined);
+	}
 });
 
 test("parallel workers abort and await siblings after a child setup/spawn failure", async () => {
@@ -1111,6 +1540,41 @@ test("expanded tool renderer does not duplicate subagent progress already presen
 		}, { expanded: true }, { fg: (_name: string, text: string) => text, bold: (text: string) => text }).render(240).join("\n");
 
 		assert.equal((rendered.match(/Subagents:/g) ?? []).length, 1);
+	} finally {
+		if (oldRole === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+		else process.env.PI_ORCHESTRATOR_AGENT_ROLE = oldRole;
+		if (oldRunDir === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+		else process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR = oldRunDir;
+	}
+});
+
+test("tool renderer preserves currentKey to mark the active duplicate progress row", () => {
+	const oldRole = process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+	const oldRunDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+	try {
+		delete process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+		delete process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+		let runWorker: { renderResult?: (result: unknown, options: unknown, theme: unknown) => { render(width: number): string[] } } | undefined;
+		orchestratorAgentsExtension({ registerTool: (tool: { name: string; renderResult?: (result: unknown, options: unknown, theme: unknown) => { render(width: number): string[] } }) => { if (tool.name === "run_worker") runWorker = tool; }, registerCommand() {}, sendMessage() {} } as never);
+		assert.ok(runWorker?.renderResult);
+
+		const rendered = runWorker.renderResult({
+			content: [],
+			details: {
+				result: { exitCode: 0 },
+				subagentProgress: {
+					statuses: [
+						{ key: "worker-a", text: "worker: ↑1 - running", description: "first duplicate" },
+						{ key: "worker-b", text: "worker: ↑1 - running", description: "second duplicate" },
+					],
+					current: "worker: ↑1 - running",
+					currentKey: "worker-b",
+				},
+			},
+		}, {}, { fg: (_name: string, text: string) => text, bold: (text: string) => text }).render(240).join("\n");
+
+		assert.match(rendered, /^· worker │ first duplicate/m);
+		assert.match(rendered, /^• worker │ second duplicate/m);
 	} finally {
 		if (oldRole === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_ROLE;
 		else process.env.PI_ORCHESTRATOR_AGENT_ROLE = oldRole;

@@ -28,7 +28,8 @@ function readSubagentProgressSnapshot(value: unknown): SubagentProgressSnapshot 
 	});
 	if (statuses.length === 0) return undefined;
 	const current = typeof record?.current === "string" && record.current.trim() ? record.current : undefined;
-	return { statuses, ...(current ? { current } : {}) };
+	const currentKey = typeof record?.currentKey === "string" && record.currentKey.trim() ? record.currentKey : undefined;
+	return { statuses, ...(current ? { current } : {}), ...(currentKey ? { currentKey } : {}) };
 }
 
 function renderSubagentProgressDetails(details: Record<string, unknown> | undefined, content?: string): string[] {

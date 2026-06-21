@@ -508,17 +508,19 @@ Interactive Pi shows child-agent progress in a stable multi-line block. Slash co
 
 ```text
 Subagents: ⠋ working
-✓ worker     │ implementation: fix parser regression      │ finished
-             │ ↑1k ↓2k R3k W4.0k CH37.5% $0.123 (sub) 3.7%/272k (auto) │ gpt-5.5 • medium
-• verify worker-2 r1 │ validation: check package acceptance criteria │ inspect files
-                     │ ↑640 ↓90 R28k CH98.0% $0.018 (sub) 10.4%/272k (auto) │ gpt-5.5 • low
-• review worker-2 r1 │ packaging/installability for npm extension   │ read package.json
-                     │ ↑867 ↓103 R31k CH98.0% $0.023 (sub) 11.8%/272k (auto) │ gpt-5.5 • low
+✓ worker             │ implementation: fix parser regression              │ finished
+                     │ ↑1k ↓2k R3k W4.0k CH37.5% $0.123 (sub) 3.7%/272k │ gpt-5.5 • medium
+• verify worker-2 r1 │ validation: check package acceptance criteria       │ inspect files
+                     │ ↑640 ↓90 R28k CH98.0% $0.018 (sub) 10.4%/272k     │ gpt-5.5 • low
+· review worker-2 r1 │ packaging/installability for npm extension          │ read package.json
+                     │ ↑867 ↓103 R31k CH98.0% $0.023 (sub) 11.8%/272k    │ gpt-5.5 • low
 ```
 
-Each subagent shows two lines: role label, short prompt/assignment description, and current activity first; usage/context metrics and model/thinking second. Orchestrated verifier and reviewer status labels are scoped to the latest worker package as `verify worker-N rM` / `review worker-N rM` (for example, `verify worker-2 r1` and `review worker-2 r1` are verification/review round 1 for `worker-2`) so later packages do not overwrite earlier status rows. The model separator on the second line is aligned with the activity separator on the first line, using one shared detail-column width across descriptions and usage metrics. The description is populated for orchestrator, scout, worker, parallel worker, verifier, reviewer, and synthesis roles so verification/review and delegation fanouts are less opaque.
+Each subagent starts with one compact main row: a marker, status role label, short prompt/assignment description, and current action/state. When usage/model details are available, an optional compact detail row follows with token/cache/cost/context metrics and model/thinking level. Markers are `•` for the active non-terminal row, `·` for inactive non-terminal rows, `✓` for finished rows, and `!` for failed/timed-out/aborted rows. When every row is terminal, the header renders `Subagents: ✓ done`.
 
-Tool results and slash-command completion messages also preserve the latest `subagentProgress` snapshot and render the same status block in the final summary. This connects the live progress widget with the stable result card so completed runs are not a black box after the widget clears.
+Orchestrated verifier and reviewer status labels are scoped to the latest worker package as `verify worker-N rM` / `review worker-N rM` (for example, `verify worker-2 r1` and `review worker-2 r1` are verification/review round 1 for `worker-2`) so later packages do not overwrite earlier status rows. The description is populated for orchestrator, scout, worker, parallel worker, verifier, reviewer, and synthesis roles so verification/review and delegation fanouts are less opaque.
+
+Tool results and slash-command completion messages also preserve the latest `subagentProgress` snapshot and render the same status block in the final summary. This connects the live progress widget with the stable result card so completed runs are not a black box after the widget clears. The structured snapshot is stored at `details.subagentProgress` with `statuses[]` rows (`key`, `text`, optional `description`), legacy `current` text, and optional `currentKey`; consumers that re-render the snapshot should preserve `currentKey` so duplicate rows with identical status text keep the correct active marker.
 
 Usage metrics follow Pi's current footer order: input/output tokens (`↑`/`↓`), cache read/write (`R`/`W`), latest cache hit rate (`CH`), cost with `(sub)` when the model provider uses OAuth/subscription credentials, and context usage.
 

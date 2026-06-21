@@ -41,6 +41,7 @@ const DEFAULT_TERMINAL_CLOSE_GRACE_MS = 2000;
 let taskkillOverrideForTests: { command: string; argsPrefix?: string[] } | undefined;
 let killFallbackMsOverrideForTests: number | undefined;
 let terminalCloseGraceMsOverrideForTests: number | undefined;
+let statusTimerOverrideForTests: { setInterval: (callback: () => void, intervalMs: number) => unknown; clearInterval: (timer: unknown) => void } | undefined;
 
 export function setChildRunnerPlatformForTests(platform: NodeJS.Platform | undefined): void {
 	setPiInvocationPlatformForTests(platform);
@@ -58,6 +59,10 @@ export function setChildRunnerTerminalCloseGraceMsForTests(ms: number | undefine
 	terminalCloseGraceMsOverrideForTests = ms;
 }
 
+export function setChildRunnerStatusTimerForTests(timers: { setInterval: (callback: () => void, intervalMs: number) => unknown; clearInterval: (timer: unknown) => void } | undefined): void {
+	statusTimerOverrideForTests = timers;
+}
+
 
 function taskkillInvocation(): { command: string; argsPrefix: string[] } {
 	return { command: taskkillOverrideForTests?.command ?? "taskkill", argsPrefix: taskkillOverrideForTests?.argsPrefix ?? [] };
@@ -67,6 +72,7 @@ export interface ChildStatusUpdate {
 	key: string;
 	text: string | undefined;
 	description?: string;
+	active?: boolean;
 }
 
 export interface ChildRunResult {
@@ -175,19 +181,52 @@ function compactArgs(value: unknown): string {
 	return "";
 }
 
-function nestedSubagentStatuses(value: unknown): ChildStatusUpdate[] {
-	if (!value || typeof value !== "object") return [];
+function statusActionFromText(text: string, fallback: string): string {
+	const trimmed = text.trim();
+	const body = /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s+(.+)$/u.exec(trimmed)?.[1] ?? trimmed;
+	const separatorIndex = body.indexOf(":");
+	if (separatorIndex < 0) return body || fallback;
+	const rest = body.slice(separatorIndex + 1).trim();
+	const actionSeparator = rest.lastIndexOf(" - ");
+	return actionSeparator < 0 ? rest : rest.slice(actionSeparator + " - ".length).trim();
+}
+
+function isTerminalStatusText(text: string, fallback: string): boolean {
+	const action = statusActionFromText(text, fallback);
+	return action === "finished" || action === "failed" || action === "timed out" || action === "aborted";
+}
+
+function nestedSubagentProgress(value: unknown): { statuses: ChildStatusUpdate[]; hasActiveNonTerminal: boolean } {
+	if (!value || typeof value !== "object") return { statuses: [], hasActiveNonTerminal: false };
 	const root = value as Record<string, unknown>;
 	const details = root.details && typeof root.details === "object" ? root.details as Record<string, unknown> : undefined;
 	const progress = details?.subagentProgress && typeof details.subagentProgress === "object" ? details.subagentProgress as Record<string, unknown> : undefined;
-	const statuses = Array.isArray(progress?.statuses) ? progress.statuses : [];
-	return statuses.flatMap((entry) => {
+	const rawStatuses = Array.isArray(progress?.statuses) ? progress.statuses : [];
+	const currentKey = typeof progress?.currentKey === "string" ? progress.currentKey : undefined;
+	const current = typeof progress?.current === "string" ? progress.current : undefined;
+	const statuses = rawStatuses.flatMap((entry) => {
 		if (!entry || typeof entry !== "object") return [];
 		const status = entry as Record<string, unknown>;
 		return typeof status.key === "string" && typeof status.text === "string"
-			? [{ key: status.key, text: status.text, ...(typeof status.description === "string" && status.description.trim() ? { description: status.description.trim() } : {}) }]
+			? [{
+				key: status.key,
+				text: status.text,
+				...(typeof status.description === "string" && status.description.trim() ? { description: status.description.trim() } : {}),
+			}]
 			: [];
 	});
+	const isNonTerminal = (status: ChildStatusUpdate) => !isTerminalStatusText(status.text ?? "", status.key);
+	const currentKeyActive = currentKey ? statuses.find((status) => status.key === currentKey && isNonTerminal(status)) : undefined;
+	const currentActive = current ? statuses.find((status) => status.text === current && isNonTerminal(status)) : undefined;
+	const activeStatus = currentKeyActive ?? currentActive ?? statuses.find(isNonTerminal);
+	const hasActiveNonTerminal = Boolean(activeStatus);
+	return {
+		statuses: statuses.map((status) => ({
+			...status,
+			...(activeStatus ? { active: status === activeStatus } : {}),
+		})),
+		hasActiveNonTerminal,
+	};
 }
 
 function messageUsage(message: unknown): { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens: number; cost: number } | undefined {
@@ -348,6 +387,7 @@ export async function spawnPiRole(input: {
 		let finalOutput = "";
 		let assistantStopReason: string | undefined;
 		let assistantErrorMessage: string | undefined;
+		let nestedActiveNonTerminal = false;
 		const configuredModel = configuredModelParts(roleConfig.model);
 		let childProvider = configuredModel.provider;
 		let childModel = configuredModel.model;
@@ -392,22 +432,24 @@ export async function spawnPiRole(input: {
 			const metrics = statusMetrics(usageTotals, childModel, roleConfig.thinking, childUsingSubscription);
 			return `${frame} ${statusLabel}: ${metrics ? `${metrics} - ${action}` : action}`;
 		};
-		const emitStatus = (options: { force?: boolean; action?: string } = {}) => {
+		const emitStatus = (options: { force?: boolean; action?: string; active?: boolean } = {}) => {
 			if (!input.onStatus) return;
 			if (options.action === undefined) commitPendingStatusAction({ force: options.force });
 			const text = formatStatusText(options.action);
 			if (!options.force && text === lastStatusText) return;
 			lastStatusText = text;
-			input.onStatus({ key: statusKey, text, ...(statusDescription ? { description: statusDescription } : {}) });
+			input.onStatus({ key: statusKey, text, ...(statusDescription ? { description: statusDescription } : {}), ...(options.active === false || nestedActiveNonTerminal ? { active: false } : {}) });
 		};
-		const setStatusAction = (action: string, options: { force?: boolean } = {}) => {
+		const setStatusAction = (action: string, options: { force?: boolean; active?: boolean } = {}) => {
 			pendingStatusAction = action;
 			const before = statusAction;
 			commitPendingStatusAction(options);
 			if (options.force || statusAction !== before) emitStatus(options);
 		};
 		emitStatus({ force: true });
-		const statusTimer = input.onStatus ? setInterval(emitStatus, STATUS_SPINNER_INTERVAL_MS) : undefined;
+		const scheduleStatusTimer = statusTimerOverrideForTests?.setInterval ?? ((callback: () => void, intervalMs: number) => setInterval(callback, intervalMs));
+		const clearStatusTimer = statusTimerOverrideForTests?.clearInterval ?? ((timer: unknown) => clearInterval(timer as ReturnType<typeof setInterval>));
+		const statusTimer = input.onStatus ? scheduleStatusTimer(emitStatus, STATUS_SPINNER_INTERVAL_MS) : undefined;
 		(statusTimer as { unref?: () => void } | undefined)?.unref?.();
 		const rememberArtifactError = (context: string, error: unknown) => {
 			if (artifactErrorMessage) return;
@@ -468,12 +510,16 @@ export async function spawnPiRole(input: {
 					const detail = compactArgs(event.args ?? event.input);
 					setStatusAction(`${event.toolName ?? "tool"}${detail ? ` ${detail}` : ""}`, { force: event.toolName === "run_role_agent" });
 				} else if (event.type === "tool_execution_update") {
-					for (const nestedStatus of nestedSubagentStatuses(event.partialResult)) input.onStatus?.(nestedStatus);
+					const nestedProgress = nestedSubagentProgress(event.partialResult);
+					nestedActiveNonTerminal = nestedProgress.statuses.length > 0 ? nestedProgress.hasActiveNonTerminal : nestedActiveNonTerminal;
+					for (const nestedStatus of nestedProgress.statuses) input.onStatus?.(nestedStatus);
 					const detail = compactArgs(event.args ?? event.input);
-					setStatusAction(`${event.toolName ?? "tool"}${detail ? ` ${detail}` : ""}`);
+					setStatusAction(`${event.toolName ?? "tool"}${detail ? ` ${detail}` : ""}`, { active: nestedActiveNonTerminal ? false : undefined });
 				} else if (event.type === "tool_execution_end") {
-					for (const nestedStatus of nestedSubagentStatuses(event.result)) input.onStatus?.(nestedStatus);
-					setStatusAction(event.isError ? `${event.toolName ?? "tool"} failed` : `${event.toolName ?? "tool"} done`);
+					const nestedProgress = nestedSubagentProgress(event.result);
+					nestedActiveNonTerminal = nestedProgress.statuses.length > 0 ? nestedProgress.hasActiveNonTerminal : false;
+					for (const nestedStatus of nestedProgress.statuses) input.onStatus?.(nestedStatus);
+					setStatusAction(event.isError ? `${event.toolName ?? "tool"} failed` : `${event.toolName ?? "tool"} done`, { active: nestedActiveNonTerminal ? false : undefined });
 				} else if (event.type === "message_start") {
 					setStatusAction("thinking");
 				} else if (event.type === "message_end" && event.message?.role === "assistant") {
@@ -583,7 +629,7 @@ export async function spawnPiRole(input: {
 		const finish = (exitCode: number) => {
 			if (settled) return;
 			settled = true;
-			if (statusTimer) clearInterval(statusTimer);
+			if (statusTimer) clearStatusTimer(statusTimer);
 			if (timeoutTimer) clearTimeout(timeoutTimer);
 			if (terminalCloseTimer) clearTimeout(terminalCloseTimer);
 			if (killFallbackTimer && !aborted && !terminatedAfterTerminalOutput) {
