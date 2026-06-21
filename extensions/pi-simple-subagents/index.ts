@@ -205,7 +205,7 @@ Write the expected output artifact with write_run_artifact using path ${JSON.str
 				const subagentProgress = progress.snapshot();
 				return {
 					content: [{ type: "text", text: childSummary(`${params.role} finished with exit code ${result.exitCode}.`, [["Worker", workerAllocation?.workerId], ["Review batching warning", reviewBatchingWarning], ["Session", result.sessionFile], ["Output", outputArtifactPath], ["Transcript", result.transcriptPath], ["Stderr", result.stderrPath]], result.output, { subagentProgress }) }],
-					details: withSubagentProgress({ ...result, outputPath: outputArtifactPath, purpose: params.purpose, workerId: workerAllocation?.workerId, reviewBatchingWarning, round: params.round, statusLabel, statusKey, latestWorkerRunReviewedClean, latestWorkerId, nextWorkerSequence, workerRuns, reviewRuns, reviewRunsSinceLatestWorker }, progress),
+					details: withSubagentProgress({ ...result, runDir, outputPath: outputArtifactPath, purpose: params.purpose, workerId: workerAllocation?.workerId, reviewBatchingWarning, round: params.round, statusLabel, statusKey, latestWorkerRunReviewedClean, latestWorkerId, nextWorkerSequence, workerRuns, reviewRuns, reviewRunsSinceLatestWorker }, progress),
 				};
 
 			},

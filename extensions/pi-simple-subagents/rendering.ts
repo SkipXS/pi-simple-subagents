@@ -1,5 +1,6 @@
 import { Text } from "@earendil-works/pi-tui";
 import { formatSubagentProgress, type SubagentProgressSnapshot } from "./progress.ts";
+import { renderExpandedToolCallTree } from "./tool-tree.ts";
 
 export type RenderField = [label: string, value: string | number | boolean | undefined];
 
@@ -125,11 +126,12 @@ function createResultRenderer(title: string, summarize: (details: Record<string,
 		const content = expanded ? resultContentText(resultRecord) : undefined;
 		const summaryDetails = summary.details ?? [];
 		const progressDetails = renderSubagentProgressDetails(details, content);
+		const toolTreeDetails = expanded ? renderExpandedToolCallTree(details) : [];
 		const contentIsProgressOnly = content?.trimStart().startsWith("Subagents:") === true;
 		const hasNonProgressContent = Boolean(content && !contentIsProgressOnly);
 		const hasNonProgressSummary = summary.fields.some(hasRenderableField) || summaryDetails.some((detail) => detail.trim()) || hasNonProgressContent;
 		const renderedTitle = hasNonProgressSummary ? title : undefined;
-		return renderToolText(theme, renderedTitle, summary.fields, [...summaryDetails, ...progressDetails, ...(content ? ["", content] : [])], summary.status ?? "success");
+		return renderToolText(theme, renderedTitle, summary.fields, [...summaryDetails, ...progressDetails, ...toolTreeDetails, ...(content ? ["", content] : [])], summary.status ?? "success");
 	};
 }
 

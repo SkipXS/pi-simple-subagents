@@ -309,6 +309,7 @@ test("package tarball dry-run contains only release files", () => {
 		"extensions/pi-simple-subagents/state.ts",
 		"extensions/pi-simple-subagents/summaries.ts",
 		"extensions/pi-simple-subagents/text.ts",
+		"extensions/pi-simple-subagents/tool-tree.ts",
 		"extensions/pi-simple-subagents/worker-workflow.ts",
 		"extensions/pi-simple-subagents/workflow-common.ts",
 		"extensions/pi-simple-subagents/workflows.ts",
@@ -859,6 +860,7 @@ console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", 
 		const second = await runRole.execute("id", { role: "worker", purpose: "implementation", task: "second" }, new AbortController().signal, undefined, { cwd } as never);
 		const latestFix = await runRole.execute("id", { role: "worker", purpose: "fix", task: "fix latest" }, new AbortController().signal, undefined, { cwd } as never);
 		const explicitFix = await runRole.execute("id", { role: "worker", purpose: "fix", workerId: "worker-1", task: "fix first", outputFile: "worker-1-fix.md" }, new AbortController().signal, undefined, { cwd } as never);
+		assert.equal(first.details.runDir, runDir);
 		assert.equal(first.details.workerId, "worker-1");
 		assert.equal(second.details.workerId, "worker-2");
 		assert.match(second.details.reviewBatchingWarning, /worker-1 is not marked cleanly reviewed/);
