@@ -54,18 +54,24 @@ export function trimStatusField(value: string, maxLength: number): string {
 	return `${normalized.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
 }
 
-function splitStatusDetails(status: string): { usage: string; model: string } {
+function splitStatusDetails(status: string): { usage?: string; model?: string } {
 	const trimmed = status.trim();
-	if (!trimmed) return { usage: "usage pending", model: "model pending" };
+	if (!trimmed || trimmed === "-") return {};
+	if (trimmed.startsWith("- ")) {
+		const model = trimmed.slice(2).trim();
+		return model ? { model } : {};
+	}
 	const separator = trimmed.lastIndexOf(" - ");
 	if (separator >= 0) {
+		const firstSeparator = trimmed.indexOf(" - ");
+		const usagePrefix = trimmed.slice(0, firstSeparator).trim();
+		const splitAt = firstSeparator !== separator && /^[↑↓RWCH$?\d]/u.test(usagePrefix) ? firstSeparator : separator;
 		return {
-			usage: trimmed.slice(0, separator).trim() || "usage pending",
-			model: trimmed.slice(separator + " - ".length).trim() || "model pending",
+			...(trimmed.slice(0, splitAt).trim() ? { usage: trimmed.slice(0, splitAt).trim() } : {}),
+			...(trimmed.slice(splitAt + " - ".length).trim() ? { model: trimmed.slice(splitAt + " - ".length).trim() } : {}),
 		};
 	}
-	if (trimmed.startsWith("- ")) return { usage: "usage pending", model: trimmed.slice(2).trim() || "model pending" };
-	return { usage: trimmed, model: "model pending" };
+	return { usage: trimmed };
 }
 
 function progressMarker(status: ParsedStatusLine & { key: string }, activeKey: string | undefined): string {
@@ -84,22 +90,26 @@ export function formatSubagentProgress(snapshot: SubagentProgressSnapshot): stri
 	const header = `Subagents: ${workingIndicator} ${active ? "working" : "done"}`;
 	const roleWidth = Math.max(...parsed.map((status) => status.label.length));
 	const parsedDetails = parsed.map((status) => splitStatusDetails(status.status));
-	const detailColumnWidth = Math.max(
-		...parsed.map((status) => trimStatusField(status.description ?? "—", 56).length),
-		...parsedDetails.map((details, index) => parsed[index].status ? details.usage.length : 0),
-	);
+	const descriptionWidth = Math.max(...parsed.map((status) => trimStatusField(status.description ?? "—", 56).length));
+	const detailLabelWidth = "usage".length;
 	const lines = parsed.flatMap((status, index) => {
 		const marker = progressMarker(status, active?.key);
 		const role = status.label.padEnd(roleWidth);
-		const description = trimStatusField(status.description ?? "—", 56).padEnd(detailColumnWidth);
+		const description = trimStatusField(status.description ?? "—", 56).padEnd(descriptionWidth);
 		const details = parsedDetails[index];
 		const detailIndent = " ".repeat(roleWidth + 3);
-		return status.status
-			? [
-				`${marker} ${role} │ ${description} │ ${status.action}`,
-				`${detailIndent}│ ${details.usage.padEnd(detailColumnWidth)} │ ${details.model}`,
-			]
-			: [`${marker} ${role} │ ${description} │ ${status.action}`];
+		const detailRows = [
+			...(details.usage ? [{ label: "usage", value: details.usage }] : []),
+			...(details.model ? [{ label: "model", value: details.model }] : []),
+			...(status.action ? [{ label: isTerminalStatusAction(status.action) ? "state" : "now", value: status.action }] : []),
+		];
+		return [
+			`${marker} ${role} │ ${description}`,
+			...detailRows.map((row, rowIndex) => {
+				const branch = rowIndex === detailRows.length - 1 ? "└─" : "├─";
+				return `${detailIndent}${branch} ${row.label.padEnd(detailLabelWidth)} │ ${row.value}`;
+			}),
+		];
 	});
 	return [header, ...lines].join("\n");
 }

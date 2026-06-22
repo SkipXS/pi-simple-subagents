@@ -35,7 +35,7 @@ function createFakeScheduler() {
 	};
 }
 
-test("formatSubagentProgress preserves compact rows and legacy current fallback", () => {
+test("formatSubagentProgress renders variant-1 tree rows and legacy current fallback", () => {
 	const rendered = formatSubagentProgress({
 		current: "worker: ↑1 - running",
 		statuses: [
@@ -47,13 +47,19 @@ test("formatSubagentProgress preserves compact rows and legacy current fallback"
 
 	assert.equal(rendered, [
 		"Subagents: ⠋ working",
-		"• worker │ first duplicate  │ running",
-		"         │ ↑1               │ model pending",
-		"· worker │ second duplicate │ running",
-		"         │ ↑1               │ model pending",
-		"✓ scout  │ research         │ finished",
-		"         │ ↑10              │ claude",
+		"• worker │ first duplicate ",
+		"         ├─ usage │ ↑1",
+		"         └─ now   │ running",
+		"· worker │ second duplicate",
+		"         ├─ usage │ ↑1",
+		"         └─ now   │ running",
+		"✓ scout  │ research        ",
+		"         ├─ usage │ ↑10",
+		"         ├─ model │ claude",
+		"         └─ state │ finished",
 	].join("\n"));
+	assert.doesNotMatch(rendered, /usage pending|model pending/);
+	assert.doesNotMatch(rendered, /^.*worker.*│ running$/m, "action must not render on the main row");
 });
 
 test("subagent progress uses currentKey to disambiguate duplicate active status text", () => {
@@ -76,10 +82,12 @@ test("subagent progress uses currentKey to disambiguate duplicate active status 
 	});
 	assert.equal(updates.at(-1)?.content[0]?.text, [
 		"Subagents: ⠋ working",
-		"· worker │ first duplicate  │ running",
-		"         │ ↑1               │ model pending",
-		"• worker │ second duplicate │ running",
-		"         │ ↑1               │ model pending",
+		"· worker │ first duplicate ",
+		"         ├─ usage │ ↑1",
+		"         └─ now   │ running",
+		"• worker │ second duplicate",
+		"         ├─ usage │ ↑1",
+		"         └─ now   │ running",
 	].join("\n"));
 });
 
@@ -106,10 +114,12 @@ test("subagent progress refreshes active marker for interleaved identical keyed 
 	});
 	assert.equal(updates.at(-1)?.content[0]?.text, [
 		"Subagents: ⠋ working",
-		"• worker │ duplicate work │ running",
-		"         │ ↑1             │ model pending",
-		"· worker │ duplicate work │ running",
-		"         │ ↑1             │ model pending",
+		"• worker │ duplicate work",
+		"         ├─ usage │ ↑1",
+		"         └─ now   │ running",
+		"· worker │ duplicate work",
+		"         ├─ usage │ ↑1",
+		"         └─ now   │ running",
 	].join("\n"));
 
 	progress.status({ key: "worker-a", text, description: "duplicate work" });
@@ -133,12 +143,15 @@ test("subagent progress keeps latest active duplicate when a different duplicate
 	assert.equal(updates.at(-1)?.details.subagentProgress.currentKey, "b");
 	assert.equal(updates.at(-1)?.content[0]?.text, [
 		"Subagents: ⠋ working",
-		"✓ worker │ first duplicate  │ finished",
-		"         │ ↑1               │ model pending",
-		"· worker │ middle duplicate │ running",
-		"         │ ↑1               │ model pending",
-		"• worker │ latest duplicate │ running",
-		"         │ ↑1               │ model pending",
+		"✓ worker │ first duplicate ",
+		"         ├─ usage │ ↑1",
+		"         └─ state │ finished",
+		"· worker │ middle duplicate",
+		"         ├─ usage │ ↑1",
+		"         └─ now   │ running",
+		"• worker │ latest duplicate",
+		"         ├─ usage │ ↑1",
+		"         └─ now   │ running",
 	].join("\n"));
 
 	progress.status({ key: "c", text: "worker: ↑1 - finished", description: "middle duplicate" });
@@ -146,16 +159,19 @@ test("subagent progress keeps latest active duplicate when a different duplicate
 
 	assert.equal(updates.at(-1)?.content[0]?.text, [
 		"Subagents: ✓ done",
-		"✓ worker │ first duplicate  │ finished",
-		"         │ ↑1               │ model pending",
-		"✓ worker │ middle duplicate │ finished",
-		"         │ ↑1               │ model pending",
-		"✓ worker │ latest duplicate │ finished",
-		"         │ ↑1               │ model pending",
+		"✓ worker │ first duplicate ",
+		"         ├─ usage │ ↑1",
+		"         └─ state │ finished",
+		"✓ worker │ middle duplicate",
+		"         ├─ usage │ ↑1",
+		"         └─ state │ finished",
+		"✓ worker │ latest duplicate",
+		"         ├─ usage │ ↑1",
+		"         └─ state │ finished",
 	].join("\n"));
 });
 
-test("subagent progress publishes compact rows and structured snapshots to tool updates and widgets", () => {
+test("subagent progress publishes variant-1 rows and structured snapshots to tool updates and widgets", () => {
 	const updates: Array<Parameters<NonNullable<ToolProgressOnUpdate>>[0]> = [];
 	const widgets: string[][] = [];
 	const progress = createSubagentProgress({
@@ -167,8 +183,10 @@ test("subagent progress publishes compact rows and structured snapshots to tool 
 	progress.status({ key: "worker", text: "⠋ worker: ↑1.2k ↓3 - gpt-5 (thinking high) - running", description: "implementation" });
 	const running = [
 		"Subagents: ⠋ working",
-		"• worker │ implementation │ running",
-		"         │ ↑1.2k ↓3       │ gpt-5 (thinking high)",
+		"• worker │ implementation",
+		"         ├─ usage │ ↑1.2k ↓3",
+		"         ├─ model │ gpt-5 (thinking high)",
+		"         └─ now   │ running",
 	].join("\n");
 	assert.equal(updates.at(-1)?.content[0]?.text, running);
 	assert.deepEqual(updates.at(-1)?.details.subagentProgress, {
@@ -185,8 +203,10 @@ test("subagent progress publishes compact rows and structured snapshots to tool 
 	progress.status({ key: "worker", text: "worker: ↑1.2k ↓3 - gpt-5 (thinking high) - finished", description: "implementation" });
 	const finished = [
 		"Subagents: ✓ done",
-		"✓ worker │ implementation │ finished",
-		"         │ ↑1.2k ↓3       │ gpt-5 (thinking high)",
+		"✓ worker │ implementation",
+		"         ├─ usage │ ↑1.2k ↓3",
+		"         ├─ model │ gpt-5 (thinking high)",
+		"         └─ state │ finished",
 	].join("\n");
 	assert.equal(updates.at(-1)?.content[0]?.text, finished);
 	assert.deepEqual(updates.at(-1)?.details.subagentProgress, {
@@ -199,6 +219,61 @@ test("subagent progress publishes compact rows and structured snapshots to tool 
 		currentKey: "worker",
 	});
 	assert.deepEqual(widgets.at(-1), finished.split("\n"));
+});
+
+test("formatSubagentProgress renders the agreed variant-1 sample", () => {
+	assert.equal(formatSubagentProgress({
+		currentKey: "worker",
+		statuses: [{ key: "worker", text: "⠋ worker: ↑1.2k ↓3 - gpt-5 • medium - running", description: "implementation" }],
+	}), [
+		"Subagents: ⠋ working",
+		"• worker │ implementation",
+		"         ├─ usage │ ↑1.2k ↓3",
+		"         ├─ model │ gpt-5 • medium",
+		"         └─ now   │ running",
+	].join("\n"));
+});
+
+test("formatSubagentProgress preserves literal separators inside model details", () => {
+	assert.equal(formatSubagentProgress({
+		currentKey: "worker",
+		statuses: [{ key: "worker", text: "worker: ↑1 - gpt-5 - azure - running", description: "implementation" }],
+	}), [
+		"Subagents: ⠋ working",
+		"• worker │ implementation",
+		"         ├─ usage │ ↑1",
+		"         ├─ model │ gpt-5 - azure",
+		"         └─ now   │ running",
+	].join("\n"));
+});
+
+test("formatSubagentProgress treats leading dash details as model-only", () => {
+	const rendered = formatSubagentProgress({
+		currentKey: "worker",
+		statuses: [{ key: "worker", text: "worker: - gpt-5 - azure - running", description: "implementation" }],
+	});
+
+	assert.equal(rendered, [
+		"Subagents: ⠋ working",
+		"• worker │ implementation",
+		"         ├─ model │ gpt-5 - azure",
+		"         └─ now   │ running",
+	].join("\n"));
+	assert.doesNotMatch(rendered, /usage │/);
+});
+
+test("formatSubagentProgress hides empty leading dash model placeholders", () => {
+	const rendered = formatSubagentProgress({
+		currentKey: "worker",
+		statuses: [{ key: "worker", text: "worker: - - running" }],
+	});
+
+	assert.equal(rendered, [
+		"Subagents: ⠋ working",
+		"• worker │ —",
+		"         └─ now   │ running",
+	].join("\n"));
+	assert.doesNotMatch(rendered, /usage │|model │/);
 });
 
 test("subagent progress default throttle coalesces duplicate updates with latest active key", () => {
@@ -228,12 +303,15 @@ test("subagent progress default throttle coalesces duplicate updates with latest
 	assert.equal(updates.at(-1)?.details.subagentProgress.currentKey, "b");
 	assert.equal(updates.at(-1)?.content[0]?.text, [
 		"Subagents: ⠋ working",
-		"· worker │ A  │ running",
-		"         │ ↑1 │ model pending",
-		"· worker │ C  │ running",
-		"         │ ↑1 │ model pending",
-		"• worker │ B  │ running",
-		"         │ ↑1 │ model pending",
+		"· worker │ A",
+		"         ├─ usage │ ↑1",
+		"         └─ now   │ running",
+		"· worker │ C",
+		"         ├─ usage │ ↑1",
+		"         └─ now   │ running",
+		"• worker │ B",
+		"         ├─ usage │ ↑1",
+		"         └─ now   │ running",
 	].join("\n"));
 });
 
@@ -261,9 +339,9 @@ test("subagent progress preserves nested active key when enclosing status coales
 
 	assert.equal(updates.length, 2);
 	assert.equal(updates.at(-1)?.details.subagentProgress.currentKey, "subagent:worker-a");
-	assert.match(updates.at(-1)?.content[0]?.text ?? "", /• worker\s+│ first duplicate\s+│ running/);
-	assert.match(updates.at(-1)?.content[0]?.text ?? "", /· worker\s+│ second duplicate\s+│ running/);
-	assert.match(updates.at(-1)?.content[0]?.text ?? "", /· orchestrator\s+│ —\s+│ run_role_agent worker\/implementation/);
+	assert.match(updates.at(-1)?.content[0]?.text ?? "", /• worker\s+│ first duplicate\s+\n\s+├─ usage │ ↑1\n\s+└─ now\s+│ running/);
+	assert.match(updates.at(-1)?.content[0]?.text ?? "", /· worker\s+│ second duplicate\s*\n\s+├─ usage │ ↑1\n\s+└─ now\s+│ running/);
+	assert.match(updates.at(-1)?.content[0]?.text ?? "", /· orchestrator\s+│ —\s+\n\s+└─ now\s+│ run_role_agent worker\/implementation/);
 });
 
 test("subagent progress coalesces high-frequency non-terminal updates and publishes terminal status immediately", () => {

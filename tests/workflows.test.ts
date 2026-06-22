@@ -463,8 +463,8 @@ for (const event of events) console.log(JSON.stringify(event));
 	});
 	assert.ok(nestedDuplicateUpdate, "parent progress rendered both nested duplicate rows");
 	assert.equal(nestedDuplicateUpdate.details.subagentProgress.currentKey, "subagent:worker-a");
-	assert.match(nestedDuplicateUpdate.content[0]?.text ?? "", /• worker\s+│ first duplicate\s+│ running/);
-	assert.match(nestedDuplicateUpdate.content[0]?.text ?? "", /· worker\s+│ second duplicate\s+│ running/);
+	assert.match(nestedDuplicateUpdate.content[0]?.text ?? "", /• worker\s*│ first duplicate\s*\n\s+├─ usage │ ↑1\n\s+└─ now\s+│ running/);
+	assert.match(nestedDuplicateUpdate.content[0]?.text ?? "", /· worker\s*│ second duplicate\s*\n\s+├─ usage │ ↑1\n\s+└─ now\s+│ running/);
 });
 
 test("orchestrator child falls back from stale nested currentKey to legacy current", async () => {
@@ -568,8 +568,8 @@ else {
 	assert.equal(updatesDuringNestedRun.some((update) => update.details.subagentProgress.currentKey === "subagent:orchestrator"), false, "parent spinner tick must not steal active currentKey");
 	assert.equal(updatesDuringNestedRun.some((update) => update.details.subagentProgress.currentKey === "subagent:worker"), true, "legacy current fallback should keep nested worker active");
 	const latestNestedRunUpdate = updatesDuringNestedRun.at(-1)?.content[0]?.text ?? "";
-	assert.match(latestNestedRunUpdate, /• worker\s+│ nested worker\s+│ running/);
-	assert.match(latestNestedRunUpdate, /· orchestrator\s+│ —\s+│ run_role_agent worker\/implementation/);
+	assert.match(latestNestedRunUpdate, /• worker\s*│ nested worker\s*\n\s+├─ usage │ ↑1\n\s+└─ now\s+│ running/);
+	assert.match(latestNestedRunUpdate, /· orchestrator\s*│ —[\s\S]*└─ now\s+│ run_role_agent worker\/implementation/);
 });
 
 test("orchestrator child keeps statuses-only nested running row active", async () => {
@@ -671,9 +671,9 @@ else {
 	assert.equal(updatesDuringNestedRun.some((update) => update.details.subagentProgress.currentKey === "subagent:orchestrator"), false, "parent spinner tick must not steal active currentKey");
 	assert.equal(updatesDuringNestedRun.some((update) => update.details.subagentProgress.currentKey === "subagent:worker"), true, "statuses-only fallback should keep nested worker active");
 	const latestNestedRunUpdate = updatesDuringNestedRun.at(-1)?.content[0]?.text ?? "";
-	assert.match(latestNestedRunUpdate, /✓ scout\s+│ nested scout\s+│ finished/);
-	assert.match(latestNestedRunUpdate, /• worker\s+│ nested worker\s+│ running/);
-	assert.match(latestNestedRunUpdate, /· orchestrator\s+│ —\s+│ run_role_agent worker\/implementation/);
+	assert.match(latestNestedRunUpdate, /✓ scout\s*│ nested scout\s*\n\s+├─ usage │ ↑1\n\s+└─ state\s+│ finished/);
+	assert.match(latestNestedRunUpdate, /• worker\s*│ nested worker\s*\n\s+├─ usage │ ↑1\n\s+└─ now\s+│ running/);
+	assert.match(latestNestedRunUpdate, /· orchestrator\s*│ —[\s\S]*└─ now\s+│ run_role_agent worker\/implementation/);
 });
 
 test("orchestrator child keeps nested currentKey active across parent spinner ticks", async () => {
@@ -775,8 +775,8 @@ else {
 	assert.equal(updatesDuringNestedRun.some((update) => update.details.subagentProgress.currentKey === "subagent:orchestrator"), false, "parent spinner tick must not steal active currentKey");
 	assert.equal(updatesDuringNestedRun.some((update) => update.details.subagentProgress.currentKey === "subagent:worker"), true, "nested worker remains the active currentKey");
 	const latestNestedRunUpdate = updatesDuringNestedRun.at(-1)?.content[0]?.text ?? "";
-	assert.match(latestNestedRunUpdate, /• worker\s+│ nested worker\s+│ running/);
-	assert.match(latestNestedRunUpdate, /· orchestrator\s+│ —\s+│ run_role_agent worker\/implementation/);
+	assert.match(latestNestedRunUpdate, /• worker\s*│ nested worker\s*\n\s+├─ usage │ ↑1\n\s+└─ now\s+│ running/);
+	assert.match(latestNestedRunUpdate, /· orchestrator\s*│ —[\s\S]*└─ now\s+│ run_role_agent worker\/implementation/);
 });
 
 test("child status spinner updates faster than model status cadence", async () => {
@@ -1531,7 +1531,7 @@ test("expanded tool renderer does not duplicate subagent progress already presen
 		assert.ok(runWorker?.renderResult);
 
 		const rendered = runWorker.renderResult({
-			content: [{ type: "text", text: "Worker finished.\n\nSubagents: ✓ done\n✓ worker │ implementation: ok │ finished\n\nFull child output is preserved." }],
+			content: [{ type: "text", text: "Worker finished.\n\nSubagents: ✓ done\n✓ worker │ implementation: ok\n         └─ state │ finished\n\nFull child output is preserved." }],
 			details: {
 				runDir: "run-dir",
 				result: { exitCode: 0 },
@@ -1594,7 +1594,7 @@ test("progress-only tool updates omit redundant result title", () => {
 		assert.ok(runWorker?.renderResult);
 
 		const rendered = runWorker.renderResult({
-			content: [{ type: "text", text: "Subagents: ⠸ working\n• worker │ implementation: ok │ running" }],
+			content: [{ type: "text", text: "Subagents: ⠸ working\n• worker │ implementation: ok\n         └─ now   │ running" }],
 			details: {
 				subagentProgress: { statuses: [{ key: "subagent:worker", text: "⠸ worker: ↑1k - gpt-5 - running", description: "implementation: ok" }] },
 			},
