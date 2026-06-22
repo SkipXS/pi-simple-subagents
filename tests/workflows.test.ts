@@ -340,7 +340,6 @@ test("package tarball dry-run contains only release files", () => {
 		"extensions/pi-simple-subagents/state.ts",
 		"extensions/pi-simple-subagents/summaries.ts",
 		"extensions/pi-simple-subagents/text.ts",
-		"extensions/pi-simple-subagents/tool-tree.ts",
 		"extensions/pi-simple-subagents/worker-workflow.ts",
 		"extensions/pi-simple-subagents/workflow-common.ts",
 		"extensions/pi-simple-subagents/workflows.ts",
@@ -1520,7 +1519,44 @@ test("leaked role environment without run dir falls back to root registration an
 	}
 });
 
-test("expanded tool renderer does not duplicate subagent progress already present in content", () => {
+test("expanded renderer includes child artifact breadcrumbs and full content", () => {
+	const oldRole = process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+	const oldRunDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+	try {
+		delete process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+		delete process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+		let runWorker: { renderResult?: (result: unknown, options: unknown, theme: unknown) => { render(width: number): string[] } } | undefined;
+		orchestratorAgentsExtension({ registerTool: (tool: { name: string; renderResult?: (result: unknown, options: unknown, theme: unknown) => { render(width: number): string[] } }) => { if (tool.name === "run_worker") runWorker = tool; }, registerCommand() {}, sendMessage() {} } as never);
+		assert.ok(runWorker?.renderResult);
+
+		const outputPath = path.join("run-dir", "worker-round-1.md");
+		const transcriptPath = path.join("run-dir", "logs", "worker.jsonl");
+		const stderrPath = path.join("run-dir", "logs", "worker.stderr.log");
+		const expandedContent = "Worker finished.\n\nFull expanded child output line one.\nFull expanded child output line two.";
+		const rendered = runWorker.renderResult({
+			content: [{ type: "text", text: expandedContent }],
+			details: {
+				runDir: "run-dir",
+				taskSource: "inline task",
+				result: { exitCode: 0, outputPath, transcriptPath, stderrPath },
+			},
+		}, { expanded: true }, { fg: (_name: string, text: string) => text, bold: (text: string) => text }).render(240).join("\n");
+
+		assert.ok(rendered.includes(`Output: ${outputPath}`));
+		assert.ok(rendered.includes(`Transcript: ${transcriptPath}`));
+		assert.ok(rendered.includes(`Stderr: ${stderrPath}`));
+		assert.match(rendered, /Full expanded child output line one\./);
+		assert.match(rendered, /Full expanded child output line two\./);
+		assert.doesNotMatch(rendered, /Tool calls:/);
+	} finally {
+		if (oldRole === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+		else process.env.PI_ORCHESTRATOR_AGENT_ROLE = oldRole;
+		if (oldRunDir === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+		else process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR = oldRunDir;
+	}
+});
+
+test("expanded renderer does not duplicate subagent progress already present in content", () => {
 	const oldRole = process.env.PI_ORCHESTRATOR_AGENT_ROLE;
 	const oldRunDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
 	try {
@@ -1540,6 +1576,8 @@ test("expanded tool renderer does not duplicate subagent progress already presen
 		}, { expanded: true }, { fg: (_name: string, text: string) => text, bold: (text: string) => text }).render(240).join("\n");
 
 		assert.equal((rendered.match(/Subagents:/g) ?? []).length, 1);
+		assert.doesNotMatch(rendered, /Tool calls:/);
+		assert.match(rendered, /Full child output is preserved\./);
 	} finally {
 		if (oldRole === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_ROLE;
 		else process.env.PI_ORCHESTRATOR_AGENT_ROLE = oldRole;
