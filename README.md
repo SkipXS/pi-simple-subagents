@@ -155,7 +155,7 @@ flowchart TD
 
 ### Common examples
 
-For review workflows, choose reviewer angles/count for the target. Use one focused reviewer for narrow checks, split into multiple reviewers only when distinct independent aspects are worth the extra cost. Without `--reviewer`, the extension uses one adaptive general reviewer.
+For review workflows, choose focused reviewer angles/count for the target. Use one focused reviewer for narrow checks, split into multiple reviewers only when distinct independent aspects are worth the extra cost, and avoid broad default-many review sets as routine. Without `--reviewer`, the extension uses one adaptive general reviewer.
 
 ```text
 /orchestrate @docs/plan.md
@@ -163,6 +163,7 @@ For review workflows, choose reviewer angles/count for the target. Use one focus
 /scout Map parser behavior, affected files, risks, and next steps
 /work Fix the failing parser test and run the focused test suite
 /review --reviewer "runtime correctness" --reviewer "packaging UX" @extensions/pi-simple-subagents
+/review --context @.pi/agent-runs/<run-id>/scout.md --no-scout --reviewer "docs accuracy" @README.md
 ```
 
 Parallel workers accept JSON only:
@@ -173,6 +174,8 @@ Parallel workers accept JSON only:
 ```
 
 Review/fix loops are intentionally orchestrator-steered: use `/orchestrate` for work that should verify worker output against the plan, run independent reviewers, hand evidence-backed accepted fixes to worker, validate, and review again. For implementation/fix runs, the orchestrator also chooses the final whole-change review angles from the actual diff and risks, then delegates one reviewer per angle before `final-summary.md`. The orchestrator does not verify or review itself; it coordinates verifiers/reviewers/workers and decides from child-agent evidence whether an item is worth fixing now or merely optional/suboptimal LLM churn.
+
+After a successful `/orchestrate` run that changed files and completed its final whole-change review, you normally should not need a separate `/review`. Run `/review` afterward only when you want an independent second opinion, the target/scope changed after orchestration, or you explicitly need a review-only audit without more fixes. If you do run review-only after a prior run, pass the relevant prior artifacts with `--context` (for example `--context @.pi/agent-runs/<run-id>/scout.md`, `orchestration.md`, or a focused worker/review artifact) and add `--no-scout` when that context is current and sufficient. Keep the review scout enabled when the target changed materially, prior context is stale, or the risk areas are still unknown.
 
 See [Command reference](docs/reference.md#command-reference) for full slash-command options.
 
@@ -222,7 +225,7 @@ sequenceDiagram
   O->>A: final-summary.md
 ```
 
-The orchestrator is prompted to split large milestones into small worker packages, verify each package against its acceptance criteria, and then review after verification passes. Each new implementation package gets its own worker session (`worker-1`, `worker-2`, ...), and verifier gap fixes or accepted review fixes reuse that package's `workerId`. If the orchestrator batches reviews, the tool emits a soft warning and the rationale should be recorded in `orchestration.md`. Before the final summary for runs that changed files, the orchestrator selects and records the final review angles/count itself (typically 2-4 distinct angles, fewer for trivial changes, more only for independent risks) and delegates reviewers over the complete change set. Accepted final-review findings are sent back to a worker too: reuse the affected package's `workerId` when ownership is clear, or create a narrow final-fix worker package for cross-cutting findings, then verify/validate and final-review again. A worker handoff should contain one deliverable, likely files, acceptance criteria, non-goals, and validation.
+The orchestrator is prompted to split large milestones into small worker packages, verify each package against its acceptance criteria, and then review after verification passes. Each new implementation package gets its own worker session (`worker-1`, `worker-2`, ...), and verifier gap fixes or accepted review fixes reuse that package's `workerId`. If the orchestrator batches reviews, the tool emits a soft warning and the rationale should be recorded in `orchestration.md`. Before the final summary for runs that changed files, the orchestrator selects and records the final review angles/count itself (typically 2-4 distinct angles, fewer for trivial changes, more only for independent risks) and delegates reviewers over the complete change set. This final whole-change review is intended to replace a routine follow-up `/review` for the same completed scope. Accepted final-review findings are sent back to a worker too: reuse the affected package's `workerId` when ownership is clear, or create a narrow final-fix worker package for cross-cutting findings, then verify/validate and final-review again. A worker handoff should contain one deliverable, likely files, acceptance criteria, non-goals, and validation.
 
 ## Run artifacts
 
@@ -235,7 +238,7 @@ flowchart TB
   Base --> Logs["logs/<br/>*.stderr.log<br/>*.invocation.json"]
   Base --> Sessions["sessions/<br/>*.jsonl"]
   Base --> Outputs["outputs/"]
-  Base --> Reports["scout-report.md<br/>worker-report.md<br/>verification-*.md<br/>review-*.md<br/>final-summary.md"]
+  Base --> Reports["scout-report.md<br/>worker-report.md<br/>verification-*.md<br/>review-*.md<br/>final-review-*.md<br/>final-summary.md"]
 ```
 
 Typical layouts:
@@ -252,6 +255,7 @@ Typical layouts:
   review-round-N.md
   accepted-fixes-round-N.md
   validation.md
+  final-review-*.md
   final-summary.md
   logs/ outputs/ prompts/ sessions/ tasks/ delegations/
 
@@ -338,8 +342,8 @@ Project config overrides global config, except `children.piCliPath` is allowed o
     "orchestrator": { "model": "openai-codex/gpt-5.5", "thinking": "high", "timeoutMs": 0 },
     "scout": { "model": "openai-codex/gpt-5.5", "thinking": "minimal" },
     "worker": { "model": "openai-codex/gpt-5.5", "thinking": "medium" },
-    "verifier": { "model": "openai-codex/gpt-5.5", "thinking": "low" },
-    "reviewer": { "model": "openai-codex/gpt-5.5", "thinking": "low" },
+    "verifier": { "model": "openai-codex/gpt-5.5", "thinking": "medium" },
+    "reviewer": { "model": "openai-codex/gpt-5.5", "thinking": "medium" },
     "synthesis": { "model": "openai-codex/gpt-5.5", "thinking": "medium" }
   },
   "children": {
@@ -356,6 +360,8 @@ Project config overrides global config, except `children.piCliPath` is allowed o
   "artifacts": { "baseDir": ".pi/agent-runs" }
 }
 ```
+
+Default thinking levels are thorough but cost-conscious: orchestrator `high`, scout `minimal`, worker/verifier/reviewer/synthesis `medium`. You can override individual roles to lower thinking levels when you explicitly need lower cost or latency for your project.
 
 ### Choosing role models
 
@@ -405,8 +411,8 @@ Use these thinking levels unless they are unsupported by the selected model/prov
 - orchestrator: high
 - scout: minimal
 - worker: medium
-- verifier: low
-- reviewer: low
+- verifier: medium
+- reviewer: medium
 - synthesis: medium
 
 Update .pi/pi-simple-subagents/config.json. Preserve any existing non-role settings such as children, orchestration, references, and artifacts. If the file does not exist, create it with a valid JSON object. Validate the resulting JSON and summarize the role configuration you wrote.
@@ -421,8 +427,8 @@ Use these role settings:
 - orchestrator: model <provider/model-for-orchestrator>, thinking high
 - scout: model <provider/model-for-scout>, thinking minimal
 - worker: model <provider/model-for-worker>, thinking medium
-- verifier: model <provider/model-for-verifier>, thinking low
-- reviewer: model <provider/model-for-reviewer>, thinking low
+- verifier: model <provider/model-for-verifier>, thinking medium
+- reviewer: model <provider/model-for-reviewer>, thinking medium
 - synthesis: model <provider/model-for-synthesis>, thinking medium
 
 Update .pi/pi-simple-subagents/config.json. Preserve any existing non-role settings such as children, orchestration, references, and artifacts. If the file does not exist, create it with a valid JSON object. Validate the resulting JSON and summarize the role configuration you wrote.

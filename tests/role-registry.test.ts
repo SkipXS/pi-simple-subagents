@@ -17,6 +17,17 @@ function tempProject(): string {
 test("role registry is the source for config, prompts, and session policy", () => {
 	const registryRoles = ROLE_METADATA.map((role) => role.id).sort();
 	assert.deepEqual(Object.keys(DEFAULT_CONFIG.roles).sort(), registryRoles);
+	assert.deepEqual(
+		Object.fromEntries(ROLE_METADATA.map((role) => [role.id, DEFAULT_CONFIG.roles[role.id].thinking])),
+		{
+			orchestrator: "high",
+			scout: "minimal",
+			worker: "medium",
+			verifier: "medium",
+			reviewer: "medium",
+			synthesis: "medium",
+		},
+	);
 
 	const runDir = tempProject();
 	for (const role of ROLE_METADATA) {
@@ -41,15 +52,24 @@ test("orchestrator prompt preserves worker package and review policy semantics",
 	assert.match(prompt, /record the rationale in orchestration\.md/i);
 	assert.match(prompt, /does not verify, review, or invent findings/i);
 	assert.match(prompt, /worker -> verifier -> gap-fix worker/i);
-	assert.match(prompt, /evidence-backed fixes/i);
+	assert.match(prompt, /evidence-backed findings with concrete impact or a practical failing scenario/i);
+	assert.match(prompt, /assigned acceptance criteria/i);
 	assert.match(prompt, /route those to worker/i);
+	assert.match(prompt, /explicitly defer optional, speculative, cosmetic\/style-only, duplicate, low-confidence, no-testable-impact/i);
 	assert.match(prompt, /final whole-change multi-angle review/i);
+	assert.match(prompt, /routine separate \/review after \/orchestrate unnecessary/i);
 	assert.match(prompt, /orchestrator chooses the final review angles/i);
 	assert.match(prompt, /do not ask the root caller to choose them/i);
 	assert.match(prompt, /final-review-\*\.md/i);
 	assert.match(prompt, /final whole-change review finds accepted fixes/i);
 	assert.match(prompt, /reuse the affected package's workerId/i);
 	assert.match(prompt, /new narrow final-fix worker package/i);
+	assert.match(prompt, /inspect provided\/current artifacts/i);
+	assert.match(prompt, /Run scout only when it will materially reduce uncertainty, total cost, or implementation\/review risk/i);
+	assert.match(prompt, /When scout is needed, run it in a fresh session; otherwise reuse adequate current scout\/context artifacts/i);
+	assert.doesNotMatch(prompt, /Scout is fresh; orchestrator persists/i);
+	assert.match(prompt, /Cite scout use, skip, and reuse decisions in orchestration\.md/i);
+	assert.match(prompt, /final-summary\.md at end, including whether final review was run or skipped and why/i);
 });
 
 test("prompts preserve artifact, reviewer safety, and finding-threshold semantics", () => {

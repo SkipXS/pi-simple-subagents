@@ -20,6 +20,7 @@ Notes:
 - Before the first worker call it is instructed to break milestones or accepted fixes into small work packages.
 - Worker, verifier, and reviewer loop while useful; there is no default hard verification/review-round cap.
 - For implementation/fix runs that changed files, the orchestrator is instructed to finish with a whole-change multi-angle review before `final-summary.md`. The orchestrator chooses and records the final reviewer angles/count from the actual diff, plan risk, validation evidence, and prior findings; the root caller does not preselect these angles. Accepted final-review findings are delegated back to a worker, followed by relevant verification/validation and another final review round unless findings repeat or a decision is needed.
+- After a successful `/orchestrate` run that changed files and completed final whole-change review, users normally should not need a separate `/review` for the same scope. Use a follow-up `/review` only for an independent second opinion, materially changed scope/target, or explicit review-only audit.
 - Each plan/task/target/context value supports **at most one** `@file` or `@directory` reference. Extra `@...` tokens are rejected to avoid accidental partial context loading.
 
 ### `/scout`
@@ -100,13 +101,15 @@ Setup/spawn errors abort sibling workers and wait for shutdown. Ordinary non-zer
 ### `/review`
 
 ```text
-/review @extensions/pi-simple-subagents/index.ts focus on runtime bugs, security, packaging, and UX
-/review --context @.pi/agent-runs/<run-id>/scout-report.md --reviewer "security boundaries" @extensions/pi-simple-subagents
-/review --no-scout --continue-on-reviewer-failure @README.md docs focus
+/review @extensions/pi-simple-subagents/index.ts focus on runtime bugs and packaging UX
+/review --context @.pi/agent-runs/<run-id>/scout.md --no-scout --reviewer "security boundaries" @extensions/pi-simple-subagents
+/review --no-scout --continue-on-reviewer-failure @README.md docs accuracy
 /review -- --fixture docs focus
 ```
 
-Use for review-only fanout. By default a review-specific scout runs first, then fresh reviewers inspect the target, and synthesis writes `final-summary.md`. The caller/model should choose the reviewer angles and count for the requested target; use the smallest number of distinct reviewers that covers the real risks. If no reviewer is provided, the extension runs one adaptive general reviewer rather than a fixed three-reviewer checklist.
+Use for review-only fanout. By default a review-specific scout runs first, then fresh reviewers inspect the target, and synthesis writes `final-summary.md`. The caller/model should choose focused reviewer angles and count for the requested target; use the smallest number of distinct reviewers that covers the real risks, and avoid broad/default-many reviewer sets as routine. If no reviewer is provided, the extension runs one adaptive general reviewer rather than a fixed three-reviewer checklist.
+
+After a prior `/orchestrate` or `/review` run, pass compact relevant artifacts with `--context` (for example `--context @.pi/agent-runs/<run-id>/scout.md`, `orchestration.md`, or a focused worker/review artifact). Add `--no-scout` when the prior/current context is sufficient for the requested target. Keep the scout enabled when the target changed materially, the prior context is stale, or risk areas are unknown.
 
 Options:
 
@@ -115,7 +118,7 @@ Options:
 | `--scout` / `--no-scout` | Enable or skip the review-specific scout. |
 | `--context <inline-or-@file>` | Add compact prior context such as a scout report. |
 | `--context=<inline-or-@file>` | Same as above. |
-| `--reviewer <angle>` | Add a reviewer angle; repeatable, max 8. Use one for narrow reviews, 2-3 for distinct risk areas, and more only when independent aspects justify the cost. |
+| `--reviewer <angle>` | Add a focused reviewer angle; repeatable, max 8. Use one for narrow reviews, 2-3 for distinct risk areas, and more only when independent aspects justify the cost. |
 | `--reviewer=<angle>` | Same as above. |
 | `--continue-on-reviewer-failure` | Synthesize from successful reviewers when at least one completed. |
 | `--fail-on-reviewer-failure` | Fail the review if any reviewer fails. |
@@ -178,7 +181,7 @@ Tool results are summary-first by default. Set `includeOutput: true` for inline 
 The extension exposes prompt guidance on each root tool:
 
 - Prefer `run_scout` before implementation when the task is not obviously trivial.
-- Use `run_reviewers` for one review-only fanout. Choose `reviewers` explicitly based on the target/focus when calling the tool: one targeted reviewer for narrow work, multiple reviewers only for distinct independent aspects. Keep the review-specific scout enabled unless the user asks to skip it.
+- Use `run_reviewers` for one review-only fanout. Choose `reviewers` explicitly based on the target/focus when calling the tool: one targeted reviewer for narrow work, multiple reviewers only for distinct independent aspects. Pass prior scout/review artifacts as context when available, skip the review-specific scout when prior/current context is sufficient, and keep the scout when the target changed materially, context is stale, or risk areas are unknown.
 - Use `run_orchestrator` for plan-driven implementation or review/fix workflows that benefit from scout/worker/verifier/reviewer coordination. Verifiers check worker packages against the plan before review; reviewers review; the orchestrator sequences the loop and sends only concrete verifier gaps or evidence-backed accepted review fixes to worker.
 - Use `run_worker` for direct implementation, fix, or validation tasks that do not need a full orchestration loop.
 - Use `run_workers_parallel` only for clearly independent tasks unlikely to edit the same files.
@@ -202,8 +205,10 @@ Every run writes durable audit artifacts. Keep the artifact directory ignored/pr
   sessions/
   tasks/
   verification-round-N.md
+  review-round-N.md
   accepted-fixes-round-N.md
   validation.md
+  final-review-*.md
   final-summary.md
 ```
 
@@ -367,7 +372,7 @@ Project config overrides global config, except project config is not allowed to 
 | Key | Default | Description |
 | --- | --- | --- |
 | `roles.<role>.model` | role-specific | Model for `orchestrator`, `scout`, `worker`, `verifier`, `reviewer`, or `synthesis`. |
-| `roles.<role>.thinking` | role-specific | Thinking suffix: `off`, `minimal`, `low`, `medium`, `high`, or `xhigh`. |
+| `roles.<role>.thinking` | orchestrator: `high`; scout: `minimal`; worker/verifier/reviewer/synthesis: `medium` | Thinking suffix: `off`, `minimal`, `low`, `medium`, `high`, or `xhigh`. Override individual roles lower only when you explicitly need lower cost or latency. |
 | `roles.<role>.timeoutMs` | orchestrator: `0`; others: unset | Override `children.timeoutMs` for one role; `0` disables that role's timeout. |
 | `children.forwardCurrentExtension` | `"auto"` | Forward this extension to child runs when loaded with `-e/--extension`. Use `always` or `never` to force behavior. |
 | `children.timeoutMs` | `1800000` | Fallback per-child-process timeout in ms; `0` disables it for roles without `roles.<role>.timeoutMs`. |
@@ -514,11 +519,11 @@ Subagents: ⠋ working
                      └─ state │ finished
 • verify worker-2 r1 │ validation: check package acceptance criteria      
                      ├─ usage │ ↑640 ↓90 R28k CH98.0% $0.018 (sub) 10.4%/272k (auto)
-                     ├─ model │ gpt-5.5 • low
+                     ├─ model │ gpt-5.5 • medium
                      └─ now   │ inspect files
 · review worker-2 r1 │ packaging/installability for npm extension         
                      ├─ usage │ ↑867 ↓103 R31k CH98.0% $0.023 (sub) 11.8%/272k (auto)
-                     ├─ model │ gpt-5.5 • low
+                     ├─ model │ gpt-5.5 • medium
                      └─ now   │ read package.json
 ```
 

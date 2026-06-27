@@ -38,7 +38,7 @@ export const ROLE_METADATA = [
 		allowedPurposes: ["validation"] as const,
 		sessionStrategy: "ephemeral",
 		promptKind: "verifier",
-		defaultConfig: { model: "openai-codex/gpt-5.5", thinking: "low" },
+		defaultConfig: { model: "openai-codex/gpt-5.5", thinking: "medium" },
 	},
 	{
 		id: "reviewer",
@@ -46,7 +46,7 @@ export const ROLE_METADATA = [
 		allowedPurposes: ["review"] as const,
 		sessionStrategy: "ephemeral",
 		promptKind: "reviewer",
-		defaultConfig: { model: "openai-codex/gpt-5.5", thinking: "low" },
+		defaultConfig: { model: "openai-codex/gpt-5.5", thinking: "medium" },
 	},
 	{
 		id: "synthesis",

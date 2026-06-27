@@ -15,11 +15,11 @@
     },
     "verifier": {
       "model": "openai-codex/gpt-5.5",
-      "thinking": "low"
+      "thinking": "medium"
     },
     "reviewer": {
       "model": "openai-codex/gpt-5.5",
-      "thinking": "low"
+      "thinking": "medium"
     },
     "synthesis": {
       "model": "openai-codex/gpt-5.5",
