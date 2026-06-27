@@ -93,12 +93,14 @@ test("prompts preserve artifact, reviewer safety, and finding-threshold semantic
 	assert.match(verifierPrompt, /Implementation gaps to send back to worker/i);
 	assert.match(verifierPrompt, /Do not perform broad code review/i);
 	assert.match(reviewerPrompt, /Review-only: do not modify project\/source files/i);
-	assert.match(reviewerPrompt, /Finding threshold: report only evidence-backed issues/i);
+	assert.match(reviewerPrompt, /Finding threshold: report every evidence-backed issue/i);
+	assert.match(reviewerPrompt, /Do not cap findings to a top-N list/i);
 	assert.match(reviewerPrompt, /measurably improve correctness/i);
 	assert.match(reviewerPrompt, /verification\/measurement/i);
 	assert.match(reviewerPrompt, /Omit speculative, cosmetic\/style-only/i);
 	assert.match(synthesisPrompt, /Do not invent findings/i);
 	assert.match(synthesisPrompt, /Deduplicate and prioritize reviewer evidence/i);
+	assert.match(synthesisPrompt, /do not reduce actionable items to a top-N shortlist/i);
 	assert.match(reviewTargetPrompt, /Review-only: do not modify target\/project\/source files/i);
 	assert.match(reviewTargetPrompt, /verify supplemental context against current files/i);
 });

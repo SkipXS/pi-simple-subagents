@@ -37,7 +37,7 @@ const RUN_ORCHESTRATOR_GUIDELINES = [
 
 const RUN_REVIEWERS_GUIDELINES = [
 	"Use run_reviewers for review-only work when the user asks to inspect, audit, or suggest improvements without implementing changes.",
-	"Choose the reviewers array yourself based on the target and user focus: use 1 targeted reviewer for narrow/simple reviews, 2-3 for distinct risk areas, and more only when independent aspects justify the added cost. Do not rely on a fixed default fanout.",
+	"Choose the reviewers array yourself based on the target and user focus: use 1 targeted reviewer for narrow/simple reviews, commonly 2-4 for distinct risk areas, and up to 8 when independent aspects justify the added cost. This is a reviewer-count guideline, not a cap on findings. Do not rely on a fixed default fanout.",
 	"Name reviewer angles concretely, e.g. 'runtime correctness for parser changes' or 'packaging/installability for npm extension'. Avoid broad duplicate reviewers.",
 	"Pass prior scout reports or other concise artifacts as run_reviewers.extraContext when available, but reviewers must verify that context against current files.",
 	"Set run_reviewers.includeScout to false when prior/current context is sufficient; keep it enabled when the target changed materially, context is stale, or risk areas are unknown.",

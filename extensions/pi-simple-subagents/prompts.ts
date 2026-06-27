@@ -17,7 +17,7 @@ function compactRule(subject = "task/target"): string {
 }
 
 function reviewFindingThreshold(): string {
-	return "Finding threshold: report only evidence-backed issues likely to measurably improve correctness, security, reliability, performance/cost, packaging, UX, docs accuracy, or test/maintenance risk. Include impact and practical verification/measurement when possible. Omit speculative, cosmetic/style-only, LLM-suboptimality, and micro-optimization items unless they prevent a concrete failure mode; write `None` for empty sections.";
+	return "Finding threshold: report every evidence-backed issue likely to measurably improve correctness, security, reliability, performance/cost, packaging, UX, docs accuracy, or test/maintenance risk. Do not cap findings to a top-N list; include all threshold-meeting blockers/fixes, ordered by severity/impact. Include impact and practical verification/measurement when possible. Omit speculative, cosmetic/style-only, LLM-suboptimality, and micro-optimization items unless they prevent a concrete failure mode; write `None` for empty sections.";
 }
 
 function commonForRole(runDir: string, config: Config, role: RoleName): string {
@@ -29,7 +29,7 @@ function reviewOnlyRule(scope = "target/project/source files or generated output
 }
 
 function synthesisGuidance(): string {
-	return `Do not invent findings. Deduplicate and prioritize reviewer evidence. Include each actionable blocker/fix that meets the threshold with severity, source reviewer, evidence, impact, fix, and verification when practical. Note agreement/dispute/low confidence; keep optional items short.`;
+	return `Do not invent findings. Deduplicate and prioritize reviewer evidence, but do not reduce actionable items to a top-N shortlist. Preserve every actionable blocker/fix that meets the threshold with severity, source reviewer, evidence, impact, fix, and verification when practical. Note agreement/dispute/low confidence; keep optional items short.`;
 }
 
 export function roleSystemPrompt(role: RoleName, runDir: string, config: Config): string {
@@ -50,7 +50,7 @@ Session/review policy:
 - Fresh verifier per verification round; give useful artifacts (input-plan.md, orchestration.md, scout.md, worker reports, accepted fixes) and tell verifiers to inspect current files against the assigned work-package acceptance criteria.
 - Fresh reviewer per review round after verification passes; give useful artifacts (input-plan.md, orchestration.md, scout.md, worker reports, verifier reports, accepted fixes) and tell reviewers to inspect current files. When scout is needed, run it in a fresh session; otherwise reuse adequate current scout/context artifacts. Orchestrator persists.
 - Before final-summary.md, run a final whole-change multi-angle review over the complete current diff/change set when implementation/fix work changed files, unless the user explicitly requested no final review or the run ends before any source change. When completed successfully, this built-in final review is intended to make a routine separate /review after /orchestrate unnecessary.
-- The orchestrator chooses the final review angles and count from the actual changes, plan risk, validation evidence, and prior review findings; do not ask the root caller to choose them and do not rely on a generic default. Use the smallest useful set: 1 angle for trivial/narrow changes, commonly 2-4 distinct angles, up to 8 only for clearly independent risk areas.
+- The orchestrator chooses the final review angles and count from the actual changes, plan risk, validation evidence, and prior review findings; do not ask the root caller to choose them and do not rely on a generic default. Use a cost-conscious but thorough set: 1 angle for trivial/narrow changes, commonly 2-4 distinct angles, up to 8 for clearly independent risk areas. This is a reviewer-count guideline, not a cap on findings; reviewers and synthesis must preserve every threshold-meeting actionable finding.
 - Record the selected final angles and rationale in orchestration.md. Delegate one reviewer per final angle, with explicit focus and artifacts/current diff to inspect across all changed files; pass explicit readable outputFile values starting with final-review- such as final-review-runtime-correctness.md so the UI labels them as final reviews.
 
 Execution loop:

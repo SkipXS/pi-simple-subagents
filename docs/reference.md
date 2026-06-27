@@ -118,7 +118,7 @@ Options:
 | `--scout` / `--no-scout` | Enable or skip the review-specific scout. |
 | `--context <inline-or-@file>` | Add compact prior context such as a scout report. |
 | `--context=<inline-or-@file>` | Same as above. |
-| `--reviewer <angle>` | Add a focused reviewer angle; repeatable, max 8. Use one for narrow reviews, 2-3 for distinct risk areas, and more only when independent aspects justify the cost. |
+| `--reviewer <angle>` | Add a focused reviewer angle; repeatable, max 8. Use one for narrow reviews, commonly 2-4 for distinct risk areas, and up to 8 when independent aspects justify the cost. This limits reviewer count, not findings. |
 | `--reviewer=<angle>` | Same as above. |
 | `--continue-on-reviewer-failure` | Synthesize from successful reviewers when at least one completed. |
 | `--fail-on-reviewer-failure` | Fail the review if any reviewer fails. |
@@ -411,7 +411,7 @@ Filtering the inherited environment can reduce accidental exposure of shell-prov
 - Plan/review/validation gates are orchestration choices, not hard enforcement.
 - Run only on trusted projects or inside an external sandbox when agents may execute untrusted code or access secrets.
 
-Reviewers and review synthesis use an explicit finding threshold: report an item only when it is likely to produce measurable improvement in correctness, security, reliability, performance/cost, packaging/installability, user-facing behavior, documentation accuracy, or test/maintenance risk.
+Reviewers and review synthesis use an explicit finding threshold: report an item only when it is likely to produce measurable improvement in correctness, security, reliability, performance/cost, packaging/installability, user-facing behavior, documentation accuracy, or test/maintenance risk. They should not cap output to a top-N list; all threshold-meeting actionable blockers/fixes should be preserved and ordered by severity/impact.
 
 ## Compaction policy
 
