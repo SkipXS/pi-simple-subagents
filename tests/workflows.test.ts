@@ -506,13 +506,14 @@ else {
 	const finishDir = path.dirname(finishFile);
 	const finishBase = path.basename(finishFile);
 	let finished = false;
+	let watcher;
 	const maybeFinish = () => {
 		if (finished || !fs.existsSync(finishFile)) return;
 		finished = true;
-		watcher.close();
+		watcher?.close();
 		finish();
 	};
-	const watcher = fs.watch(finishDir, (_event, filename) => {
+	watcher = fs.watch(finishDir, (_event, filename) => {
 		if (!filename || filename.toString() === finishBase) maybeFinish();
 	});
 	maybeFinish();
@@ -609,13 +610,14 @@ else {
 	const finishDir = path.dirname(finishFile);
 	const finishBase = path.basename(finishFile);
 	let finished = false;
+	let watcher;
 	const maybeFinish = () => {
 		if (finished || !fs.existsSync(finishFile)) return;
 		finished = true;
-		watcher.close();
+		watcher?.close();
 		finish();
 	};
-	const watcher = fs.watch(finishDir, (_event, filename) => {
+	watcher = fs.watch(finishDir, (_event, filename) => {
 		if (!filename || filename.toString() === finishBase) maybeFinish();
 	});
 	maybeFinish();
@@ -712,13 +714,14 @@ else {
 	const finishDir = path.dirname(finishFile);
 	const finishBase = path.basename(finishFile);
 	let finished = false;
+	let watcher;
 	const maybeFinish = () => {
 		if (finished || !fs.existsSync(finishFile)) return;
 		finished = true;
-		watcher.close();
+		watcher?.close();
 		finish();
 	};
-	const watcher = fs.watch(finishDir, (_event, filename) => {
+	watcher = fs.watch(finishDir, (_event, filename) => {
 		if (!filename || filename.toString() === finishBase) maybeFinish();
 	});
 	maybeFinish();
@@ -794,13 +797,14 @@ else {
 	const finishDir = path.dirname(finishFile);
 	const finishBase = path.basename(finishFile);
 	let finished = false;
+	let watcher;
 	const maybeFinish = () => {
 		if (finished || !fs.existsSync(finishFile)) return;
 		finished = true;
-		watcher.close();
+		watcher?.close();
 		finish();
 	};
-	const watcher = fs.watch(finishDir, (_event, filename) => {
+	watcher = fs.watch(finishDir, (_event, filename) => {
 		if (!filename || filename.toString() === finishBase) maybeFinish();
 	});
 	maybeFinish();
