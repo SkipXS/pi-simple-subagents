@@ -371,8 +371,8 @@ Project config overrides global config, except project config is not allowed to 
 
 | Key | Default | Description |
 | --- | --- | --- |
-| `roles.<role>.model` | role-specific | Model for `orchestrator`, `scout`, `worker`, `verifier`, `reviewer`, or `synthesis`. |
-| `roles.<role>.thinking` | orchestrator: `high`; scout: `minimal`; worker/verifier/reviewer/synthesis: `medium` | Thinking suffix: `off`, `minimal`, `low`, `medium`, `high`, or `xhigh`. Override individual roles lower only when you explicitly need lower cost or latency. |
+| `roles.<role>.model` | `"auto"` | Model for `orchestrator`, `scout`, `worker`, `verifier`, `reviewer`, or `synthesis`. Set to `"auto"` to inherit the parent Pi model at child spawn time. Explicit values (e.g. `"openai-codex/gpt-5.5"`) work as before. |
+| `roles.<role>.thinking` | `"auto"` | Thinking suffix: `off`, `minimal`, `low`, `medium`, `high`, or `xhigh`. Set to `"auto"` to choose from the selected model's supported levels: orchestrator uses `high` on fine-grained models, but `xhigh` when the model only exposes a sparse high/xhigh reasoning choice; scout `off`; synthesis uses the smallest supported non-off level; verifier prefers `low`, then `medium` or higher; worker/reviewer prefer `medium` or the next higher supported level. Override individual roles when you need fixed cost/latency/quality behavior. |
 | `roles.<role>.timeoutMs` | orchestrator: `0`; others: unset | Override `children.timeoutMs` for one role; `0` disables that role's timeout. |
 | `children.forwardCurrentExtension` | `"auto"` | Forward this extension to child runs when loaded with `-e/--extension`. Use `always` or `never` to force behavior. |
 | `children.timeoutMs` | `1800000` | Fallback per-child-process timeout in ms; `0` disables it for roles without `roles.<role>.timeoutMs`. |

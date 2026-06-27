@@ -1,29 +1,29 @@
 {
   "roles": {
     "orchestrator": {
-      "model": "openai-codex/gpt-5.5",
-      "thinking": "high",
+      "model": "auto",
+      "thinking": "auto",
       "timeoutMs": 0
     },
     "scout": {
-      "model": "openai-codex/gpt-5.5",
-      "thinking": "minimal"
+      "model": "auto",
+      "thinking": "auto"
     },
     "worker": {
-      "model": "openai-codex/gpt-5.5",
-      "thinking": "medium"
+      "model": "auto",
+      "thinking": "auto"
     },
     "verifier": {
-      "model": "openai-codex/gpt-5.5",
-      "thinking": "medium"
+      "model": "auto",
+      "thinking": "auto"
     },
     "reviewer": {
-      "model": "openai-codex/gpt-5.5",
-      "thinking": "medium"
+      "model": "auto",
+      "thinking": "auto"
     },
     "synthesis": {
-      "model": "openai-codex/gpt-5.5",
-      "thinking": "medium"
+      "model": "auto",
+      "thinking": "auto"
     }
   },
   "children": {

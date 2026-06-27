@@ -81,7 +81,7 @@ export function registerRootTools(pi: ExtensionAPI): void {
 			const { result, runDir, planSource, cleanupSummary } = await runOrchestrator(ctx.cwd, params.plan, signal, (text, status) => {
 				if (text) progress.text(text);
 				if (status) progress.status(status);
-			});
+			}, undefined, ctx.model);
 			if (result.exitCode !== 0) throwChildRunError("Orchestration failed", result);
 			const subagentProgress = progress.snapshot();
 			return {
@@ -105,7 +105,7 @@ export function registerRootTools(pi: ExtensionAPI): void {
 			const result = await runReviewers(ctx.cwd, params, signal, (text, status) => {
 				if (text) progress.text(text);
 				if (status) progress.status(status);
-			});
+			}, undefined, ctx.model);
 			const subagentProgress = progress.snapshot();
 			return {
 				content: [{ type: "text", text: childSummary("Review finished.", [["Run dir", result.runDir], ["Target source", result.targetSource], ["Final summary", result.finalSummaryPath], ["Synthesis transcript", result.synthesis.transcriptPath], ["Artifact cleanup", result.cleanupSummary]], result.synthesis.output, { kind: "synthesis", includeOutput: params.includeOutput, subagentProgress }) }],
@@ -128,7 +128,7 @@ export function registerRootTools(pi: ExtensionAPI): void {
 			const result = await runScout(ctx.cwd, params, signal, (text, status) => {
 				if (text) progress.text(text);
 				if (status) progress.status(status);
-			});
+			}, undefined, ctx.model);
 			const subagentProgress = progress.snapshot();
 			return {
 				content: [{ type: "text", text: childSummary("Scout finished.", [["Run dir", result.runDir], ["Task source", result.taskSource], ["Output", result.outputArtifactPath], ["Transcript", result.result.transcriptPath], ["Artifact cleanup", result.cleanupSummary]], result.result.output, { includeOutput: params.includeOutput, subagentProgress }) }],
@@ -154,7 +154,7 @@ export function registerRootTools(pi: ExtensionAPI): void {
 			const result = await runWorker(ctx.cwd, params, signal, (text, status) => {
 				if (text) progress.text(text);
 				if (status) progress.status(status);
-			}, undefined, { statusKey, statusLabel });
+			}, undefined, { statusKey, statusLabel }, ctx.model);
 			const subagentProgress = progress.snapshot();
 			return {
 				content: [{ type: "text", text: childSummary("Worker finished.", [["Run dir", result.runDir], ["Task source", result.taskSource], ["Output", result.outputArtifactPath], ["Transcript", result.result.transcriptPath], ["Artifact cleanup", result.cleanupSummary]], result.result.output, { includeOutput: params.includeOutput, subagentProgress }) }],
@@ -177,7 +177,7 @@ export function registerRootTools(pi: ExtensionAPI): void {
 			const result = await runWorkersParallel(ctx.cwd, params, signal, (text, status) => {
 				if (text) progress.text(text);
 				if (status) progress.status(status);
-			});
+			}, undefined, ctx.model);
 			const summary = result.workers.map((worker, index) => `${index + 1}. ${worker.name}: output ${worker.outputArtifactPath}; transcript ${worker.result.transcriptPath}`).join("\n");
 			const subagentProgress = progress.snapshot();
 			return {

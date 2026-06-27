@@ -14,7 +14,7 @@ export const ROLE_METADATA = [
 		allowedPurposes: [] as const,
 		sessionStrategy: "persistent",
 		promptKind: "orchestrator",
-		defaultConfig: { model: "openai-codex/gpt-5.5", thinking: "high" },
+		defaultConfig: { model: "auto", thinking: "auto" },
 	},
 	{
 		id: "scout",
@@ -22,7 +22,7 @@ export const ROLE_METADATA = [
 		allowedPurposes: ["context"] as const,
 		sessionStrategy: "ephemeral",
 		promptKind: "scout",
-		defaultConfig: { model: "openai-codex/gpt-5.5", thinking: "minimal" },
+		defaultConfig: { model: "auto", thinking: "auto" },
 	},
 	{
 		id: "worker",
@@ -30,7 +30,7 @@ export const ROLE_METADATA = [
 		allowedPurposes: ["implementation", "fix", "validation"] as const,
 		sessionStrategy: "persistent",
 		promptKind: "worker",
-		defaultConfig: { model: "openai-codex/gpt-5.5", thinking: "medium" },
+		defaultConfig: { model: "auto", thinking: "auto" },
 	},
 	{
 		id: "verifier",
@@ -38,7 +38,7 @@ export const ROLE_METADATA = [
 		allowedPurposes: ["validation"] as const,
 		sessionStrategy: "ephemeral",
 		promptKind: "verifier",
-		defaultConfig: { model: "openai-codex/gpt-5.5", thinking: "medium" },
+		defaultConfig: { model: "auto", thinking: "auto" },
 	},
 	{
 		id: "reviewer",
@@ -46,7 +46,7 @@ export const ROLE_METADATA = [
 		allowedPurposes: ["review"] as const,
 		sessionStrategy: "ephemeral",
 		promptKind: "reviewer",
-		defaultConfig: { model: "openai-codex/gpt-5.5", thinking: "medium" },
+		defaultConfig: { model: "auto", thinking: "auto" },
 	},
 	{
 		id: "synthesis",
@@ -54,7 +54,7 @@ export const ROLE_METADATA = [
 		allowedPurposes: ["review"] as const,
 		sessionStrategy: "ephemeral",
 		promptKind: "synthesis",
-		defaultConfig: { model: "openai-codex/gpt-5.5", thinking: "medium" },
+		defaultConfig: { model: "auto", thinking: "auto" },
 	},
 ] as const satisfies ReadonlyArray<{
 	id: string;
@@ -62,7 +62,7 @@ export const ROLE_METADATA = [
 	allowedPurposes: readonly Purpose[];
 	sessionStrategy: RoleSessionStrategy;
 	promptKind: RolePromptKind;
-	defaultConfig: { model: string; thinking: ThinkingLevel };
+	defaultConfig: { model: string; thinking: ThinkingLevel | "auto" };
 }>;
 
 export type RoleMetadata = typeof ROLE_METADATA[number];

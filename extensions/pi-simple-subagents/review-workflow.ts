@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import type { Model, Api } from "@earendil-works/pi-ai";
 import { clearRunActive, ensureDir, markRunActive, resolveRunBaseDir, runId, validateOutputArtifactPath, writeArtifact } from "./artifacts.ts";
 import { childResultText, throwChildRunError, type ChildRunResult } from "./child-runner.ts";
 import { CONFIG_EFFECTIVE_FILE, EXTRA_REVIEW_CONTEXT_FILE, FINAL_SUMMARY_FILE, INPUT_TARGET_FILE, REVIEW_FAILURE_SUMMARY_FILE, SCOUT_REVIEW_CONTEXT_FILE } from "./constants.ts";
@@ -21,7 +22,7 @@ import {
 
 const MAX_REVIEWERS = 8;
 
-export async function runReviewers(cwd: string, params: ReviewersParams, signal?: AbortSignal, onUpdate?: WorkflowUpdate, deps?: WorkflowDeps): Promise<{ runDir: string; targetSource: string; extraContextSource?: string; scout?: ChildRunResult; reviews: ChildRunResult[]; reviewFailures?: string[]; reviewFailureSummaryPath?: string; synthesis: ChildRunResult; finalSummaryPath: string } & CleanupRecord> {
+export async function runReviewers(cwd: string, params: ReviewersParams, signal?: AbortSignal, onUpdate?: WorkflowUpdate, deps?: WorkflowDeps, parentModel?: Model<Api>): Promise<{ runDir: string; targetSource: string; extraContextSource?: string; scout?: ChildRunResult; reviews: ChildRunResult[]; reviewFailures?: string[]; reviewFailureSummaryPath?: string; synthesis: ChildRunResult; finalSummaryPath: string } & CleanupRecord> {
 	const dep = workflowDeps(deps);
 	const config = dep.loadConfig(cwd);
 	const baseDir = resolveRunBaseDir(cwd, config);
@@ -59,6 +60,7 @@ export async function runReviewers(cwd: string, params: ReviewersParams, signal?
 			statusLabel: "scout",
 			statusDescription: compactStatusDescription(`review scout: ${target.source}`),
 			systemPrompt: reviewTargetSystemPrompt("scout", dir, config),
+			parentModel,
 		});
 		if (scout.exitCode !== 0) throwChildRunError("review-target scout failed", scout);
 		requireExpectedArtifact(dep, dir, SCOUT_REVIEW_CONTEXT_FILE, scout, "review-target scout");
@@ -93,6 +95,7 @@ export async function runReviewers(cwd: string, params: ReviewersParams, signal?
 				statusLabel: `reviewer-${index + 1}`,
 				statusDescription: compactStatusDescription(angle),
 				systemPrompt: reviewTargetSystemPrompt("reviewer", dir, config),
+				parentModel,
 			});
 			if (result.exitCode !== 0) throw new Error(childResultText(`review-target reviewer ${index + 1} failed`, result));
 			requireExpectedArtifact(dep, dir, expectedFile, result, `review-target reviewer ${index + 1}`);
@@ -126,6 +129,7 @@ export async function runReviewers(cwd: string, params: ReviewersParams, signal?
 		statusLabel: "synthesis",
 		statusDescription: compactStatusDescription(`synthesize ${reviewRecords.length} review artifact${reviewRecords.length === 1 ? "" : "s"}`),
 		systemPrompt: reviewTargetSystemPrompt("synthesis", dir, config),
+		parentModel,
 	});
 	if (synthesis.exitCode !== 0) throwChildRunError("review-target synthesis failed", synthesis);
 	const finalSummaryPath = requireExpectedArtifact(dep, dir, FINAL_SUMMARY_FILE, synthesis, "review-target synthesis");

@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { getSupportedThinkingLevels, type Api, type Model, type ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { ROLE_METADATA, ROLE_NAMES, type RoleName } from "./role-registry.ts";
 import {
 	THINKING_LEVELS,
@@ -9,7 +10,7 @@ import {
 
 export interface RoleConfig {
 	model: string;
-	thinking?: typeof THINKING_LEVELS[number];
+	thinking?: typeof THINKING_LEVELS[number] | "auto";
 	/** Role-specific child process timeout in milliseconds. Use 0 to disable. Falls back to children.timeoutMs when unset. */
 	timeoutMs?: number;
 }
@@ -116,10 +117,10 @@ function expectModel(value: unknown, source: string, pathName: string): string {
 	return model;
 }
 
-function expectThinking(value: unknown, source: string, pathName: string): typeof THINKING_LEVELS[number] {
+function expectThinking(value: unknown, source: string, pathName: string): typeof THINKING_LEVELS[number] | "auto" {
 	const thinking = expectString(value, source, pathName);
-	if (!(THINKING_LEVELS as readonly string[]).includes(thinking)) throw configError(source, `${pathName} must be one of: ${THINKING_LEVELS.join(", ")}`);
-	return thinking as typeof THINKING_LEVELS[number];
+	if (thinking !== "auto" && !(THINKING_LEVELS as readonly string[]).includes(thinking)) throw configError(source, `${pathName} must be one of: ${THINKING_LEVELS.join(", ")}, auto`);
+	return thinking as typeof THINKING_LEVELS[number] | "auto";
 }
 
 function expectExtensionForwardMode(value: unknown, source: string, pathName: string): ExtensionForwardMode {
@@ -253,7 +254,111 @@ export function getRoleTimeoutMs(config: Config, role: RoleName): number {
 }
 
 export function applyThinking(model: string, thinking: string | undefined): string {
-	if (!thinking || thinking === "off") return model;
+	if (!thinking || thinking === "off" || thinking === "auto") return model;
 	if (/:(off|minimal|low|medium|high|xhigh)$/.test(model)) return model;
 	return `${model}:${thinking}`;
+}
+
+const THINKING_PRIORITY: ModelThinkingLevel[] = ["xhigh", "high", "medium", "low", "minimal", "off"];
+const FALLBACK_AUTO_MODEL = "openai-codex/gpt-5.5";
+const FALLBACK_AUTO_THINKING: Record<RoleName, ModelThinkingLevel> = {
+	orchestrator: "high",
+	scout: "minimal",
+	worker: "medium",
+	verifier: "medium",
+	reviewer: "medium",
+	synthesis: "medium",
+};
+
+/**
+ * Resolve the thinking level when a role is configured with "auto" thinking
+ * and a parent model's supported levels are known.
+ *
+ * - orchestrator: high on fine-grained models; xhigh when the model only exposes a sparse high/xhigh reasoning choice; otherwise highest available
+ * - scout: "off"
+ * - verifier: low when available, otherwise medium or next higher, fall back to highest available
+ * - worker, reviewer: medium or next higher, fall back to highest available
+ * - synthesis: smallest supported non-off level for light deduplication/reasoning, otherwise "off"
+ */
+export function roleAutoThinking(role: RoleName, supportedLevels: ModelThinkingLevel[]): ModelThinkingLevel {
+	const levelSet = new Set(supportedLevels);
+
+	switch (role) {
+		case "orchestrator": {
+			const nonOffLevels = supportedLevels.filter((level) => level !== "off");
+			if (levelSet.has("high") && levelSet.has("xhigh") && nonOffLevels.length <= 2) return "xhigh";
+			if (levelSet.has("high")) return "high";
+			return THINKING_PRIORITY.find((l) => levelSet.has(l)) ?? "off";
+		}
+
+		case "scout":
+			return "off";
+
+		case "verifier": {
+			// Verifier checks acceptance criteria rather than doing broad creative review.
+			for (const candidate of ["low", "medium", "high", "xhigh"] as const) {
+				if (levelSet.has(candidate)) return candidate;
+			}
+			return THINKING_PRIORITY.find((l) => levelSet.has(l)) ?? "off";
+		}
+
+		case "worker":
+		case "reviewer": {
+			// Try medium first, then high, then xhigh
+			for (const candidate of ["medium", "high", "xhigh"] as const) {
+				if (levelSet.has(candidate)) return candidate;
+			}
+			// Fall back to highest available
+			return THINKING_PRIORITY.find((l) => levelSet.has(l)) ?? "off";
+		}
+
+		case "synthesis":
+			for (const candidate of ["minimal", "low", "medium", "high", "xhigh"] as const) {
+				if (levelSet.has(candidate)) return candidate;
+			}
+			return "off";
+
+		default:
+			return "off";
+	}
+}
+
+/**
+ * Resolve the model and thinking level for a role, considering the parent model context
+ * and "auto" configuration values.
+ *
+ * - If model is "auto" and parentModel exists → use provider-qualified parent model id
+ * - If model is "auto" and no parentModel → use fallback default "openai-codex/gpt-5.5"
+ * - If thinking is "auto" and the resolved model is the parent model → use getSupportedThinkingLevels(parentModel) + roleAutoThinking()
+ * - If thinking is "auto" and no matching parent model is available → use the pre-auto role defaults as a safe fallback
+ * - If explicit values → use as-is
+ */
+export function resolveModelThinking(
+	parentModel: Model<Api> | undefined,
+	roleConfig: RoleConfig,
+	role: RoleName,
+): { model: string; thinking: string | undefined } {
+	let model = roleConfig.model;
+	let thinking: string | undefined = roleConfig.thinking;
+	const parentModelRef = parentModel ? `${parentModel.provider}/${parentModel.id}` : undefined;
+	const modelIsAuto = model === "auto";
+
+	// Resolve model. Pi CLI accepts provider-qualified model ids as provider/model.
+	if (modelIsAuto) {
+		model = parentModelRef ?? FALLBACK_AUTO_MODEL;
+	}
+
+	// Resolve thinking. Parent model capabilities are safe to use when the resolved
+	// child model is the parent model; otherwise use conservative role defaults.
+	if (thinking === "auto") {
+		const parentMatchesResolvedModel = parentModel && (modelIsAuto || model === parentModel.id || model === parentModelRef);
+		if (parentMatchesResolvedModel) {
+			const supportedLevels = getSupportedThinkingLevels(parentModel);
+			thinking = roleAutoThinking(role, supportedLevels);
+		} else {
+			thinking = FALLBACK_AUTO_THINKING[role];
+		}
+	}
+
+	return { model, thinking };
 }

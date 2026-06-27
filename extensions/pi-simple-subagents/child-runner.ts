@@ -4,8 +4,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
+import type { Model, Api } from "@earendil-works/pi-ai";
 import { appendArtifactFile, resolveArtifactPath, resolveRoleSessionFile, roleSessionArtifactName, uniqueSuffix, writeArtifact } from "./artifacts.ts";
-import { applyThinking, getRoleTimeoutMs, type Config } from "./config.ts";
+import { applyThinking, getRoleTimeoutMs, resolveModelThinking, type Config } from "./config.ts";
 import { roleSystemPrompt } from "./prompts.ts";
 import {
 	MAX_PROGRESS_LINE_BYTES,
@@ -290,8 +291,10 @@ export async function spawnPiRole(input: {
 	statusDescription?: string;
 	systemPrompt?: string;
 	sessionLabel?: string;
+	parentModel?: Model<Api>;
 }): Promise<ChildRunResult> {
 	const roleConfig = input.config.roles[input.role];
+	const { model: resolvedModel, thinking: resolvedThinking } = resolveModelThinking(input.parentModel, roleConfig, input.role);
 	if (input.signal?.aborted) {
 		const stampBase = `${Date.now()}-${uniqueSuffix()}`;
 		const sessionFile = resolveArtifactPath(input.runDir, roleSessionArtifactName(input.role, input.sessionLabel));
@@ -328,7 +331,7 @@ export async function spawnPiRole(input: {
 		args.push("--extension", EXTENSION_PATH);
 	}
 	args.push(
-		"--model", applyThinking(roleConfig.model, roleConfig.thinking),
+		"--model", applyThinking(resolvedModel, resolvedThinking),
 		"--append-system-prompt", promptPath,
 	);
 	args.push("-p", quoteAtReferencePath(taskPath));
@@ -388,7 +391,7 @@ export async function spawnPiRole(input: {
 		let assistantStopReason: string | undefined;
 		let assistantErrorMessage: string | undefined;
 		let nestedActiveNonTerminal = false;
-		const configuredModel = configuredModelParts(roleConfig.model);
+		const configuredModel = configuredModelParts(resolvedModel);
 		let childProvider = configuredModel.provider;
 		let childModel = configuredModel.model;
 		let childUsingSubscription = isProviderUsingOAuth(childProvider);
@@ -429,7 +432,7 @@ export async function spawnPiRole(input: {
 		};
 		const formatStatusText = (action = statusAction) => {
 			const frame = STATUS_SPINNER_FRAMES[statusFrame++ % STATUS_SPINNER_FRAMES.length];
-			const metrics = statusMetrics(usageTotals, childModel, roleConfig.thinking, childUsingSubscription);
+			const metrics = statusMetrics(usageTotals, childModel, resolvedThinking, childUsingSubscription);
 			return `${frame} ${statusLabel}: ${metrics ? `${metrics} - ${action}` : action}`;
 		};
 		const emitStatus = (options: { force?: boolean; action?: string; active?: boolean } = {}) => {

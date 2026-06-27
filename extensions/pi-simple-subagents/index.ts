@@ -181,6 +181,7 @@ Write the expected output artifact with write_run_artifact using path ${JSON.str
 					statusKey,
 					statusLabel,
 					statusDescription: roleTaskStatusDescription(params.purpose, taskInput),
+					parentModel: ctx.model,
 					...(workerAllocation ? { sessionLabel: workerAllocation.workerId } : {}),
 				});
 				const succeeded = result.exitCode === 0;

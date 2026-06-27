@@ -3,8 +3,9 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { Api, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { resolveRoleSessionFile } from "../extensions/pi-simple-subagents/artifacts.ts";
-import { DEFAULT_CONFIG } from "../extensions/pi-simple-subagents/config.ts";
+import { applyThinking, DEFAULT_CONFIG, roleAutoThinking, resolveModelThinking, type RoleConfig } from "../extensions/pi-simple-subagents/config.ts";
 import { reviewTargetSystemPrompt, roleSystemPrompt } from "../extensions/pi-simple-subagents/prompts.ts";
 import { ROLE_METADATA, DELEGABLE_ROLE_NAMES, ROLE_PURPOSE_VALUES, type RoleName } from "../extensions/pi-simple-subagents/role-registry.ts";
 import { RoleRunParams } from "../extensions/pi-simple-subagents/schemas.ts";
@@ -20,12 +21,12 @@ test("role registry is the source for config, prompts, and session policy", () =
 	assert.deepEqual(
 		Object.fromEntries(ROLE_METADATA.map((role) => [role.id, DEFAULT_CONFIG.roles[role.id].thinking])),
 		{
-			orchestrator: "high",
-			scout: "minimal",
-			worker: "medium",
-			verifier: "medium",
-			reviewer: "medium",
-			synthesis: "medium",
+			orchestrator: "auto",
+			scout: "auto",
+			worker: "auto",
+			verifier: "auto",
+			reviewer: "auto",
+			synthesis: "auto",
 		},
 	);
 
@@ -119,4 +120,160 @@ test("role purpose validation matches registry policy", () => {
 			else assert.throws(check, /Invalid role\/purpose/, `${role.id}/${purpose} should be rejected`);
 		}
 	}
+});
+
+test("roleAutoThinking resolves the correct level per role and available levels", () => {
+	const allLevels: ModelThinkingLevel[] = ["xhigh", "high", "medium", "low", "minimal", "off"];
+
+	// orchestrator with all levels available → "high" (prefer high over max/xhigh)
+	assert.equal(roleAutoThinking("orchestrator", allLevels), "high");
+
+	// orchestrator with only ["off","minimal","medium"] → "medium"
+	assert.equal(roleAutoThinking("orchestrator", ["off", "minimal", "medium"]), "medium");
+
+	// orchestrator with only ["off"] → "off"
+	assert.equal(roleAutoThinking("orchestrator", ["off"]), "off");
+
+	// scout → always "off" regardless of available levels
+	assert.equal(roleAutoThinking("scout", allLevels), "off");
+	assert.equal(roleAutoThinking("scout", ["off", "minimal"]), "off");
+	assert.equal(roleAutoThinking("scout", ["off"]), "off");
+
+	// worker with all levels → "medium"
+	assert.equal(roleAutoThinking("worker", allLevels), "medium");
+
+	// verifier with all levels → "low" (focused acceptance check)
+	assert.equal(roleAutoThinking("verifier", allLevels), "low");
+	assert.equal(roleAutoThinking("verifier", ["off", "high", "xhigh"]), "high");
+
+	// reviewer with all levels → "medium"
+	assert.equal(roleAutoThinking("reviewer", allLevels), "medium");
+
+	// worker with only ["off","low","xhigh"] → "xhigh" (next higher than medium)
+	assert.equal(roleAutoThinking("worker", ["off", "low", "xhigh"]), "xhigh");
+
+	// worker with only ["off","minimal"] → "minimal" (fallback to highest available)
+	assert.equal(roleAutoThinking("worker", ["off", "minimal"]), "minimal");
+
+	// worker with only ["off"] → "off"
+	assert.equal(roleAutoThinking("worker", ["off"]), "off");
+
+	// worker with ["off","minimal","medium"] → "medium" (exact match)
+	assert.equal(roleAutoThinking("worker", ["off", "minimal", "medium"]), "medium");
+
+	// worker with ["off","minimal","high"] → "high" (prefer higher over medium)
+	assert.equal(roleAutoThinking("worker", ["off", "minimal", "high"]), "high");
+
+	// synthesis uses the smallest supported non-off level
+	assert.equal(roleAutoThinking("synthesis", allLevels), "minimal");
+	assert.equal(roleAutoThinking("synthesis", ["minimal", "low", "medium", "high", "xhigh"]), "minimal");
+	assert.equal(roleAutoThinking("synthesis", ["medium", "high", "xhigh"]), "medium");
+	assert.equal(roleAutoThinking("synthesis", ["xhigh"]), "xhigh");
+	assert.equal(roleAutoThinking("synthesis", ["off"]), "off");
+});
+
+test("resolveModelThinking handles auto model/thinking with and without parentModel", () => {
+	const DEFAULT_MODEL = "openai-codex/gpt-5.5";
+
+	// model: "auto" with parentModel → uses provider-qualified parent model id
+	const parentModel = { provider: "custom-provider", id: "custom/model", reasoning: false } as unknown as Model<Api>;
+	assert.deepEqual(
+		resolveModelThinking(parentModel, { model: "auto", thinking: "off" }, "worker"),
+		{ model: "custom-provider/custom/model", thinking: "off" },
+	);
+
+	// model: "auto" without parentModel → falls back to default
+	assert.deepEqual(
+		resolveModelThinking(undefined, { model: "auto", thinking: "off" }, "worker"),
+		{ model: DEFAULT_MODEL, thinking: "off" },
+	);
+
+	// thinking: "auto" with parentModel (reasoning model) → uses roleAutoThinking()
+	const reasoningParent = { provider: "reasoning-provider", id: "reasoning/model", reasoning: true } as unknown as Model<Api>;
+	const resolvedWorker = resolveModelThinking(reasoningParent, { model: "auto", thinking: "auto" }, "worker");
+	assert.equal(resolvedWorker.model, "reasoning-provider/reasoning/model");
+	assert.equal(resolvedWorker.thinking, "medium"); // worker default with full levels
+
+	const resolvedScout = resolveModelThinking(reasoningParent, { model: "auto", thinking: "auto" }, "scout");
+	assert.equal(resolvedScout.model, "reasoning-provider/reasoning/model");
+	assert.equal(resolvedScout.thinking, "off"); // scout always off
+
+	const resolvedOrch = resolveModelThinking(reasoningParent, { model: "auto", thinking: "auto" }, "orchestrator");
+	assert.equal(resolvedOrch.model, "reasoning-provider/reasoning/model");
+	assert.equal(resolvedOrch.thinking, "high"); // orchestrator prefers high
+
+	const resolvedSynth = resolveModelThinking(reasoningParent, { model: "auto", thinking: "auto" }, "synthesis");
+	assert.equal(resolvedSynth.model, "reasoning-provider/reasoning/model");
+	assert.equal(resolvedSynth.thinking, "minimal"); // synthesis uses minimal when available
+
+	// thinking: "auto" without parentModel → pre-auto role fallback
+	assert.deepEqual(
+		resolveModelThinking(undefined, { model: "custom-model", thinking: "auto" }, "worker"),
+		{ model: "custom-model", thinking: "medium" },
+	);
+
+	// thinking: "auto" with non-reasoning parentModel → scout is off, worker falls back
+	const nonReasoningParent = { provider: "fast-provider", id: "fast/model", reasoning: false } as unknown as Model<Api>;
+	assert.deepEqual(
+		resolveModelThinking(nonReasoningParent, { model: "auto", thinking: "auto" }, "scout"),
+		{ model: "fast-provider/fast/model", thinking: "off" },
+	);
+	assert.deepEqual(
+		resolveModelThinking(nonReasoningParent, { model: "auto", thinking: "auto" }, "worker"),
+		{ model: "fast-provider/fast/model", thinking: "off" },
+	);
+
+	// explicit model/thinking → passed through unchanged
+	assert.deepEqual(
+		resolveModelThinking(parentModel, { model: "explicit-model", thinking: "high" }, "worker"),
+		{ model: "explicit-model", thinking: "high" },
+	);
+
+	// explicit model with auto thinking + parentModel
+	assert.deepEqual(
+		resolveModelThinking(reasoningParent, { model: "explicit-model", thinking: "auto" }, "worker"),
+		{ model: "explicit-model", thinking: "medium" },
+	);
+
+	// auto model with explicit thinking
+	assert.deepEqual(
+		resolveModelThinking(parentModel, { model: "auto", thinking: "minimal" }, "worker"),
+		{ model: "custom-provider/custom/model", thinking: "minimal" },
+	);
+
+	// model: "auto" with fine-grained parentModel that has high and xhigh thinking → orchestrator still prefers high
+	const xhighParent = { provider: "xhigh-provider", id: "xhigh/model", reasoning: true, thinkingLevelMap: { off: true, minimal: true, low: true, medium: true, high: true, xhigh: true } } as unknown as Model<Api>;
+	const resolvedXhighOrch = resolveModelThinking(xhighParent, { model: "auto", thinking: "auto" }, "orchestrator");
+	assert.equal(resolvedXhighOrch.model, "xhigh-provider/xhigh/model");
+	assert.equal(resolvedXhighOrch.thinking, "high");
+
+	// sparse high/xhigh models like DeepSeek V4 Pro use xhigh for orchestration
+	const sparseHighXhighParent = { provider: "deepseek-provider", id: "deepseek/model", reasoning: true, thinkingLevelMap: { minimal: null, low: null, medium: null, high: "high", xhigh: "max" } } as unknown as Model<Api>;
+	assert.equal(resolveModelThinking(sparseHighXhighParent, { model: "auto", thinking: "auto" }, "orchestrator").thinking, "xhigh");
+
+	// if high is unavailable, orchestrator can use xhigh
+	const onlyXhighParent = { provider: "xhigh-provider", id: "only-xhigh/model", reasoning: true, thinkingLevelMap: { off: true, minimal: null, low: null, medium: null, high: null, xhigh: true } } as unknown as Model<Api>;
+	assert.equal(resolveModelThinking(onlyXhighParent, { model: "auto", thinking: "auto" }, "orchestrator").thinking, "xhigh");
+});
+
+test("applyThinking handles auto and explicit thinking levels", () => {
+	// auto → returns bare model string (no suffix)
+	assert.equal(applyThinking("test/model", "auto"), "test/model");
+
+	// off → returns bare model string (no suffix)
+	assert.equal(applyThinking("test/model", "off"), "test/model");
+
+	// undefined thinking → returns bare model string
+	assert.equal(applyThinking("test/model", undefined), "test/model");
+
+	// explicit thinking level → appends suffix
+	assert.equal(applyThinking("test/model", "high"), "test/model:high");
+	assert.equal(applyThinking("test/model", "medium"), "test/model:medium");
+	assert.equal(applyThinking("test/model", "low"), "test/model:low");
+	assert.equal(applyThinking("test/model", "minimal"), "test/model:minimal");
+	assert.equal(applyThinking("test/model", "xhigh"), "test/model:xhigh");
+
+	// model already has a thinking suffix → not doubled
+	assert.equal(applyThinking("test/model:high", "medium"), "test/model:high");
+	assert.equal(applyThinking("test/model:off", "xhigh"), "test/model:off");
 });

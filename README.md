@@ -339,12 +339,12 @@ Project config overrides global config, except `children.piCliPath` is allowed o
 ```json
 {
   "roles": {
-    "orchestrator": { "model": "openai-codex/gpt-5.5", "thinking": "high", "timeoutMs": 0 },
-    "scout": { "model": "openai-codex/gpt-5.5", "thinking": "minimal" },
-    "worker": { "model": "openai-codex/gpt-5.5", "thinking": "medium" },
-    "verifier": { "model": "openai-codex/gpt-5.5", "thinking": "medium" },
-    "reviewer": { "model": "openai-codex/gpt-5.5", "thinking": "medium" },
-    "synthesis": { "model": "openai-codex/gpt-5.5", "thinking": "medium" }
+    "orchestrator": { "model": "auto", "thinking": "auto", "timeoutMs": 0 },
+    "scout": { "model": "auto", "thinking": "auto" },
+    "worker": { "model": "auto", "thinking": "auto" },
+    "verifier": { "model": "auto", "thinking": "auto" },
+    "reviewer": { "model": "auto", "thinking": "auto" },
+    "synthesis": { "model": "auto", "thinking": "auto" }
   },
   "children": {
     "forwardCurrentExtension": "auto",
@@ -361,11 +361,19 @@ Project config overrides global config, except `children.piCliPath` is allowed o
 }
 ```
 
-Default thinking levels are thorough but cost-conscious: orchestrator `high`, scout `minimal`, worker/verifier/reviewer/synthesis `medium`. You can override individual roles to lower thinking levels when you explicitly need lower cost or latency for your project.
+By default, role model and thinking are `"auto"`: child runs use the currently selected parent Pi model and choose a role-appropriate thinking level from that model's supported levels.
+
+### Auto model / thinking
+
+Setting a role's `model` to `"auto"` makes it use the parent Pi model at child spawn time. Setting `thinking` to `"auto"` inspects the selected model's supported thinking levels and chooses a role-appropriate level: orchestrator uses `high` on fine-grained models, but uses `xhigh` when the model only exposes a sparse high/xhigh reasoning choice; scout uses `off`; synthesis uses the smallest supported non-off level for light deduplication/reasoning; verifier prefers `low`, then `medium` or higher; worker and reviewer prefer `medium` or the next higher supported level, then fall back to the highest available level.
+
+When both are `"auto"`, the child process inherits the parent's model identity and applies role-appropriate thinking. This is the recommended starting point because it keeps all roles on the same model family for better prompt-cache reuse and consistent behavior, while varying only thinking effort when the model supports it. For example, DeepSeek V4 Pro supports effectively `off`, `high`, and `xhigh`, so auto selects `xhigh` for orchestrator and `high` for worker/verifier/reviewer/synthesis, with scout `off`; GPT-style fine-grained models use `high` for orchestrator, `medium` for worker/reviewer, `low` for verifier, and `minimal` for synthesis.
+
+Explicit model/thinking values still work as before and are fully backwards compatible. Use an explicit `model` when you want a different model per role, and an explicit `thinking` when you want to override the role default.
 
 ### Choosing role models
 
-The default config uses the same base model for every role and varies only `thinking` levels. This is usually a good starting point when your provider supports prompt/input caching: repeated Pi system prompt, tool definitions, and extension context are more likely to hit the same model-specific cache across orchestrator, scout, worker, verifier, reviewer, and synthesis runs.
+With the default `"auto"` config, every role uses the currently selected Pi model and varies only `thinking` levels when the model supports them. This is usually a good starting point when your provider supports prompt/input caching: repeated Pi system prompt, tool definitions, and extension context are more likely to hit the same model-specific cache across orchestrator, scout, worker, verifier, reviewer, and synthesis runs.
 
 **Same base model for all roles**
 
@@ -391,7 +399,7 @@ Cons:
 - Behavior can be less consistent across handoffs; weaker models may miss constraints from artifacts or role prompts.
 - More configuration surface to tune, test, and keep compatible with available provider credentials.
 
-A practical approach is to start with one strong base model and role-specific `thinking` levels, then switch individual roles only when measurements show a clear speed, quality, or cost benefit.
+A practical approach is to start with `"auto"` for all roles, then switch individual roles to explicit models or fixed thinking levels only when measurements show a clear speed, quality, or cost benefit.
 
 ### Role-specific timeouts
 

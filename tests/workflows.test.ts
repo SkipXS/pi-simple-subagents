@@ -7,7 +7,9 @@ import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import { ACTIVE_RUN_MARKER_FILE, markRunOwned } from "../extensions/pi-simple-subagents/artifacts.ts";
 import { getPiInvocation, quoteAtReferencePath, setChildRunnerStatusTimerForTests, shouldForwardCurrentExtension, spawnPiRole, wasLoadedWithExtensionFlag, type ChildRunResult } from "../extensions/pi-simple-subagents/child-runner.ts";
-import { DEFAULT_CONFIG, type Config } from "../extensions/pi-simple-subagents/config.ts";
+import { applyThinking, DEFAULT_CONFIG, resolveModelThinking, roleAutoThinking, type Config, type RoleConfig } from "../extensions/pi-simple-subagents/config.ts";
+import { getSupportedThinkingLevels, type Model, type ModelThinkingLevel } from "@earendil-works/pi-ai";
+import type { Api } from "@earendil-works/pi-ai";
 import orchestratorAgentsExtension from "../extensions/pi-simple-subagents/index.ts";
 import { runReviewers, runScout, runWorker, runWorkersParallel, parseReviewTargetCommand } from "../extensions/pi-simple-subagents/workflows.ts";
 import { createSubagentProgress } from "../extensions/pi-simple-subagents/progress.ts";
@@ -381,13 +383,14 @@ console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", 
 `, "utf8");
 		const config = cloneConfig();
 		config.children.piCliPath = cli;
+		config.roles.worker.thinking = "off";
 		const statuses: Array<{ key: string; text: string | undefined }> = [];
 		const result = await spawnPiRole({ cwd, role: "worker", task: "status test", runDir, config, statusKey: "subagent:test-worker", statusLabel: "test-worker", onStatus: (status) => statuses.push(status) });
 
 		assert.equal(result.exitCode, 0);
 		assert.equal(statuses.at(-1)?.key, "subagent:test-worker");
 		assert.match(statuses.at(-1)?.text ?? "", /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] test-worker: ↑1\.0k ↓2\.0k R3\.0k W4\.0k CH37\.5% \$0\.123 \(sub\) .* - finished$/u);
-		assert.equal(statuses.some((status) => /↑1\.0k ↓2\.0k R3\.0k W4\.0k CH37\.5% \$0\.123 \(sub\) 3\.7%\/272k \(auto\) - gpt-5\.5 • medium - finished/.test(status.text ?? "")), true);
+		assert.equal(statuses.some((status) => /↑1\.0k ↓2\.0k R3\.0k W4\.0k CH37\.5% \$0\.123 \(sub\) 3\.7%\/272k \(auto\) - gpt-5\.5 • thinking off - finished/.test(status.text ?? "")), true);
 		assert.equal(statuses.some((status) => /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] /u.test(status.text ?? "")), true);
 	} finally {
 		if (oldAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
@@ -1702,4 +1705,34 @@ test("extension registration is role-gated", () => {
 		if (oldRunDir === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
 		else process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR = oldRunDir;
 	}
+});
+
+
+test("spawnPiRole resolves auto model/thinking with parentModel", async () => {
+	const cwd = tempProject();
+	const runDir = path.join(cwd, ".pi", "run");
+	const cli = path.join(cwd, "fake-pi.js");
+	fs.writeFileSync(cli, [
+		"const fs = require('node:fs');",
+		"const path = require('node:path');",
+		"fs.writeFileSync(path.join(process.cwd(), 'argv.json'), JSON.stringify(process.argv.slice(2)), 'utf8');",
+		"console.log(JSON.stringify({ type: 'message_end', message: { role: 'assistant', provider: 'fake', model: 'fake-model', content: [{ type: 'text', text: 'done' }], stopReason: 'stop' } }));",
+	].join("\n"), "utf8");
+	const config = cloneConfig();
+	config.children.piCliPath = cli;
+
+	// Set role config to "auto" for both model and thinking
+	config.roles.worker = { model: "auto", thinking: "auto" };
+
+	// Create parentModel with reasoning (no xhigh in defaults)
+	const parentModel = { provider: "parent", id: "provider-model", reasoning: true } as unknown as Model<Api>;
+
+	const result = await spawnPiRole({ cwd, role: "worker", task: "auto resolve test", runDir, config, parentModel, systemPrompt: "test prompt" });
+	const argv = JSON.parse(fs.readFileSync(path.join(cwd, "argv.json"), "utf8")) as string[];
+	const modelArgIndex = argv.indexOf("--model");
+
+	assert.equal(result.exitCode, 0);
+	assert.notEqual(modelArgIndex, -1, "--model flag should be present");
+	// model should be provider-qualified parent model with :medium thinking (worker default with reasoning model)
+	assert.equal(argv[modelArgIndex + 1], "parent/provider-model:medium");
 });
