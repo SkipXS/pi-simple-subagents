@@ -506,16 +506,19 @@ else {
 	const finishDir = path.dirname(finishFile);
 	const finishBase = path.basename(finishFile);
 	let finished = false;
-	let watcher;
+	let poll;
+	const timeout = setTimeout(() => {
+		console.error("Timed out waiting for " + finishBase);
+		process.exit(2);
+	}, 5000);
 	const maybeFinish = () => {
 		if (finished || !fs.existsSync(finishFile)) return;
 		finished = true;
-		watcher?.close();
+		clearTimeout(timeout);
+		if (poll) clearInterval(poll);
 		finish();
 	};
-	watcher = fs.watch(finishDir, (_event, filename) => {
-		if (!filename || filename.toString() === finishBase) maybeFinish();
-	});
+	poll = setInterval(maybeFinish, 10);
 	maybeFinish();
 }
 `, "utf8");
@@ -610,16 +613,19 @@ else {
 	const finishDir = path.dirname(finishFile);
 	const finishBase = path.basename(finishFile);
 	let finished = false;
-	let watcher;
+	let poll;
+	const timeout = setTimeout(() => {
+		console.error("Timed out waiting for " + finishBase);
+		process.exit(2);
+	}, 5000);
 	const maybeFinish = () => {
 		if (finished || !fs.existsSync(finishFile)) return;
 		finished = true;
-		watcher?.close();
+		clearTimeout(timeout);
+		if (poll) clearInterval(poll);
 		finish();
 	};
-	watcher = fs.watch(finishDir, (_event, filename) => {
-		if (!filename || filename.toString() === finishBase) maybeFinish();
-	});
+	poll = setInterval(maybeFinish, 10);
 	maybeFinish();
 }
 `, "utf8");
@@ -714,16 +720,19 @@ else {
 	const finishDir = path.dirname(finishFile);
 	const finishBase = path.basename(finishFile);
 	let finished = false;
-	let watcher;
+	let poll;
+	const timeout = setTimeout(() => {
+		console.error("Timed out waiting for " + finishBase);
+		process.exit(2);
+	}, 5000);
 	const maybeFinish = () => {
 		if (finished || !fs.existsSync(finishFile)) return;
 		finished = true;
-		watcher?.close();
+		clearTimeout(timeout);
+		if (poll) clearInterval(poll);
 		finish();
 	};
-	watcher = fs.watch(finishDir, (_event, filename) => {
-		if (!filename || filename.toString() === finishBase) maybeFinish();
-	});
+	poll = setInterval(maybeFinish, 10);
 	maybeFinish();
 }
 `, "utf8");
@@ -797,16 +806,19 @@ else {
 	const finishDir = path.dirname(finishFile);
 	const finishBase = path.basename(finishFile);
 	let finished = false;
-	let watcher;
+	let poll;
+	const timeout = setTimeout(() => {
+		console.error("Timed out waiting for " + finishBase);
+		process.exit(2);
+	}, 5000);
 	const maybeFinish = () => {
 		if (finished || !fs.existsSync(finishFile)) return;
 		finished = true;
-		watcher?.close();
+		clearTimeout(timeout);
+		if (poll) clearInterval(poll);
 		finish();
 	};
-	watcher = fs.watch(finishDir, (_event, filename) => {
-		if (!filename || filename.toString() === finishBase) maybeFinish();
-	});
+	poll = setInterval(maybeFinish, 10);
 	maybeFinish();
 }
 `, "utf8");
