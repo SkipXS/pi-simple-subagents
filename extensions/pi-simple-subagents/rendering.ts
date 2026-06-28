@@ -139,7 +139,7 @@ export const renderReviewersCall = createCallRenderer("Run Reviewers", (args) =>
 export const renderScoutCall = createCallRenderer("Run Scout", (args) => [["Task", previewValue(args?.task)], ["Output", renderString(args, "outputFile")]]);
 export const renderWorkerCall = createCallRenderer("Run Worker", (args) => [["Purpose", renderString(args, "purpose") ?? "implementation"], ["Task", previewValue(args?.task)], ["Output", renderString(args, "outputFile")]]);
 export const renderParallelWorkersCall = createCallRenderer("Run Workers Parallel", (args) => [["Workers", renderArrayLength(args, "tasks")]]);
-export const renderRoleAgentCall = createCallRenderer("Run Role Agent", (args) => [["Role", renderString(args, "role")], ["Purpose", renderString(args, "purpose")], ["Worker", renderString(args, "workerId")], ["Task", previewValue(args?.task)], ["Output", renderString(args, "outputFile")]]);
+export const renderRoleAgentCall = createCallRenderer("Run Role Agent", (args) => [["Role", renderString(args, "role")], ["Purpose", renderString(args, "purpose")], ["Worker", renderString(args, "workerId")], ["Profile", renderString(args, "workerProfile")], ["Task", previewValue(args?.task)], ["Output", renderString(args, "outputFile")]]);
 export const renderArtifactCall = createCallRenderer("Write Run Artifact", (args) => [["Path", renderString(args, "path")], ["Bytes", typeof args?.content === "string" ? Buffer.byteLength(args.content, "utf8") : undefined]]);
 export const renderCompactCall = createCallRenderer("Compact Session", (args) => [["Instructions", previewValue(args?.instructions, "default role-aware summary")]]);
 export const renderMarkReviewCleanCall = createCallRenderer("Mark Review Clean", (args) => [["Round", renderNumber(args, "round")], ["Summary", previewValue(args?.summary)]]);
@@ -175,7 +175,7 @@ export const renderParallelWorkersResult = createResultRenderer("Parallel Worker
 
 export const renderRoleAgentResult = createResultRenderer("Role Agent", (details, result) => ({
 	status: renderNumber(details, "exitCode") === 0 ? "success" : renderBoolean(result, "isError") ? "error" : "pending",
-	fields: [["Purpose", renderString(details, "purpose")], ["Worker", renderString(details, "workerId")], ["Round", renderNumber(details, "round")], ...childRunFields(details), ["Worker runs", renderNumber(details, "workerRuns")], ["Review runs", renderNumber(details, "reviewRuns")]],
+	fields: [["Purpose", renderString(details, "purpose")], ["Worker", renderString(details, "workerId")], ["Profile", renderString(details, "workerProfile")], ["Round", renderNumber(details, "round")], ...childRunFields(details), ["Worker runs", renderNumber(details, "workerRuns")], ["Review runs", renderNumber(details, "reviewRuns")]],
 }));
 
 export const renderArtifactResult = createResultRenderer("Run Artifact", (details) => ({ status: "success", fields: [["Path", renderString(details, "path")]] }));

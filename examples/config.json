@@ -26,6 +26,7 @@
       "thinking": "auto"
     }
   },
+  "workerProfiles": {},
   "children": {
     "forwardCurrentExtension": "auto",
     "timeoutMs": 1800000,

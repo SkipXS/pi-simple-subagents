@@ -1,8 +1,8 @@
 import * as fs from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { validateOutputArtifactPath, writeArtifact } from "./artifacts.ts";
+import { resolveArtifactPath, validateOutputArtifactPath, writeArtifact } from "./artifacts.ts";
 import { childEnvCounts, childResultText, spawnPiRole } from "./child-runner.ts";
-import { loadConfig } from "./config.ts";
+import { loadConfig, WORKER_PROFILE_NAMES, type WorkerProfileName } from "./config.ts";
 import {
 	ROLE_ENV,
 	REVIEW_RUNS_ENV,
@@ -23,7 +23,7 @@ import {
 	type RoleRunParams as RoleRunParamsType,
 } from "./schemas.ts";
 import { DELEGABLE_ROLE_NAMES } from "./role-registry.ts";
-import { readOrchestrationState, writeOrchestrationState } from "./state.ts";
+import { readOrchestrationState, writeOrchestrationState, type WorkerProfileBinding } from "./state.ts";
 import {
 	createSubagentProgress,
 	withSubagentProgress,
@@ -104,16 +104,52 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 	let latestWorkerRunReviewedClean = persistedState?.latestWorkerRunReviewedClean ?? false;
 	let latestWorkerId = persistedState?.latestWorkerId;
 	let nextWorkerSequence = Math.max(1, persistedState?.nextWorkerSequence ?? workerRuns + 1);
+	let workerProfileBindings: Record<string, WorkerProfileBinding> = { ...(persistedState?.workerProfileBindings ?? {}) };
 	let roleOutputSequence = 0;
 	let roleStatusSequence = workerRuns + reviewRuns;
 	const persistState = () => {
 		if (!runDir) return undefined;
-		return writeOrchestrationState(runDir, { workerRuns, reviewRuns, reviewRunsSinceLatestWorker, latestWorkerRunReviewedClean, latestWorkerId, nextWorkerSequence });
+		return writeOrchestrationState(runDir, { workerRuns, reviewRuns, reviewRunsSinceLatestWorker, latestWorkerRunReviewedClean, latestWorkerId, nextWorkerSequence, workerProfileBindings });
 	};
 	const allocateWorkerId = (explicitWorkerId: string | undefined, purpose: string): { workerId: string; allocatedNew: boolean } => {
 		if (explicitWorkerId?.trim()) return { workerId: safeIdLabel(explicitWorkerId, "worker"), allocatedNew: false };
 		if ((purpose === "fix" || purpose === "validation") && latestWorkerId) return { workerId: latestWorkerId, allocatedNew: false };
 		return { workerId: `worker-${nextWorkerSequence}`, allocatedNew: true };
+	};
+	const normalizeWorkerProfile = (profile: unknown): WorkerProfileName | undefined => {
+		if (profile === undefined) return undefined;
+		if (typeof profile !== "string" || !(WORKER_PROFILE_NAMES as readonly string[]).includes(profile)) throw new Error(`workerProfile=${String(profile)} is not supported; supported worker profiles: ${WORKER_PROFILE_NAMES.join(", ")}`);
+		return profile as WorkerProfileName;
+	};
+	const workerIdLooksPreviouslyAllocated = (workerId: string): boolean => {
+		if (workerId === latestWorkerId) return true;
+		if (runDir && fs.existsSync(resolveArtifactPath(runDir, `sessions/${workerId}.jsonl`))) return true;
+		const match = /^worker-(\d+)$/.exec(workerId);
+		return match !== null && Number(match[1]) < nextWorkerSequence;
+	};
+	const resolveWorkerProfileBinding = (workerId: string, allocatedNew: boolean, requestedProfile: WorkerProfileName | undefined): WorkerProfileBinding => {
+		const hasBinding = Object.prototype.hasOwnProperty.call(workerProfileBindings, workerId);
+		const boundProfile = hasBinding ? workerProfileBindings[workerId] : undefined;
+		if (hasBinding && requestedProfile !== undefined && (boundProfile ?? null) !== requestedProfile) {
+			const expected = boundProfile ?? "default/unprofiled";
+			throw new Error(`workerProfile=${requestedProfile} conflicts with workerId=${workerId} binding (${expected}); omit workerProfile to reuse the bound profile or use a different workerId`);
+		}
+		if (hasBinding) return boundProfile ?? null;
+		if (!allocatedNew && workerIdLooksPreviouslyAllocated(workerId)) {
+			if (requestedProfile !== undefined) throw new Error(`workerProfile=${requestedProfile} conflicts with workerId=${workerId} binding (default/unprofiled); omit workerProfile to reuse the bound profile or use a different workerId`);
+			return null;
+		}
+		return requestedProfile ?? null;
+	};
+	const commitWorkerProfileBinding = (workerId: string, profile: WorkerProfileBinding): void => {
+		if (Object.prototype.hasOwnProperty.call(workerProfileBindings, workerId)) return;
+		workerProfileBindings = { ...workerProfileBindings, [workerId]: profile };
+	};
+	const reserveAutoWorkerSequence = (workerId: string): boolean => {
+		const match = /^worker-(\d+)$/.exec(workerId);
+		if (!match) return false;
+		nextWorkerSequence = Math.max(nextWorkerSequence, Number(match[1]) + 1);
+		return true;
 	};
 
 	if (!role) registerRootTools(pi);
@@ -131,6 +167,7 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 				"Use run_role_agent from orchestrator after deciding the next workflow step.",
 				"Before the first worker call, split broad milestones into small work packages; never delegate a whole milestone or full plan section to one worker.",
 				"A worker task should normally have one deliverable, 1-3 likely files, 3-5 acceptance criteria, explicit non-goals, and one validation check.",
+				"When a light worker profile is configured, you may pass workerProfile=light for small, bounded, low-risk new worker tasks. Omit workerProfile for a new/unbound worker to use the normal/default worker; follow-ups with the same workerId reuse the bound profile, and a different/default profile requires a new worker package/workerId.",
 				"For each new worker implementation package, omit workerId so the tool assigns worker-1, worker-2, etc.; after the worker returns, run role=verifier purpose=validation before reviewer review.",
 				"If the verifier reports concrete implementation gaps, run role=worker purpose=fix with the same workerId, then run the verifier again before review.",
 				"For accepted fixes after reviewing that package, pass the same workerId; run verifier again before the next reviewer round when the fix changes implementation state.",
@@ -143,8 +180,13 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 			async execute(_id, params: RoleRunParamsType, signal, onUpdate, ctx) {
 				validateRolePurpose(params.role, params.purpose);
 				if (params.workerId !== undefined && params.role !== "worker") throw new Error("workerId is only valid when role=worker");
+				if (params.workerProfile !== undefined && params.role !== "worker") throw new Error("workerProfile is only valid when role=worker");
 				const config = loadConfig(ctx.cwd);
+				const requestedWorkerProfile = params.role === "worker" ? normalizeWorkerProfile(params.workerProfile) : undefined;
 				const workerAllocation = params.role === "worker" ? allocateWorkerId(params.workerId, params.purpose) : undefined;
+				const effectiveWorkerProfile = workerAllocation ? resolveWorkerProfileBinding(workerAllocation.workerId, workerAllocation.allocatedNew, requestedWorkerProfile) : undefined;
+				const workerProfileConfig = effectiveWorkerProfile ? config.workerProfiles[effectiveWorkerProfile] : undefined;
+				if (effectiveWorkerProfile && !workerProfileConfig) throw new Error(`workerProfile=${effectiveWorkerProfile} is not configured; define workerProfiles.${effectiveWorkerProfile} in pi-simple-subagents config or omit workerProfile`);
 				const taskInput = requireNonEmpty(params.task, "role task");
 				if (params.role === "worker") assertWorkerTaskWithinBudget(taskInput, "run_role_agent.task", config, "worker delegation task");
 				const requestedOutputFile = params.outputFile?.trim();
@@ -158,12 +200,13 @@ export default function orchestratorAgentsExtension(pi: ExtensionAPI) {
 					? `Starting ${workerAllocation.workerId} while ${latestWorkerId} is not marked cleanly reviewed. This is allowed, but record the rationale for batching/skipping review in orchestration.md and review the pending package(s) before final validation.`
 					: undefined;
 				const workerLine = workerAllocation ? `\nWorker ID: ${workerAllocation.workerId}` : "";
+				const workerProfileLine = effectiveWorkerProfile ? `\nWorker profile: ${effectiveWorkerProfile}` : "";
 				const reviewWarningLine = reviewBatchingWarning ? `\nReview batching warning: ${reviewBatchingWarning}` : "";
 				const task = `${taskInput}
 
 Run directory: ${runDir}
 Expected output artifact: ${outputFile}
-Purpose: ${params.purpose}${workerLine}${reviewWarningLine}
+Purpose: ${params.purpose}${workerLine}${workerProfileLine}${reviewWarningLine}
 
 Write the expected output artifact with write_run_artifact using path ${JSON.stringify(outputFile)}. Do not use absolute paths or the generic write tool for the handoff artifact.`;
 				writeArtifact(runDir, `delegations/${label}-${Date.now()}.md`, task);
@@ -183,17 +226,23 @@ Write the expected output artifact with write_run_artifact using path ${JSON.str
 					statusDescription: roleTaskStatusDescription(params.purpose, taskInput),
 					parentModel: ctx.model,
 					...(workerAllocation ? { sessionLabel: workerAllocation.workerId } : {}),
+					...(workerProfileConfig ? { roleConfigOverride: workerProfileConfig, autoThinking: "worker-plus-one" as const } : {}),
 				});
 				const succeeded = result.exitCode === 0;
-				if (result.exitCode !== 0) {
+				let spawnedWorkerAllocationConsumed = false;
+				if (workerAllocation && effectiveWorkerProfile !== undefined && result.spawned) {
+					commitWorkerProfileBinding(workerAllocation.workerId, effectiveWorkerProfile);
+					spawnedWorkerAllocationConsumed = reserveAutoWorkerSequence(workerAllocation.workerId);
 					persistState();
+				}
+				if (result.exitCode !== 0) {
 					throw new Error(childResultText(`${params.role} failed`, result));
 				}
 				requireExpectedRunArtifact(runDir, outputFile, result, params.role);
 
 				if (succeeded && params.role === "worker" && workerAllocation && (params.purpose === "implementation" || params.purpose === "fix" || params.purpose === "validation")) {
 					workerRuns++;
-					if (workerAllocation.allocatedNew) nextWorkerSequence++;
+					if (workerAllocation.allocatedNew && !spawnedWorkerAllocationConsumed) nextWorkerSequence++;
 					latestWorkerId = workerAllocation.workerId;
 					reviewRunsSinceLatestWorker = 0;
 					latestWorkerRunReviewedClean = false;
@@ -205,8 +254,8 @@ Write the expected output artifact with write_run_artifact using path ${JSON.str
 				persistState();
 				const subagentProgress = progress.snapshot();
 				return {
-					content: [{ type: "text", text: childSummary(`${params.role} finished with exit code ${result.exitCode}.`, [["Worker", workerAllocation?.workerId], ["Review batching warning", reviewBatchingWarning], ["Session", result.sessionFile], ["Output", outputArtifactPath], ["Transcript", result.transcriptPath], ["Stderr", result.stderrPath]], result.output, { subagentProgress }) }],
-					details: withSubagentProgress({ ...result, runDir, outputPath: outputArtifactPath, purpose: params.purpose, workerId: workerAllocation?.workerId, reviewBatchingWarning, round: params.round, statusLabel, statusKey, latestWorkerRunReviewedClean, latestWorkerId, nextWorkerSequence, workerRuns, reviewRuns, reviewRunsSinceLatestWorker }, progress),
+					content: [{ type: "text", text: childSummary(`${params.role} finished with exit code ${result.exitCode}.`, [["Worker", workerAllocation?.workerId], ["Worker profile", effectiveWorkerProfile ?? undefined], ["Review batching warning", reviewBatchingWarning], ["Session", result.sessionFile], ["Output", outputArtifactPath], ["Transcript", result.transcriptPath], ["Stderr", result.stderrPath]], result.output, { subagentProgress }) }],
+					details: withSubagentProgress({ ...result, runDir, outputPath: outputArtifactPath, purpose: params.purpose, workerId: workerAllocation?.workerId, workerProfile: effectiveWorkerProfile ?? undefined, workerProfileBindings, reviewBatchingWarning, round: params.round, statusLabel, statusKey, latestWorkerRunReviewedClean, latestWorkerId, nextWorkerSequence, workerRuns, reviewRuns, reviewRunsSinceLatestWorker }, progress),
 				};
 
 			},

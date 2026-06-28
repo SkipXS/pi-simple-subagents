@@ -81,6 +81,7 @@ function fakeResult(role: ChildRunResult["role"], runDir: string): ChildRunResul
 		outputBytes: 0,
 		stderrBytes: 0,
 		timedOut: false,
+		spawned: true,
 	};
 }
 
@@ -193,6 +194,61 @@ console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", 
 	assert.equal(invocation.command, process.execPath);
 	assert.equal(invocation.args[0], cli);
 	assert.deepEqual(invocation.warnings, []);
+});
+
+test("child role prompt uses effective timeout for role config override", async () => {
+	const cwd = tempProject();
+	const runDir = path.join(cwd, ".pi", "run");
+	const cli = path.join(cwd, "fake-pi.js");
+	fs.writeFileSync(cli, `
+const fs = require("node:fs");
+const path = require("node:path");
+fs.writeFileSync(path.join(process.cwd(), "argv.json"), JSON.stringify(process.argv.slice(2)), "utf8");
+console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", provider: "fake", model: "fake-model", content: [{ type: "text", text: "done" }], stopReason: "stop" } }));
+`, "utf8");
+	const config = cloneConfig();
+	config.children.piCliPath = cli;
+	config.children.timeoutMs = 7000;
+	config.roles.worker.timeoutMs = 5000;
+	const lightProfile: RoleConfig = { model: "light-provider/light-model", thinking: "low", timeoutMs: 60000 };
+
+	const result = await spawnPiRole({ cwd, role: "worker", task: "profile prompt timeout test", runDir, config, roleConfigOverride: lightProfile });
+	const argv = JSON.parse(fs.readFileSync(path.join(cwd, "argv.json"), "utf8")) as string[];
+	const promptArgIndex = argv.indexOf("--append-system-prompt");
+	const prompt = fs.readFileSync(argv[promptArgIndex + 1], "utf8");
+
+	assert.equal(result.exitCode, 0);
+	assert.notEqual(promptArgIndex, -1);
+	assert.match(prompt, /Timeout: effective role timeoutMs=60000 ms\./);
+	assert.doesNotMatch(prompt, /Timeout: roles\.worker\.timeoutMs=5000 ms\./);
+	assert.doesNotMatch(prompt, /Timeout: children\.timeoutMs=7000 ms\./);
+});
+
+test("child role prompt with role config override falls back when override has no timeout", async () => {
+	const cwd = tempProject();
+	const runDir = path.join(cwd, ".pi", "run");
+	const cli = path.join(cwd, "fake-pi.js");
+	fs.writeFileSync(cli, `
+const fs = require("node:fs");
+const path = require("node:path");
+fs.writeFileSync(path.join(process.cwd(), "argv.json"), JSON.stringify(process.argv.slice(2)), "utf8");
+console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", provider: "fake", model: "fake-model", content: [{ type: "text", text: "done" }], stopReason: "stop" } }));
+`, "utf8");
+	const config = cloneConfig();
+	config.children.piCliPath = cli;
+	config.children.timeoutMs = 7000;
+	config.roles.worker.timeoutMs = 5000;
+	const lightProfile: RoleConfig = { model: "light-provider/light-model", thinking: "low" };
+
+	const result = await spawnPiRole({ cwd, role: "worker", task: "profile prompt fallback timeout test", runDir, config, roleConfigOverride: lightProfile });
+	const argv = JSON.parse(fs.readFileSync(path.join(cwd, "argv.json"), "utf8")) as string[];
+	const promptArgIndex = argv.indexOf("--append-system-prompt");
+	const prompt = fs.readFileSync(argv[promptArgIndex + 1], "utf8");
+
+	assert.equal(result.exitCode, 0);
+	assert.notEqual(promptArgIndex, -1);
+	assert.match(prompt, /Timeout: roles\.worker\.timeoutMs=5000 ms\./);
+	assert.doesNotMatch(prompt, /Timeout: effective role timeoutMs=/);
 });
 
 test("current extension forwarding supports temporary -e loading", () => {
@@ -1244,6 +1300,601 @@ console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", 
 	}
 });
 
+test("run_role_agent uses configured light worker profile with one-higher auto thinking", async () => {
+	const oldRole = process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+	const oldRunDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+	const oldCli = process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
+	try {
+		const cwd = tempProject();
+		const runDir = path.join(cwd, ".pi", "run");
+		fs.mkdirSync(runDir, { recursive: true });
+		const configPath = path.join(cwd, ".pi", "pi-simple-subagents", "config.json");
+		fs.mkdirSync(path.dirname(configPath), { recursive: true });
+		fs.writeFileSync(configPath, JSON.stringify({ workerProfiles: { light: { model: "light-provider/light-model", thinking: "auto" } } }), "utf8");
+		const cli = path.join(cwd, "fake-pi.js");
+		fs.writeFileSync(cli, `
+const fs = require("node:fs");
+const path = require("node:path");
+const runDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+fs.writeFileSync(path.join(process.cwd(), "argv.json"), JSON.stringify(process.argv.slice(2)), "utf8");
+const tasksDir = path.join(runDir, "tasks");
+const taskFile = fs.readdirSync(tasksDir).map((name) => path.join(tasksDir, name)).sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)[0];
+const task = fs.readFileSync(taskFile, "utf8");
+fs.writeFileSync(path.join(process.cwd(), "task.txt"), task, "utf8");
+const outputFile = /^Expected output artifact: (.+)$/m.exec(task)[1];
+fs.mkdirSync(path.dirname(path.join(runDir, outputFile)), { recursive: true });
+fs.writeFileSync(path.join(runDir, outputFile), "light child done", "utf8");
+console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", provider: "fake", model: "fake-model", content: [{ type: "text", text: "light child done" }], stopReason: "stop" } }));
+`, "utf8");
+		process.env.PI_ORCHESTRATOR_AGENT_ROLE = "orchestrator";
+		process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR = runDir;
+		process.env.PI_SIMPLE_SUBAGENTS_PI_CLI = cli;
+		let runRole: { execute: (...args: any[]) => Promise<any> } | undefined;
+		orchestratorAgentsExtension({ registerTool: (tool: { name: string; execute: (...args: any[]) => Promise<any> }) => { if (tool.name === "run_role_agent") runRole = tool; }, registerCommand() {}, sendMessage() {} } as never);
+		assert.ok(runRole);
+		const parentModel = { provider: "parent", id: "default-model", reasoning: true } as unknown as Model<Api>;
+		const result = await runRole.execute("id", { role: "worker", purpose: "implementation", workerProfile: "light", task: "small bounded task" }, new AbortController().signal, undefined, { cwd, model: parentModel } as never);
+		const argv = JSON.parse(fs.readFileSync(path.join(cwd, "argv.json"), "utf8")) as string[];
+		const modelArgIndex = argv.indexOf("--model");
+		assert.equal(argv[modelArgIndex + 1], "light-provider/light-model:high");
+		assert.equal(result.details.workerProfile, "light");
+		assert.match(result.content[0].text, /Worker profile: light/);
+		assert.match(fs.readFileSync(path.join(cwd, "task.txt"), "utf8"), /Worker profile: light/);
+	} finally {
+		if (oldRole === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+		else process.env.PI_ORCHESTRATOR_AGENT_ROLE = oldRole;
+		if (oldRunDir === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+		else process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR = oldRunDir;
+		if (oldCli === undefined) delete process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
+		else process.env.PI_SIMPLE_SUBAGENTS_PI_CLI = oldCli;
+	}
+});
+
+test("run_role_agent validates workerProfile usage before spawning", async () => {
+	const oldRole = process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+	const oldRunDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+	const oldCli = process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
+	try {
+		const cwd = tempProject();
+		const runDir = path.join(cwd, ".pi", "run");
+		fs.mkdirSync(runDir, { recursive: true });
+		const cli = path.join(cwd, "fake-pi.js");
+		fs.writeFileSync(cli, `throw new Error("should not spawn");\n`, "utf8");
+		process.env.PI_ORCHESTRATOR_AGENT_ROLE = "orchestrator";
+		process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR = runDir;
+		process.env.PI_SIMPLE_SUBAGENTS_PI_CLI = cli;
+		let runRole: { execute: (...args: any[]) => Promise<any> } | undefined;
+		orchestratorAgentsExtension({ registerTool: (tool: { name: string; execute: (...args: any[]) => Promise<any> }) => { if (tool.name === "run_role_agent") runRole = tool; }, registerCommand() {}, sendMessage() {} } as never);
+		const tool = runRole;
+		assert.ok(tool);
+		await assert.rejects(() => tool.execute("id", { role: "reviewer", purpose: "review", workerProfile: "light", task: "review" }, new AbortController().signal, undefined, { cwd } as never), /workerProfile is only valid when role=worker/);
+		await assert.rejects(() => tool.execute("id", { role: "worker", purpose: "implementation", workerProfile: "light", task: "small" }, new AbortController().signal, undefined, { cwd } as never), /workerProfile=light is not configured/);
+		assert.equal(fs.existsSync(path.join(runDir, "tasks")), false);
+	} finally {
+		if (oldRole === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+		else process.env.PI_ORCHESTRATOR_AGENT_ROLE = oldRole;
+		if (oldRunDir === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+		else process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR = oldRunDir;
+		if (oldCli === undefined) delete process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
+		else process.env.PI_SIMPLE_SUBAGENTS_PI_CLI = oldCli;
+	}
+});
+
+test("failed unconfigured workerProfile attempt does not commit worker binding", async () => {
+	const oldRole = process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+	const oldRunDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+	const oldCli = process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
+	try {
+		const cwd = tempProject();
+		const runDir = path.join(cwd, ".pi", "run");
+		fs.mkdirSync(runDir, { recursive: true });
+		const cli = path.join(cwd, "fake-pi.js");
+		fs.writeFileSync(cli, `
+const fs = require("node:fs");
+const path = require("node:path");
+const runDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+const countFile = path.join(process.cwd(), "spawn-count.txt");
+const count = fs.existsSync(countFile) ? Number(fs.readFileSync(countFile, "utf8")) + 1 : 1;
+fs.writeFileSync(countFile, String(count), "utf8");
+const tasksDir = path.join(runDir, "tasks");
+const taskFile = fs.readdirSync(tasksDir).map((name) => path.join(tasksDir, name)).sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)[0];
+const task = fs.readFileSync(taskFile, "utf8");
+const outputFile = /^Expected output artifact: (.+)$/m.exec(task)[1];
+fs.mkdirSync(path.dirname(path.join(runDir, outputFile)), { recursive: true });
+fs.writeFileSync(path.join(runDir, outputFile), outputFile, "utf8");
+console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", provider: "fake", model: "fake-model", content: [{ type: "text", text: outputFile }], stopReason: "stop" } }));
+`, "utf8");
+		process.env.PI_ORCHESTRATOR_AGENT_ROLE = "orchestrator";
+		process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR = runDir;
+		process.env.PI_SIMPLE_SUBAGENTS_PI_CLI = cli;
+		let runRole: { execute: (...args: any[]) => Promise<any> } | undefined;
+		orchestratorAgentsExtension({ registerTool: (tool: { name: string; execute: (...args: any[]) => Promise<any> }) => { if (tool.name === "run_role_agent") runRole = tool; }, registerCommand() {}, sendMessage() {} } as never);
+		assert.ok(runRole);
+
+		await assert.rejects(() => runRole!.execute("id", { role: "worker", purpose: "implementation", workerProfile: "light", task: "unconfigured light" }, new AbortController().signal, undefined, { cwd } as never), /workerProfile=light is not configured/);
+		assert.equal(fs.existsSync(path.join(cwd, "spawn-count.txt")), false);
+		assert.equal(fs.existsSync(path.join(runDir, "orchestration-state.json")), false);
+
+		const result = await runRole.execute("id", { role: "worker", purpose: "implementation", task: "default after rejected light" }, new AbortController().signal, undefined, { cwd } as never);
+		assert.equal(result.details.workerId, "worker-1");
+		assert.equal(result.details.workerProfile, undefined);
+		assert.equal(fs.readFileSync(path.join(cwd, "spawn-count.txt"), "utf8"), "1");
+		assert.deepEqual(JSON.parse(fs.readFileSync(path.join(runDir, "orchestration-state.json"), "utf8")).workerProfileBindings, { "worker-1": null });
+	} finally {
+		if (oldRole === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+		else process.env.PI_ORCHESTRATOR_AGENT_ROLE = oldRole;
+		if (oldRunDir === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+		else process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR = oldRunDir;
+		if (oldCli === undefined) delete process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
+		else process.env.PI_SIMPLE_SUBAGENTS_PI_CLI = oldCli;
+	}
+});
+
+test("configured light no-spawn failure does not commit worker binding", async () => {
+	const oldRole = process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+	const oldRunDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+	const oldCli = process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
+	try {
+		const cwd = tempProject();
+		const runDir = path.join(cwd, ".pi", "run");
+		fs.mkdirSync(runDir, { recursive: true });
+		const configPath = path.join(cwd, ".pi", "pi-simple-subagents", "config.json");
+		fs.mkdirSync(path.dirname(configPath), { recursive: true });
+		fs.writeFileSync(configPath, JSON.stringify({ workerProfiles: { light: { model: "light-provider/light-model", thinking: "low" } } }), "utf8");
+		const cli = path.join(cwd, "fake-pi.js");
+		fs.writeFileSync(cli, `
+const fs = require("node:fs");
+const path = require("node:path");
+const runDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+const countFile = path.join(process.cwd(), "spawn-count.txt");
+const count = fs.existsSync(countFile) ? Number(fs.readFileSync(countFile, "utf8")) + 1 : 1;
+fs.writeFileSync(countFile, String(count), "utf8");
+const tasksDir = path.join(runDir, "tasks");
+const taskFile = fs.readdirSync(tasksDir).map((name) => path.join(tasksDir, name)).sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)[0];
+const task = fs.readFileSync(taskFile, "utf8");
+const outputFile = /^Expected output artifact: (.+)$/m.exec(task)[1];
+fs.mkdirSync(path.dirname(path.join(runDir, outputFile)), { recursive: true });
+fs.writeFileSync(path.join(runDir, outputFile), outputFile, "utf8");
+console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", provider: "fake", model: "fake-model", content: [{ type: "text", text: outputFile }], stopReason: "stop" } }));
+`, "utf8");
+		process.env.PI_ORCHESTRATOR_AGENT_ROLE = "orchestrator";
+		process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR = runDir;
+		process.env.PI_SIMPLE_SUBAGENTS_PI_CLI = cli;
+		let runRole: { execute: (...args: any[]) => Promise<any> } | undefined;
+		orchestratorAgentsExtension({ registerTool: (tool: { name: string; execute: (...args: any[]) => Promise<any> }) => { if (tool.name === "run_role_agent") runRole = tool; }, registerCommand() {}, sendMessage() {} } as never);
+		assert.ok(runRole);
+
+		const aborted = new AbortController();
+		aborted.abort();
+		await assert.rejects(() => runRole!.execute("id", { role: "worker", purpose: "implementation", workerProfile: "light", task: "aborted light before spawn" }, aborted.signal, undefined, { cwd } as never), /aborted before start|aborted/);
+		assert.equal(fs.existsSync(path.join(cwd, "spawn-count.txt")), false);
+		assert.equal(fs.existsSync(path.join(runDir, "orchestration-state.json")), false);
+
+		const result = await runRole.execute("id", { role: "worker", purpose: "implementation", task: "default after aborted light" }, new AbortController().signal, undefined, { cwd } as never);
+		assert.equal(result.details.workerId, "worker-1");
+		assert.equal(result.details.workerProfile, undefined);
+		assert.equal(fs.readFileSync(path.join(cwd, "spawn-count.txt"), "utf8"), "1");
+		assert.deepEqual(JSON.parse(fs.readFileSync(path.join(runDir, "orchestration-state.json"), "utf8")).workerProfileBindings, { "worker-1": null });
+	} finally {
+		if (oldRole === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+		else process.env.PI_ORCHESTRATOR_AGENT_ROLE = oldRole;
+		if (oldRunDir === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+		else process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR = oldRunDir;
+		if (oldCli === undefined) delete process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
+		else process.env.PI_SIMPLE_SUBAGENTS_PI_CLI = oldCli;
+	}
+});
+
+test("light worker profile timeout override is honored by spawned child", async () => {
+	const oldRole = process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+	const oldRunDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+	const oldCli = process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
+	try {
+		const cwd = tempProject();
+		const runDir = path.join(cwd, ".pi", "run");
+		fs.mkdirSync(runDir, { recursive: true });
+		const configPath = path.join(cwd, ".pi", "pi-simple-subagents", "config.json");
+		fs.mkdirSync(path.dirname(configPath), { recursive: true });
+		fs.writeFileSync(configPath, JSON.stringify({ children: { timeoutMs: 5000 }, workerProfiles: { light: { model: "light-provider/light-model", thinking: "low", timeoutMs: 50 } } }), "utf8");
+		const cli = path.join(cwd, "fake-pi.js");
+		fs.writeFileSync(cli, `setTimeout(() => {}, 10000);\n`, "utf8");
+		process.env.PI_ORCHESTRATOR_AGENT_ROLE = "orchestrator";
+		process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR = runDir;
+		process.env.PI_SIMPLE_SUBAGENTS_PI_CLI = cli;
+		let runRole: { execute: (...args: any[]) => Promise<any> } | undefined;
+		orchestratorAgentsExtension({ registerTool: (tool: { name: string; execute: (...args: any[]) => Promise<any> }) => { if (tool.name === "run_role_agent") runRole = tool; }, registerCommand() {}, sendMessage() {} } as never);
+		assert.ok(runRole);
+
+		await assert.rejects(() => runRole!.execute("id", { role: "worker", purpose: "implementation", workerProfile: "light", task: "timeout via light profile" }, new AbortController().signal, undefined, { cwd } as never), /timed out after 50 ms/);
+		const state = JSON.parse(fs.readFileSync(path.join(runDir, "orchestration-state.json"), "utf8"));
+		assert.deepEqual(state.workerProfileBindings, { "worker-1": "light" });
+		assert.equal(state.nextWorkerSequence, 2);
+	} finally {
+		if (oldRole === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+		else process.env.PI_ORCHESTRATOR_AGENT_ROLE = oldRole;
+		if (oldRunDir === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+		else process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR = oldRunDir;
+		if (oldCli === undefined) delete process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
+		else process.env.PI_SIMPLE_SUBAGENTS_PI_CLI = oldCli;
+	}
+});
+
+test("spawned default worker failure consumes worker id before next omitted implementation", async () => {
+	const oldRole = process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+	const oldRunDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+	const oldCli = process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
+	try {
+		const cwd = tempProject();
+		const runDir = path.join(cwd, ".pi", "run");
+		fs.mkdirSync(runDir, { recursive: true });
+		const configPath = path.join(cwd, ".pi", "pi-simple-subagents", "config.json");
+		fs.mkdirSync(path.dirname(configPath), { recursive: true });
+		fs.writeFileSync(configPath, JSON.stringify({ workerProfiles: { light: { model: "light-provider/light-model", thinking: "low" } } }), "utf8");
+		const cli = path.join(cwd, "fake-pi.js");
+		fs.writeFileSync(cli, `
+const fs = require("node:fs");
+const path = require("node:path");
+const runDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+const countFile = path.join(process.cwd(), "spawn-count.txt");
+const count = fs.existsSync(countFile) ? Number(fs.readFileSync(countFile, "utf8")) + 1 : 1;
+fs.writeFileSync(countFile, String(count), "utf8");
+const tasksDir = path.join(runDir, "tasks");
+const taskFile = fs.readdirSync(tasksDir).map((name) => path.join(tasksDir, name)).sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)[0];
+const task = fs.readFileSync(taskFile, "utf8");
+const outputFile = /^Expected output artifact: (.+)$/m.exec(task)[1];
+if (!task.includes("missing expected artifact")) {
+  fs.mkdirSync(path.dirname(path.join(runDir, outputFile)), { recursive: true });
+  fs.writeFileSync(path.join(runDir, outputFile), outputFile, "utf8");
+}
+console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", provider: "fake", model: "fake-model", content: [{ type: "text", text: "done" }], stopReason: "stop" } }));
+`, "utf8");
+		process.env.PI_ORCHESTRATOR_AGENT_ROLE = "orchestrator";
+		process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR = runDir;
+		process.env.PI_SIMPLE_SUBAGENTS_PI_CLI = cli;
+		let runRole: { execute: (...args: any[]) => Promise<any> } | undefined;
+		orchestratorAgentsExtension({ registerTool: (tool: { name: string; execute: (...args: any[]) => Promise<any> }) => { if (tool.name === "run_role_agent") runRole = tool; }, registerCommand() {}, sendMessage() {} } as never);
+		assert.ok(runRole);
+
+		await assert.rejects(() => runRole!.execute("id", { role: "worker", purpose: "implementation", task: "missing expected artifact" }, new AbortController().signal, undefined, { cwd } as never), /worker did not write the expected output artifact/);
+		let state = JSON.parse(fs.readFileSync(path.join(runDir, "orchestration-state.json"), "utf8"));
+		assert.deepEqual(state.workerProfileBindings, { "worker-1": null });
+		assert.equal(state.nextWorkerSequence, 2);
+		assert.equal(fs.readFileSync(path.join(cwd, "spawn-count.txt"), "utf8"), "1");
+
+		const next = await runRole.execute("id", { role: "worker", purpose: "implementation", task: "default after failed worker" }, new AbortController().signal, undefined, { cwd } as never);
+		assert.equal(next.details.workerId, "worker-2");
+		assert.equal(next.details.workerProfile, undefined);
+		assert.equal(fs.readFileSync(path.join(cwd, "spawn-count.txt"), "utf8"), "2");
+		state = JSON.parse(fs.readFileSync(path.join(runDir, "orchestration-state.json"), "utf8"));
+		assert.deepEqual(state.workerProfileBindings, { "worker-1": null, "worker-2": null });
+	} finally {
+		if (oldRole === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+		else process.env.PI_ORCHESTRATOR_AGENT_ROLE = oldRole;
+		if (oldRunDir === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+		else process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR = oldRunDir;
+		if (oldCli === undefined) delete process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
+		else process.env.PI_SIMPLE_SUBAGENTS_PI_CLI = oldCli;
+	}
+});
+
+test("explicit fresh auto-shaped worker id reserves sequence on success", async () => {
+	const oldRole = process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+	const oldRunDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+	const oldCli = process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
+	try {
+		const cwd = tempProject();
+		const runDir = path.join(cwd, ".pi", "run");
+		fs.mkdirSync(runDir, { recursive: true });
+		const cli = path.join(cwd, "fake-pi.js");
+		fs.writeFileSync(cli, `
+const fs = require("node:fs");
+const path = require("node:path");
+const runDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+const countFile = path.join(process.cwd(), "spawn-count.txt");
+const count = fs.existsSync(countFile) ? Number(fs.readFileSync(countFile, "utf8")) + 1 : 1;
+fs.writeFileSync(countFile, String(count), "utf8");
+const tasksDir = path.join(runDir, "tasks");
+const taskFile = fs.readdirSync(tasksDir).map((name) => path.join(tasksDir, name)).sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)[0];
+const task = fs.readFileSync(taskFile, "utf8");
+const outputFile = /^Expected output artifact: (.+)$/m.exec(task)[1];
+fs.mkdirSync(path.dirname(path.join(runDir, outputFile)), { recursive: true });
+fs.writeFileSync(path.join(runDir, outputFile), outputFile, "utf8");
+console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", provider: "fake", model: "fake-model", content: [{ type: "text", text: outputFile }], stopReason: "stop" } }));
+`, "utf8");
+		process.env.PI_ORCHESTRATOR_AGENT_ROLE = "orchestrator";
+		process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR = runDir;
+		process.env.PI_SIMPLE_SUBAGENTS_PI_CLI = cli;
+		let runRole: { execute: (...args: any[]) => Promise<any> } | undefined;
+		orchestratorAgentsExtension({ registerTool: (tool: { name: string; execute: (...args: any[]) => Promise<any> }) => { if (tool.name === "run_role_agent") runRole = tool; }, registerCommand() {}, sendMessage() {} } as never);
+		assert.ok(runRole);
+
+		const explicit = await runRole.execute("id", { role: "worker", purpose: "implementation", workerId: "worker-1", task: "explicit worker one" }, new AbortController().signal, undefined, { cwd } as never);
+		assert.equal(explicit.details.workerId, "worker-1");
+		let state = JSON.parse(fs.readFileSync(path.join(runDir, "orchestration-state.json"), "utf8"));
+		assert.deepEqual(state.workerProfileBindings, { "worker-1": null });
+		assert.equal(state.nextWorkerSequence, 2);
+
+		const next = await runRole.execute("id", { role: "worker", purpose: "implementation", task: "omitted after explicit worker one" }, new AbortController().signal, undefined, { cwd } as never);
+		assert.equal(next.details.workerId, "worker-2");
+		state = JSON.parse(fs.readFileSync(path.join(runDir, "orchestration-state.json"), "utf8"));
+		assert.deepEqual(state.workerProfileBindings, { "worker-1": null, "worker-2": null });
+		assert.equal(state.nextWorkerSequence, 3);
+	} finally {
+		if (oldRole === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+		else process.env.PI_ORCHESTRATOR_AGENT_ROLE = oldRole;
+		if (oldRunDir === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+		else process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR = oldRunDir;
+		if (oldCli === undefined) delete process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
+		else process.env.PI_SIMPLE_SUBAGENTS_PI_CLI = oldCli;
+	}
+});
+
+test("spawned explicit fresh auto-shaped worker failure reserves sequence before next omitted implementation", async () => {
+	const oldRole = process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+	const oldRunDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+	const oldCli = process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
+	try {
+		const cwd = tempProject();
+		const runDir = path.join(cwd, ".pi", "run");
+		fs.mkdirSync(runDir, { recursive: true });
+		const cli = path.join(cwd, "fake-pi.js");
+		fs.writeFileSync(cli, `
+const fs = require("node:fs");
+const path = require("node:path");
+const runDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+const countFile = path.join(process.cwd(), "spawn-count.txt");
+const count = fs.existsSync(countFile) ? Number(fs.readFileSync(countFile, "utf8")) + 1 : 1;
+fs.writeFileSync(countFile, String(count), "utf8");
+const tasksDir = path.join(runDir, "tasks");
+const taskFile = fs.readdirSync(tasksDir).map((name) => path.join(tasksDir, name)).sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)[0];
+const task = fs.readFileSync(taskFile, "utf8");
+const outputFile = /^Expected output artifact: (.+)$/m.exec(task)[1];
+if (!task.includes("missing expected artifact")) {
+  fs.mkdirSync(path.dirname(path.join(runDir, outputFile)), { recursive: true });
+  fs.writeFileSync(path.join(runDir, outputFile), outputFile, "utf8");
+}
+console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", provider: "fake", model: "fake-model", content: [{ type: "text", text: "done" }], stopReason: "stop" } }));
+`, "utf8");
+		process.env.PI_ORCHESTRATOR_AGENT_ROLE = "orchestrator";
+		process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR = runDir;
+		process.env.PI_SIMPLE_SUBAGENTS_PI_CLI = cli;
+		let runRole: { execute: (...args: any[]) => Promise<any> } | undefined;
+		orchestratorAgentsExtension({ registerTool: (tool: { name: string; execute: (...args: any[]) => Promise<any> }) => { if (tool.name === "run_role_agent") runRole = tool; }, registerCommand() {}, sendMessage() {} } as never);
+		assert.ok(runRole);
+
+		await assert.rejects(() => runRole!.execute("id", { role: "worker", purpose: "implementation", workerId: "worker-1", task: "missing expected artifact" }, new AbortController().signal, undefined, { cwd } as never), /worker did not write the expected output artifact/);
+		let state = JSON.parse(fs.readFileSync(path.join(runDir, "orchestration-state.json"), "utf8"));
+		assert.deepEqual(state.workerProfileBindings, { "worker-1": null });
+		assert.equal(state.nextWorkerSequence, 2);
+
+		const next = await runRole.execute("id", { role: "worker", purpose: "implementation", task: "default after explicit failed worker" }, new AbortController().signal, undefined, { cwd } as never);
+		assert.equal(next.details.workerId, "worker-2");
+		state = JSON.parse(fs.readFileSync(path.join(runDir, "orchestration-state.json"), "utf8"));
+		assert.deepEqual(state.workerProfileBindings, { "worker-1": null, "worker-2": null });
+	} finally {
+		if (oldRole === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+		else process.env.PI_ORCHESTRATOR_AGENT_ROLE = oldRole;
+		if (oldRunDir === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+		else process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR = oldRunDir;
+		if (oldCli === undefined) delete process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
+		else process.env.PI_SIMPLE_SUBAGENTS_PI_CLI = oldCli;
+	}
+});
+
+test("explicit worker no-spawn child invocation failure does not reserve sequence", async () => {
+	const oldRole = process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+	const oldRunDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+	const oldCli = process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
+	try {
+		const cwd = tempProject();
+		const runDir = path.join(cwd, ".pi", "run");
+		fs.mkdirSync(runDir, { recursive: true });
+		process.env.PI_ORCHESTRATOR_AGENT_ROLE = "orchestrator";
+		process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR = runDir;
+		process.env.PI_SIMPLE_SUBAGENTS_PI_CLI = path.join(cwd, "missing-pi.js");
+		let runRole: { execute: (...args: any[]) => Promise<any> } | undefined;
+		orchestratorAgentsExtension({ registerTool: (tool: { name: string; execute: (...args: any[]) => Promise<any> }) => { if (tool.name === "run_role_agent") runRole = tool; }, registerCommand() {}, sendMessage() {} } as never);
+		assert.ok(runRole);
+
+		await assert.rejects(() => runRole!.execute("id", { role: "worker", purpose: "implementation", workerId: "worker-1", task: "explicit worker one no spawn" }, new AbortController().signal, undefined, { cwd } as never), /does not exist/);
+		assert.equal(fs.existsSync(path.join(runDir, "orchestration-state.json")), false);
+
+		const cli = path.join(cwd, "fake-pi.js");
+		fs.writeFileSync(cli, `
+const fs = require("node:fs");
+const path = require("node:path");
+const runDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+const tasksDir = path.join(runDir, "tasks");
+const taskFile = fs.readdirSync(tasksDir).map((name) => path.join(tasksDir, name)).sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)[0];
+const task = fs.readFileSync(taskFile, "utf8");
+const outputFile = /^Expected output artifact: (.+)$/m.exec(task)[1];
+fs.mkdirSync(path.dirname(path.join(runDir, outputFile)), { recursive: true });
+fs.writeFileSync(path.join(runDir, outputFile), outputFile, "utf8");
+console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", provider: "fake", model: "fake-model", content: [{ type: "text", text: outputFile }], stopReason: "stop" } }));
+`, "utf8");
+		process.env.PI_SIMPLE_SUBAGENTS_PI_CLI = cli;
+		const next = await runRole.execute("id", { role: "worker", purpose: "implementation", task: "default after no-spawn explicit worker" }, new AbortController().signal, undefined, { cwd } as never);
+		assert.equal(next.details.workerId, "worker-1");
+		const state = JSON.parse(fs.readFileSync(path.join(runDir, "orchestration-state.json"), "utf8"));
+		assert.deepEqual(state.workerProfileBindings, { "worker-1": null });
+		assert.equal(state.nextWorkerSequence, 2);
+	} finally {
+		if (oldRole === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+		else process.env.PI_ORCHESTRATOR_AGENT_ROLE = oldRole;
+		if (oldRunDir === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+		else process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR = oldRunDir;
+		if (oldCli === undefined) delete process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
+		else process.env.PI_SIMPLE_SUBAGENTS_PI_CLI = oldCli;
+	}
+});
+
+test("explicit old auto-shaped and custom worker ids do not regress next worker sequence", async () => {
+	const oldRole = process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+	const oldRunDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+	const oldCli = process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
+	try {
+		const cwd = tempProject();
+		const runDir = path.join(cwd, ".pi", "run");
+		fs.mkdirSync(runDir, { recursive: true });
+		fs.writeFileSync(path.join(runDir, "orchestration-state.json"), JSON.stringify({ workerRuns: 4, reviewRuns: 0, reviewRunsSinceLatestWorker: 0, latestWorkerRunReviewedClean: true, latestWorkerId: "worker-4", nextWorkerSequence: 5, workerProfileBindings: { "worker-4": null }, updatedAt: new Date(0).toISOString() }), "utf8");
+		const cli = path.join(cwd, "fake-pi.js");
+		fs.writeFileSync(cli, `
+const fs = require("node:fs");
+const path = require("node:path");
+const runDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+const tasksDir = path.join(runDir, "tasks");
+const taskFile = fs.readdirSync(tasksDir).map((name) => path.join(tasksDir, name)).sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)[0];
+const task = fs.readFileSync(taskFile, "utf8");
+const outputFile = /^Expected output artifact: (.+)$/m.exec(task)[1];
+fs.mkdirSync(path.dirname(path.join(runDir, outputFile)), { recursive: true });
+fs.writeFileSync(path.join(runDir, outputFile), outputFile, "utf8");
+console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", provider: "fake", model: "fake-model", content: [{ type: "text", text: outputFile }], stopReason: "stop" } }));
+`, "utf8");
+		process.env.PI_ORCHESTRATOR_AGENT_ROLE = "orchestrator";
+		process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR = runDir;
+		process.env.PI_SIMPLE_SUBAGENTS_PI_CLI = cli;
+		let runRole: { execute: (...args: any[]) => Promise<any> } | undefined;
+		orchestratorAgentsExtension({ registerTool: (tool: { name: string; execute: (...args: any[]) => Promise<any> }) => { if (tool.name === "run_role_agent") runRole = tool; }, registerCommand() {}, sendMessage() {} } as never);
+		assert.ok(runRole);
+
+		await runRole.execute("id", { role: "worker", purpose: "fix", workerId: "worker-2", task: "old explicit worker" }, new AbortController().signal, undefined, { cwd } as never);
+		let state = JSON.parse(fs.readFileSync(path.join(runDir, "orchestration-state.json"), "utf8"));
+		assert.equal(state.nextWorkerSequence, 5);
+		assert.equal(state.workerProfileBindings["worker-2"], null);
+
+		await runRole.execute("id", { role: "worker", purpose: "implementation", workerId: "custom-worker", task: "custom explicit worker" }, new AbortController().signal, undefined, { cwd } as never);
+		state = JSON.parse(fs.readFileSync(path.join(runDir, "orchestration-state.json"), "utf8"));
+		assert.equal(state.nextWorkerSequence, 5);
+		assert.equal(state.workerProfileBindings["custom-worker"], null);
+	} finally {
+		if (oldRole === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+		else process.env.PI_ORCHESTRATOR_AGENT_ROLE = oldRole;
+		if (oldRunDir === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+		else process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR = oldRunDir;
+		if (oldCli === undefined) delete process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
+		else process.env.PI_SIMPLE_SUBAGENTS_PI_CLI = oldCli;
+	}
+});
+
+test("spawned light worker missing expected artifact persists binding", async () => {
+	const oldRole = process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+	const oldRunDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+	const oldCli = process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
+	try {
+		const cwd = tempProject();
+		const runDir = path.join(cwd, ".pi", "run");
+		fs.mkdirSync(runDir, { recursive: true });
+		const configPath = path.join(cwd, ".pi", "pi-simple-subagents", "config.json");
+		fs.mkdirSync(path.dirname(configPath), { recursive: true });
+		fs.writeFileSync(configPath, JSON.stringify({ workerProfiles: { light: { model: "light-provider/light-model", thinking: "low" } } }), "utf8");
+		const cli = path.join(cwd, "fake-pi.js");
+		fs.writeFileSync(cli, `
+const fs = require("node:fs");
+const path = require("node:path");
+const runDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+const countFile = path.join(process.cwd(), "spawn-count.txt");
+const count = fs.existsSync(countFile) ? Number(fs.readFileSync(countFile, "utf8")) + 1 : 1;
+fs.writeFileSync(countFile, String(count), "utf8");
+fs.writeFileSync(path.join(process.cwd(), "argv-" + count + ".json"), JSON.stringify(process.argv.slice(2)), "utf8");
+const tasksDir = path.join(runDir, "tasks");
+const taskFile = fs.readdirSync(tasksDir).map((name) => path.join(tasksDir, name)).sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)[0];
+const task = fs.readFileSync(taskFile, "utf8");
+const outputFile = /^Expected output artifact: (.+)$/m.exec(task)[1];
+if (!task.includes("missing expected artifact")) {
+  fs.mkdirSync(path.dirname(path.join(runDir, outputFile)), { recursive: true });
+  fs.writeFileSync(path.join(runDir, outputFile), outputFile, "utf8");
+}
+console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", provider: "fake", model: "fake-model", content: [{ type: "text", text: "done" }], stopReason: "stop" } }));
+`, "utf8");
+		process.env.PI_ORCHESTRATOR_AGENT_ROLE = "orchestrator";
+		process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR = runDir;
+		process.env.PI_SIMPLE_SUBAGENTS_PI_CLI = cli;
+		let runRole: { execute: (...args: any[]) => Promise<any> } | undefined;
+		orchestratorAgentsExtension({ registerTool: (tool: { name: string; execute: (...args: any[]) => Promise<any> }) => { if (tool.name === "run_role_agent") runRole = tool; }, registerCommand() {}, sendMessage() {} } as never);
+		assert.ok(runRole);
+
+		await assert.rejects(() => runRole!.execute("id", { role: "worker", purpose: "implementation", workerProfile: "light", task: "missing expected artifact" }, new AbortController().signal, undefined, { cwd } as never), /worker did not write the expected output artifact/);
+		let state = JSON.parse(fs.readFileSync(path.join(runDir, "orchestration-state.json"), "utf8"));
+		assert.deepEqual(state.workerProfileBindings, { "worker-1": "light" });
+		assert.equal(state.nextWorkerSequence, 2);
+
+		let resumedRunRole: { execute: (...args: any[]) => Promise<any> } | undefined;
+		orchestratorAgentsExtension({ registerTool: (tool: { name: string; execute: (...args: any[]) => Promise<any> }) => { if (tool.name === "run_role_agent") resumedRunRole = tool; }, registerCommand() {}, sendMessage() {} } as never);
+		assert.ok(resumedRunRole);
+		const next = await resumedRunRole.execute("id", { role: "worker", purpose: "implementation", task: "default after failed light worker" }, new AbortController().signal, undefined, { cwd } as never);
+		assert.equal(next.details.workerId, "worker-2");
+		assert.equal(next.details.workerProfile, undefined);
+		state = JSON.parse(fs.readFileSync(path.join(runDir, "orchestration-state.json"), "utf8"));
+		assert.deepEqual(state.workerProfileBindings, { "worker-1": "light", "worker-2": null });
+
+		const resumed = await resumedRunRole.execute("id", { role: "worker", purpose: "fix", workerId: "worker-1", task: "resume omitted profile" }, new AbortController().signal, undefined, { cwd } as never);
+		assert.equal(resumed.details.workerProfile, "light");
+		const argv = JSON.parse(fs.readFileSync(path.join(cwd, "argv-3.json"), "utf8")) as string[];
+		assert.equal(argv[argv.indexOf("--model") + 1], "light-provider/light-model:low");
+	} finally {
+		if (oldRole === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+		else process.env.PI_ORCHESTRATOR_AGENT_ROLE = oldRole;
+		if (oldRunDir === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+		else process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR = oldRunDir;
+		if (oldCli === undefined) delete process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
+		else process.env.PI_SIMPLE_SUBAGENTS_PI_CLI = oldCli;
+	}
+});
+
+test("old orchestration state without workerProfileBindings treats reused worker as default", async () => {
+	const oldRole = process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+	const oldRunDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+	const oldCli = process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
+	try {
+		const cwd = tempProject();
+		const runDir = path.join(cwd, ".pi", "run");
+		fs.mkdirSync(runDir, { recursive: true });
+		fs.writeFileSync(path.join(runDir, "orchestration-state.json"), JSON.stringify({ workerRuns: 1, reviewRuns: 0, reviewRunsSinceLatestWorker: 0, latestWorkerRunReviewedClean: false, latestWorkerId: "worker-7", nextWorkerSequence: 8, updatedAt: new Date(0).toISOString() }), "utf8");
+		const configPath = path.join(cwd, ".pi", "pi-simple-subagents", "config.json");
+		fs.mkdirSync(path.dirname(configPath), { recursive: true });
+		fs.writeFileSync(configPath, JSON.stringify({ workerProfiles: { light: { model: "light-provider/light-model", thinking: "low" } } }), "utf8");
+		const cli = path.join(cwd, "fake-pi.js");
+		fs.writeFileSync(cli, `
+const fs = require("node:fs");
+const path = require("node:path");
+const runDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+const countFile = path.join(process.cwd(), "spawn-count.txt");
+const count = fs.existsSync(countFile) ? Number(fs.readFileSync(countFile, "utf8")) + 1 : 1;
+fs.writeFileSync(countFile, String(count), "utf8");
+const tasksDir = path.join(runDir, "tasks");
+const taskFile = fs.readdirSync(tasksDir).map((name) => path.join(tasksDir, name)).sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)[0];
+const task = fs.readFileSync(taskFile, "utf8");
+const outputFile = /^Expected output artifact: (.+)$/m.exec(task)[1];
+fs.mkdirSync(path.dirname(path.join(runDir, outputFile)), { recursive: true });
+fs.writeFileSync(path.join(runDir, outputFile), outputFile, "utf8");
+console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", provider: "fake", model: "fake-model", content: [{ type: "text", text: outputFile }], stopReason: "stop" } }));
+`, "utf8");
+		process.env.PI_ORCHESTRATOR_AGENT_ROLE = "orchestrator";
+		process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR = runDir;
+		process.env.PI_SIMPLE_SUBAGENTS_PI_CLI = cli;
+		let runRole: { execute: (...args: any[]) => Promise<any> } | undefined;
+		orchestratorAgentsExtension({ registerTool: (tool: { name: string; execute: (...args: any[]) => Promise<any> }) => { if (tool.name === "run_role_agent") runRole = tool; }, registerCommand() {}, sendMessage() {} } as never);
+		assert.ok(runRole);
+
+		await assert.rejects(() => runRole!.execute("id", { role: "worker", purpose: "validation", workerId: "worker-7", workerProfile: "light", task: "explicit light old worker" }, new AbortController().signal, undefined, { cwd } as never), /workerProfile=light conflicts with workerId=worker-7 binding \(default\/unprofiled\)/);
+		assert.equal(fs.existsSync(path.join(cwd, "spawn-count.txt")), false);
+
+		const reused = await runRole.execute("id", { role: "worker", purpose: "fix", task: "fix old worker" }, new AbortController().signal, undefined, { cwd } as never);
+		assert.equal(reused.details.workerId, "worker-7");
+		assert.equal(reused.details.workerProfile, undefined);
+		assert.equal(reused.details.sessionFile, path.join(runDir, "sessions", "worker-7.jsonl"));
+		assert.deepEqual(JSON.parse(fs.readFileSync(path.join(runDir, "orchestration-state.json"), "utf8")).workerProfileBindings, { "worker-7": null });
+		assert.equal(fs.readFileSync(path.join(cwd, "spawn-count.txt"), "utf8"), "1");
+	} finally {
+		if (oldRole === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+		else process.env.PI_ORCHESTRATOR_AGENT_ROLE = oldRole;
+		if (oldRunDir === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+		else process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR = oldRunDir;
+		if (oldCli === undefined) delete process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
+		else process.env.PI_SIMPLE_SUBAGENTS_PI_CLI = oldCli;
+	}
+});
+
 test("run_role_agent rejects oversized worker delegations before spawning", async () => {
 	const oldRole = process.env.PI_ORCHESTRATOR_AGENT_ROLE;
 	const oldRunDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
@@ -1266,6 +1917,127 @@ test("run_role_agent rejects oversized worker delegations before spawning", asyn
 		assert.ok(tool);
 		await assert.rejects(() => tool.execute("id", { role: "worker", purpose: "implementation", task: "implement milestone one" }, new AbortController().signal, undefined, { cwd } as never), /worker delegation task is \d+ bytes, exceeding orchestration\.maxWorkerTaskBytes=8/);
 		assert.equal(fs.existsSync(path.join(runDir, "tasks")), false);
+	} finally {
+		if (oldRole === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+		else process.env.PI_ORCHESTRATOR_AGENT_ROLE = oldRole;
+		if (oldRunDir === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+		else process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR = oldRunDir;
+		if (oldCli === undefined) delete process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
+		else process.env.PI_SIMPLE_SUBAGENTS_PI_CLI = oldCli;
+	}
+});
+
+test("run_role_agent reuses bound workerProfile for follow-up calls and persisted state", async () => {
+	const oldRole = process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+	const oldRunDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+	const oldCli = process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
+	try {
+		const cwd = tempProject();
+		const runDir = path.join(cwd, ".pi", "run");
+		fs.mkdirSync(runDir, { recursive: true });
+		const configPath = path.join(cwd, ".pi", "pi-simple-subagents", "config.json");
+		fs.mkdirSync(path.dirname(configPath), { recursive: true });
+		fs.writeFileSync(configPath, JSON.stringify({ workerProfiles: { light: { model: "light-provider/light-model", thinking: "auto", timeoutMs: 123 } } }), "utf8");
+		const cli = path.join(cwd, "fake-pi.js");
+		fs.writeFileSync(cli, `
+const fs = require("node:fs");
+const path = require("node:path");
+const runDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+const countFile = path.join(process.cwd(), "spawn-count.txt");
+const count = fs.existsSync(countFile) ? Number(fs.readFileSync(countFile, "utf8")) + 1 : 1;
+fs.writeFileSync(countFile, String(count), "utf8");
+fs.writeFileSync(path.join(process.cwd(), "argv-" + count + ".json"), JSON.stringify(process.argv.slice(2)), "utf8");
+const tasksDir = path.join(runDir, "tasks");
+const taskFile = fs.readdirSync(tasksDir).map((name) => path.join(tasksDir, name)).sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)[0];
+const task = fs.readFileSync(taskFile, "utf8");
+fs.writeFileSync(path.join(process.cwd(), "task-" + count + ".txt"), task, "utf8");
+const outputFile = /^Expected output artifact: (.+)$/m.exec(task)[1];
+fs.mkdirSync(path.dirname(path.join(runDir, outputFile)), { recursive: true });
+fs.writeFileSync(path.join(runDir, outputFile), outputFile, "utf8");
+console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", provider: "fake", model: "fake-model", content: [{ type: "text", text: outputFile }], stopReason: "stop" } }));
+`, "utf8");
+		process.env.PI_ORCHESTRATOR_AGENT_ROLE = "orchestrator";
+		process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR = runDir;
+		process.env.PI_SIMPLE_SUBAGENTS_PI_CLI = cli;
+		let runRole: { execute: (...args: any[]) => Promise<any> } | undefined;
+		orchestratorAgentsExtension({ registerTool: (tool: { name: string; execute: (...args: any[]) => Promise<any> }) => { if (tool.name === "run_role_agent") runRole = tool; }, registerCommand() {}, sendMessage() {} } as never);
+		assert.ok(runRole);
+		const parentModel = { provider: "parent", id: "default-model", reasoning: true } as unknown as Model<Api>;
+		const first = await runRole.execute("id", { role: "worker", purpose: "implementation", workerProfile: "light", task: "first" }, new AbortController().signal, undefined, { cwd, model: parentModel } as never);
+		const fix = await runRole.execute("id", { role: "worker", purpose: "fix", task: "fix latest" }, new AbortController().signal, undefined, { cwd, model: parentModel } as never);
+
+		assert.equal(first.details.workerId, "worker-1");
+		assert.equal(first.details.workerProfile, "light");
+		assert.equal(fix.details.workerId, "worker-1");
+		assert.equal(fix.details.workerProfile, "light");
+		assert.match(fix.content[0].text, /Worker profile: light/);
+		assert.match(fs.readFileSync(path.join(cwd, "task-2.txt"), "utf8"), /Worker profile: light/);
+		for (const index of [1, 2]) {
+			const argv = JSON.parse(fs.readFileSync(path.join(cwd, `argv-${index}.json`), "utf8")) as string[];
+			const modelArgIndex = argv.indexOf("--model");
+			assert.equal(argv[modelArgIndex + 1], "light-provider/light-model:high");
+		}
+		assert.deepEqual(JSON.parse(fs.readFileSync(path.join(runDir, "orchestration-state.json"), "utf8")).workerProfileBindings, { "worker-1": "light" });
+
+		let resumedRunRole: { execute: (...args: any[]) => Promise<any> } | undefined;
+		orchestratorAgentsExtension({ registerTool: (tool: { name: string; execute: (...args: any[]) => Promise<any> }) => { if (tool.name === "run_role_agent") resumedRunRole = tool; }, registerCommand() {}, sendMessage() {} } as never);
+		assert.ok(resumedRunRole);
+		const validation = await resumedRunRole.execute("id", { role: "worker", purpose: "validation", task: "validate latest" }, new AbortController().signal, undefined, { cwd, model: parentModel } as never);
+		assert.equal(validation.details.workerId, "worker-1");
+		assert.equal(validation.details.workerProfile, "light");
+		const argv = JSON.parse(fs.readFileSync(path.join(cwd, "argv-3.json"), "utf8")) as string[];
+		assert.equal(argv[argv.indexOf("--model") + 1], "light-provider/light-model:high");
+	} finally {
+		if (oldRole === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+		else process.env.PI_ORCHESTRATOR_AGENT_ROLE = oldRole;
+		if (oldRunDir === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+		else process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR = oldRunDir;
+		if (oldCli === undefined) delete process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
+		else process.env.PI_SIMPLE_SUBAGENTS_PI_CLI = oldCli;
+	}
+});
+
+test("run_role_agent rejects workerProfile mismatches before spawning", async () => {
+	const oldRole = process.env.PI_ORCHESTRATOR_AGENT_ROLE;
+	const oldRunDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+	const oldCli = process.env.PI_SIMPLE_SUBAGENTS_PI_CLI;
+	try {
+		const cwd = tempProject();
+		const runDir = path.join(cwd, ".pi", "run");
+		fs.mkdirSync(runDir, { recursive: true });
+		const configPath = path.join(cwd, ".pi", "pi-simple-subagents", "config.json");
+		fs.mkdirSync(path.dirname(configPath), { recursive: true });
+		fs.writeFileSync(configPath, JSON.stringify({ workerProfiles: { light: { model: "light-provider/light-model", thinking: "low" } } }), "utf8");
+		const cli = path.join(cwd, "fake-pi.js");
+		fs.writeFileSync(cli, `
+const fs = require("node:fs");
+const path = require("node:path");
+const runDir = process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR;
+const countFile = path.join(process.cwd(), "spawn-count.txt");
+const count = fs.existsSync(countFile) ? Number(fs.readFileSync(countFile, "utf8")) + 1 : 1;
+fs.writeFileSync(countFile, String(count), "utf8");
+const tasksDir = path.join(runDir, "tasks");
+const taskFile = fs.readdirSync(tasksDir).map((name) => path.join(tasksDir, name)).sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)[0];
+const task = fs.readFileSync(taskFile, "utf8");
+const outputFile = /^Expected output artifact: (.+)$/m.exec(task)[1];
+fs.mkdirSync(path.dirname(path.join(runDir, outputFile)), { recursive: true });
+fs.writeFileSync(path.join(runDir, outputFile), outputFile, "utf8");
+console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", provider: "fake", model: "fake-model", content: [{ type: "text", text: outputFile }], stopReason: "stop" } }));
+`, "utf8");
+		process.env.PI_ORCHESTRATOR_AGENT_ROLE = "orchestrator";
+		process.env.PI_ORCHESTRATOR_AGENT_RUN_DIR = runDir;
+		process.env.PI_SIMPLE_SUBAGENTS_PI_CLI = cli;
+		let runRole: { execute: (...args: any[]) => Promise<any> } | undefined;
+		orchestratorAgentsExtension({ registerTool: (tool: { name: string; execute: (...args: any[]) => Promise<any> }) => { if (tool.name === "run_role_agent") runRole = tool; }, registerCommand() {}, sendMessage() {} } as never);
+		assert.ok(runRole);
+		await runRole.execute("id", { role: "worker", purpose: "implementation", task: "default worker" }, new AbortController().signal, undefined, { cwd } as never);
+		await assert.rejects(() => runRole!.execute("id", { role: "worker", purpose: "fix", workerProfile: "light", task: "wrong profile" }, new AbortController().signal, undefined, { cwd } as never), /workerProfile=light conflicts with workerId=worker-1 binding \(default\/unprofiled\)/);
+		assert.equal(fs.readFileSync(path.join(cwd, "spawn-count.txt"), "utf8"), "1");
+
+		await runRole.execute("id", { role: "worker", purpose: "implementation", workerProfile: "light", task: "light worker" }, new AbortController().signal, undefined, { cwd } as never);
+		await assert.rejects(() => runRole!.execute("id", { role: "worker", purpose: "fix", workerId: "worker-2", workerProfile: "heavy", task: "invalid profile" }, new AbortController().signal, undefined, { cwd } as never), /workerProfile=heavy is not supported/);
+		assert.equal(fs.readFileSync(path.join(cwd, "spawn-count.txt"), "utf8"), "2");
+		assert.deepEqual(JSON.parse(fs.readFileSync(path.join(runDir, "orchestration-state.json"), "utf8")).workerProfileBindings, { "worker-1": null, "worker-2": "light" });
 	} finally {
 		if (oldRole === undefined) delete process.env.PI_ORCHESTRATOR_AGENT_ROLE;
 		else process.env.PI_ORCHESTRATOR_AGENT_ROLE = oldRole;

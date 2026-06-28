@@ -1,4 +1,4 @@
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -11,6 +11,27 @@ import { readOrchestrationState } from "../extensions/pi-simple-subagents/state.
 
 function tempProject(): string {
 	return fs.mkdtempSync(path.join(os.tmpdir(), "pi-simple-subagents-test-"));
+}
+
+function writeConfig(root: string, relativePath: string, config: unknown): void {
+	const configPath = path.join(root, relativePath);
+	fs.mkdirSync(path.dirname(configPath), { recursive: true });
+	fs.writeFileSync(configPath, JSON.stringify(config), "utf8");
+}
+
+function withTempHome(t: TestContext): string {
+	const home = tempProject();
+	const previousHome = process.env.HOME;
+	const previousUserProfile = process.env.USERPROFILE;
+	process.env.HOME = home;
+	process.env.USERPROFILE = home;
+	t.after(() => {
+		if (previousHome === undefined) delete process.env.HOME;
+		else process.env.HOME = previousHome;
+		if (previousUserProfile === undefined) delete process.env.USERPROFILE;
+		else process.env.USERPROFILE = previousUserProfile;
+	});
+	return home;
 }
 
 test("default config keeps YOLO roles but adds child/reference guardrails", () => {
@@ -43,6 +64,7 @@ test("guardrail config keys are parsed and pre-1.0 legacy keys are not accepted"
 	fs.mkdirSync(path.dirname(configPath), { recursive: true });
 	fs.writeFileSync(configPath, JSON.stringify({
 		roles: { worker: { model: "openai-codex/gpt-5.5", thinking: "low", timeoutMs: 3 } },
+		workerProfiles: { light: { model: "openai-codex/gpt-5.3-spark", thinking: "auto", timeoutMs: 4 } },
 		children: { timeoutMs: 1, maxConcurrentSubagents: 2 },
 		orchestration: { maxWorkerTaskBytes: 2 },
 		references: { maxFileBytes: 1, allowOutsideCwd: true, allowBinary: true },
@@ -53,6 +75,7 @@ test("guardrail config keys are parsed and pre-1.0 legacy keys are not accepted"
 
 	assert.equal(config.roles.worker.thinking, "low");
 	assert.equal(config.roles.worker.timeoutMs, 3);
+	assert.deepEqual(config.workerProfiles.light, { model: "openai-codex/gpt-5.3-spark", thinking: "auto", timeoutMs: 4 });
 	assert.equal(getRoleTimeoutMs(config, "worker"), 3);
 	assert.equal(config.children.timeoutMs, 1);
 	assert.equal(config.children.maxConcurrentSubagents, 2);
@@ -63,6 +86,9 @@ test("guardrail config keys are parsed and pre-1.0 legacy keys are not accepted"
 	assert.equal(config.artifacts.baseDir, ".pi/custom-runs");
 	assert.equal(config.artifacts.cleanup.maxAgeMs, 1000);
 	assert.equal(config.artifacts.cleanup.maxTotalBytes, 2048);
+
+	fs.writeFileSync(configPath, JSON.stringify({ workerProfiles: { light: { model: "light-only-model" } } }), "utf8");
+	assert.deepEqual(loadConfig(cwd).workerProfiles.light, { model: "light-only-model", thinking: "auto" });
 
 	fs.writeFileSync(configPath, JSON.stringify({ workflow: {} }), "utf8");
 	assert.throws(() => loadConfig(cwd), /root contains unknown key: workflow/);
@@ -79,11 +105,39 @@ test("guardrail config keys are parsed and pre-1.0 legacy keys are not accepted"
 	fs.writeFileSync(configPath, JSON.stringify({ children: { inheritSkills: false } }), "utf8");
 	assert.throws(() => loadConfig(cwd), /children contains unknown key: inheritSkills/);
 
+	fs.writeFileSync(configPath, JSON.stringify({ workerProfiles: { medium: { model: "x" } } }), "utf8");
+	assert.throws(() => loadConfig(cwd), /workerProfiles contains unknown key: medium/);
+
+	fs.writeFileSync(configPath, JSON.stringify({ workerProfiles: { light: { thinkng: "high" } } }), "utf8");
+	assert.throws(() => loadConfig(cwd), /workerProfiles\.light contains unknown key: thinkng/);
+
+	fs.writeFileSync(configPath, JSON.stringify({ workerProfiles: { light: { thinking: "high" } } }), "utf8");
+	assert.throws(() => loadConfig(cwd), /workerProfiles\.light\.model is required/);
+
 	fs.writeFileSync(configPath, JSON.stringify({ children: { maxConcurrentSubagents: 0 } }), "utf8");
 	assert.throws(() => loadConfig(cwd), /children\.maxConcurrentSubagents must be a positive integer/);
 
 	fs.writeFileSync(configPath, JSON.stringify({ children: { piCliPath: "/tmp/pi" } }), "utf8");
 	assert.throws(() => loadConfig(cwd), /piCliPath is only allowed in the global config/);
+});
+
+test("worker profile config inherits, deep-merges, and supports project null-disable", (t) => {
+	const home = withTempHome(t);
+	const cwd = tempProject();
+	const globalConfigPath = path.join(".pi", "agent", "pi-simple-subagents", "config.json");
+	const projectConfigPath = path.join(".pi", "pi-simple-subagents", "config.json");
+
+	writeConfig(home, globalConfigPath, { workerProfiles: { light: { model: "global-light-model", thinking: "low", timeoutMs: 7 } } });
+	assert.deepEqual(loadConfig(cwd).workerProfiles.light, { model: "global-light-model", thinking: "low", timeoutMs: 7 });
+
+	writeConfig(cwd, projectConfigPath, { workerProfiles: { light: { thinking: "high" } } });
+	assert.deepEqual(loadConfig(cwd).workerProfiles.light, { model: "global-light-model", thinking: "high", timeoutMs: 7 });
+
+	writeConfig(cwd, projectConfigPath, { workerProfiles: {} });
+	assert.deepEqual(loadConfig(cwd).workerProfiles.light, { model: "global-light-model", thinking: "low", timeoutMs: 7 });
+
+	writeConfig(cwd, projectConfigPath, { workerProfiles: { light: null } });
+	assert.equal(loadConfig(cwd).workerProfiles.light, undefined);
 });
 
 test("project config cannot move artifact cleanup outside the workspace", () => {
@@ -470,4 +524,30 @@ test("corrupt orchestration state is quarantined and ignored", () => {
 
 	assert.equal(state, undefined);
 	assert.equal(quarantined.length, 1);
+});
+
+test("invalid parseable worker profile binding state is quarantined and ignored", () => {
+	const cases = [
+		{ name: "non-object", workerProfileBindings: "light" },
+		{ name: "empty-worker-id", workerProfileBindings: { "": null } },
+		{ name: "unsupported-profile", workerProfileBindings: { "worker-1": "heavy" } },
+	];
+	for (const entry of cases) {
+		const runDir = tempProject();
+		writeArtifact(runDir, "orchestration-state.json", JSON.stringify({
+			workerRuns: 0,
+			reviewRuns: 0,
+			reviewRunsSinceLatestWorker: 0,
+			latestWorkerRunReviewedClean: false,
+			nextWorkerSequence: 1,
+			workerProfileBindings: entry.workerProfileBindings,
+			updatedAt: new Date(0).toISOString(),
+		}));
+
+		const state = readOrchestrationState(runDir);
+		const quarantined = fs.readdirSync(runDir).filter((name) => name.startsWith("orchestration-state.invalid-"));
+
+		assert.equal(state, undefined, entry.name);
+		assert.equal(quarantined.length, 1, entry.name);
+	}
 });

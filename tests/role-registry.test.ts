@@ -5,7 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { Api, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { resolveRoleSessionFile } from "../extensions/pi-simple-subagents/artifacts.ts";
-import { applyThinking, DEFAULT_CONFIG, roleAutoThinking, resolveModelThinking, type RoleConfig } from "../extensions/pi-simple-subagents/config.ts";
+import { applyThinking, DEFAULT_CONFIG, nextHigherThinkingLevel, roleAutoThinking, resolveModelThinking, type RoleConfig } from "../extensions/pi-simple-subagents/config.ts";
 import { reviewTargetSystemPrompt, roleSystemPrompt } from "../extensions/pi-simple-subagents/prompts.ts";
 import { ROLE_METADATA, DELEGABLE_ROLE_NAMES, ROLE_PURPOSE_VALUES, type RoleName } from "../extensions/pi-simple-subagents/role-registry.ts";
 import { RoleRunParams } from "../extensions/pi-simple-subagents/schemas.ts";
@@ -66,6 +66,8 @@ test("orchestrator prompt preserves worker package and review policy semantics",
 	assert.match(prompt, /reuse the affected package's workerId/i);
 	assert.match(prompt, /new narrow final-fix worker package/i);
 	assert.match(prompt, /inspect provided\/current artifacts/i);
+	assert.match(prompt, /no light worker profile is configured/i);
+	assert.match(roleSystemPrompt("orchestrator", tempProject(), { ...DEFAULT_CONFIG, workerProfiles: { light: { model: "light-model", thinking: "auto" } } }), /workerProfile=light is available/i);
 	assert.match(prompt, /Run scout only when it will materially reduce uncertainty, total cost, or implementation\/review risk/i);
 	assert.match(prompt, /When scout is needed, run it in a fresh session; otherwise reuse adequate current scout\/context artifacts/i);
 	assert.doesNotMatch(prompt, /Scout is fresh; orchestrator persists/i);
@@ -107,6 +109,7 @@ test("prompts preserve artifact, reviewer safety, and finding-threshold semantic
 
 test("delegable registry roles match run_role_agent schema and keep synthesis private", () => {
 	assert.deepEqual((RoleRunParams.properties.role as unknown as { enum: string[] }).enum, [...DELEGABLE_ROLE_NAMES]);
+	assert.deepEqual((RoleRunParams.properties.workerProfile as unknown as { enum: string[] }).enum, ["light"]);
 	assert.deepEqual(DELEGABLE_ROLE_NAMES, ["scout", "worker", "verifier", "reviewer"]);
 	assert.equal(DELEGABLE_ROLE_NAMES.includes("synthesis" as never), false);
 	assert.equal(DELEGABLE_ROLE_NAMES.includes("orchestrator" as never), false);
@@ -165,6 +168,13 @@ test("roleAutoThinking resolves the correct level per role and available levels"
 
 	// worker with ["off","minimal","high"] → "high" (prefer higher over medium)
 	assert.equal(roleAutoThinking("worker", ["off", "minimal", "high"]), "high");
+
+	assert.equal(nextHigherThinkingLevel("medium", allLevels), "high");
+	assert.equal(nextHigherThinkingLevel("high", allLevels), "xhigh");
+	assert.equal(nextHigherThinkingLevel("xhigh", allLevels), "xhigh");
+	assert.equal(nextHigherThinkingLevel("medium", ["off", "xhigh"]), "xhigh");
+	assert.equal(nextHigherThinkingLevel("high", ["off", "medium", "high"]), "high");
+	assert.equal(nextHigherThinkingLevel("medium"), "high");
 
 	// synthesis uses the smallest supported non-off level
 	assert.equal(roleAutoThinking("synthesis", allLevels), "minimal");
@@ -241,6 +251,16 @@ test("resolveModelThinking handles auto model/thinking with and without parentMo
 	assert.deepEqual(
 		resolveModelThinking(parentModel, { model: "auto", thinking: "minimal" }, "worker"),
 		{ model: "custom-provider/custom/model", thinking: "minimal" },
+	);
+
+	// light worker profile auto thinking → one level above default worker thinking
+	assert.deepEqual(
+		resolveModelThinking(reasoningParent, { model: "auto", thinking: "auto" }, "worker", { autoThinking: "worker-plus-one", baseThinking: "medium" }),
+		{ model: "reasoning-provider/reasoning/model", thinking: "high" },
+	);
+	assert.deepEqual(
+		resolveModelThinking(reasoningParent, { model: "explicit-light", thinking: "auto" }, "worker", { autoThinking: "worker-plus-one", baseThinking: "medium" }),
+		{ model: "explicit-light", thinking: "high" },
 	);
 
 	// model: "auto" with fine-grained parentModel that has high and xhigh thinking → orchestrator still prefers high

@@ -1,7 +1,8 @@
-import { getRoleTimeoutMs, type Config } from "./config.ts";
+import { getRoleTimeoutMs, type Config, type RoleConfig } from "./config.ts";
 import { roleById, type RoleName } from "./role-registry.ts";
 
-function describeTimeout(config: Config, role: RoleName): string {
+function describeTimeout(config: Config, role: RoleName, roleConfigOverride?: RoleConfig): string {
+	if (roleConfigOverride?.timeoutMs !== undefined) return roleConfigOverride.timeoutMs === 0 ? "Timeout disabled by effective role timeoutMs=0." : `Timeout: effective role timeoutMs=${roleConfigOverride.timeoutMs} ms.`;
 	const roleOverride = config.roles[role].timeoutMs;
 	const timeoutMs = getRoleTimeoutMs(config, role);
 	if (roleOverride !== undefined) return timeoutMs === 0 ? `Timeout disabled by roles.${role}.timeoutMs=0.` : `Timeout: roles.${role}.timeoutMs=${timeoutMs} ms.`;
@@ -20,8 +21,8 @@ function reviewFindingThreshold(): string {
 	return "Finding threshold: report every evidence-backed issue likely to measurably improve correctness, security, reliability, performance/cost, packaging, UX, docs accuracy, or test/maintenance risk. Do not cap findings to a top-N list; include all threshold-meeting blockers/fixes, ordered by severity/impact. Include impact and practical verification/measurement when possible. Omit speculative, cosmetic/style-only, LLM-suboptimality, and micro-optimization items unless they prevent a concrete failure mode; write `None` for empty sections.";
 }
 
-function commonForRole(runDir: string, config: Config, role: RoleName): string {
-	return `Artifact directory: ${runDir}\nYOLO mode: no extension-enforced source/snapshot/role-write sandbox. ${describeTimeout(config, role)} Normal Pi tools are available. ${artifactRule()} Be evidence-backed and cite paths. ${compactRule("original task/target")}`;
+function commonForRole(runDir: string, config: Config, role: RoleName, roleConfigOverride?: RoleConfig): string {
+	return `Artifact directory: ${runDir}\nYOLO mode: no extension-enforced source/snapshot/role-write sandbox. ${describeTimeout(config, role, roleConfigOverride)} Normal Pi tools are available. ${artifactRule()} Be evidence-backed and cite paths. ${compactRule("original task/target")}`;
 }
 
 function reviewOnlyRule(scope = "target/project/source files or generated outputs"): string {
@@ -32,8 +33,13 @@ function synthesisGuidance(): string {
 	return `Do not invent findings. Deduplicate and prioritize reviewer evidence, but do not reduce actionable items to a top-N shortlist. Preserve every actionable blocker/fix that meets the threshold with severity, source reviewer, evidence, impact, fix, and verification when practical. Note agreement/dispute/low confidence; keep optional items short.`;
 }
 
-export function roleSystemPrompt(role: RoleName, runDir: string, config: Config): string {
-	const common = commonForRole(runDir, config, role);
+function workerProfileGuidance(config: Config): string {
+	if (!config.workerProfiles.light) return "Worker profiles: no light worker profile is configured; omit workerProfile for a new/unbound worker to use the normal/default worker.";
+	return "Worker profiles: workerProfile=light is available for small, bounded, low-risk worker implementation/fix/validation packages where lower cost/latency is worth using the configured lighter worker model. Its thinking=auto resolves one level above the default worker thinking. Omit workerProfile for a new/unbound worker to use the normal/default worker; follow-ups with the same workerId reuse the bound profile. Use a new worker package/workerId for a different/default profile.";
+}
+
+export function roleSystemPrompt(role: RoleName, runDir: string, config: Config, options: { roleConfigOverride?: RoleConfig } = {}): string {
+	const common = commonForRole(runDir, config, role, options.roleConfigOverride);
 	const promptKind = roleById(role).promptKind;
 	if (promptKind === "orchestrator") return `You are the orchestrator for a Pi multi-agent workflow.
 
@@ -44,6 +50,7 @@ Coordinate scout/worker/verifier/reviewer via run_role_agent; do not ask child a
 Session/review policy:
 - Before workers, inspect provided/current artifacts and user context (for example input-plan.md, orchestration.md, scout.md, prior review/verification summaries) and cite what you reused or why it was insufficient in orchestration.md.
 - Decompose broad milestones into small packages in orchestration.md; never delegate a whole milestone/plan section or multiple independent deliverables to one worker.
+- ${workerProfileGuidance(config)}
 - One new worker session per implementation package: call role=worker purpose=implementation without workerId so the tool assigns worker-1, worker-2, etc.
 - Accepted fixes/validation for that package reuse the same workerId; explicit workerId is preferred. If workerId is omitted for fix/validation, the latest worker is reused.
 - Default: verify each completed implementation package before review, and review each verified package before starting the next. Batch only when low-risk, mutually incomplete, or cheaper together; record the rationale in orchestration.md.

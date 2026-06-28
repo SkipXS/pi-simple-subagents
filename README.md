@@ -334,7 +334,7 @@ Global defaults:
 ~/.pi/agent/pi-simple-subagents/config.json
 ```
 
-Project config overrides global config, except `children.piCliPath` is allowed only in global config or `PI_SIMPLE_SUBAGENTS_PI_CLI` because it selects an executable.
+Project config is deep-merged over global config; omitted nested fields keep earlier defaults/global values. `children.piCliPath` is allowed only in global config or `PI_SIMPLE_SUBAGENTS_PI_CLI` because it selects an executable.
 
 ```json
 {
@@ -346,6 +346,7 @@ Project config overrides global config, except `children.piCliPath` is allowed o
     "reviewer": { "model": "auto", "thinking": "auto" },
     "synthesis": { "model": "auto", "thinking": "auto" }
   },
+  "workerProfiles": {},
   "children": {
     "forwardCurrentExtension": "auto",
     "timeoutMs": 1800000,
@@ -370,6 +371,25 @@ Setting a role's `model` to `"auto"` makes it use the parent Pi model at child s
 When both are `"auto"`, the child process inherits the parent's model identity and applies role-appropriate thinking. This is the recommended starting point because it keeps all roles on the same model family for better prompt-cache reuse and consistent behavior, while varying only thinking effort when the model supports it. For example, DeepSeek V4 Pro supports effectively `off`, `high`, and `xhigh`, so auto selects `xhigh` for orchestrator and `high` for worker/verifier/reviewer/synthesis, with scout `off`; GPT-style fine-grained models use `high` for orchestrator, `medium` for worker/reviewer, `low` for verifier, and `minimal` for synthesis.
 
 Explicit model/thinking values still work as before and are fully backwards compatible. Use an explicit `model` when you want a different model per role, and an explicit `thinking` when you want to override the role default.
+
+### Optional light worker profile
+
+You can configure an optional `workerProfiles.light` for the orchestrator to select on small, bounded, low-risk worker packages. The normal/default worker remains `roles.worker`; omitting `workerProfile` keeps that behavior. A worker's first effective profile is sticky per `workerId`: omitted follow-ups reuse it, an explicit different profile rejects, and changing profile requires a new workerId/package. When the light profile has `thinking: "auto"`, it resolves one level above the default worker's resolved thinking level, so a smaller/cheaper model can compensate with more reasoning effort.
+
+Global config is loaded first and project config is deep-merged on top. A newly configured `workerProfiles.light` must include `model`; partial project overrides such as only `thinking` or `timeoutMs` are valid only when they merge over an inherited global light profile. A project `workerProfiles: {}` leaves an inherited global light profile unchanged. To disable an inherited global light profile for one project, set `"workerProfiles": { "light": null }`; after that, explicit `workerProfile: "light"` is rejected as not configured. Omit `workerProfile` to use the normal/default worker.
+
+```json
+{
+  "workerProfiles": {
+    "light": {
+      "model": "<provider/light-worker-model>",
+      "thinking": "auto"
+    }
+  }
+}
+```
+
+The orchestrator is prompted to use `workerProfile: "light"` only for low-risk, well-scoped implementation/fix/validation tasks and to omit it for broad, architectural, security-sensitive, packaging, cross-file, or ambiguous work.
 
 ### Choosing role models
 
@@ -423,7 +443,7 @@ Use these thinking levels unless they are unsupported by the selected model/prov
 - reviewer: medium
 - synthesis: medium
 
-Update .pi/pi-simple-subagents/config.json. Preserve any existing non-role settings such as children, orchestration, references, and artifacts. If the file does not exist, create it with a valid JSON object. Validate the resulting JSON and summarize the role configuration you wrote.
+Update .pi/pi-simple-subagents/config.json. Preserve any existing non-role settings such as workerProfiles, children, orchestration, references, and artifacts. If the file does not exist, create it with a valid JSON object. Validate the resulting JSON and summarize the role configuration you wrote.
 ```
 
 **Different models per role**
@@ -439,7 +459,7 @@ Use these role settings:
 - reviewer: model <provider/model-for-reviewer>, thinking medium
 - synthesis: model <provider/model-for-synthesis>, thinking medium
 
-Update .pi/pi-simple-subagents/config.json. Preserve any existing non-role settings such as children, orchestration, references, and artifacts. If the file does not exist, create it with a valid JSON object. Validate the resulting JSON and summarize the role configuration you wrote.
+Update .pi/pi-simple-subagents/config.json. Preserve any existing non-role settings such as workerProfiles, children, orchestration, references, and artifacts. If the file does not exist, create it with a valid JSON object. Validate the resulting JSON and summarize the role configuration you wrote.
 ```
 
 Full table: [Configuration reference](docs/reference.md#configuration-reference).

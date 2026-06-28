@@ -2,6 +2,8 @@ import * as fs from "node:fs";
 import { resolveArtifactPath, writeArtifact } from "./artifacts.ts";
 import { isObject } from "./roles.ts";
 
+export type WorkerProfileBinding = "light" | null;
+
 export interface OrchestrationState {
 	workerRuns: number;
 	reviewRuns: number;
@@ -9,12 +11,25 @@ export interface OrchestrationState {
 	latestWorkerRunReviewedClean: boolean;
 	latestWorkerId?: string;
 	nextWorkerSequence: number;
+	workerProfileBindings: Record<string, WorkerProfileBinding>;
 	updatedAt: string;
 }
 
 function nonNegativeInteger(value: unknown, name: string): number {
 	if (!Number.isInteger(value) || Number(value) < 0) throw new Error(`${name} must be a non-negative integer`);
 	return Number(value);
+}
+
+function readWorkerProfileBindings(value: unknown): Record<string, WorkerProfileBinding> {
+	if (value === undefined) return {};
+	if (!isObject(value)) throw new Error("workerProfileBindings must be an object");
+	const bindings: Record<string, WorkerProfileBinding> = {};
+	for (const [workerId, profile] of Object.entries(value)) {
+		if (!workerId.trim()) throw new Error("workerProfileBindings keys must be non-empty worker ids");
+		if (profile !== null && profile !== "light") throw new Error(`workerProfileBindings.${workerId} must be null or \"light\"`);
+		bindings[workerId] = profile;
+	}
+	return bindings;
 }
 
 function quarantineInvalidState(runDir: string, statePath: string, message: string): void {
@@ -45,6 +60,7 @@ export function readOrchestrationState(runDir: string): OrchestrationState | und
 			latestWorkerRunReviewedClean: parsed.latestWorkerRunReviewedClean === true,
 			...(typeof parsed.latestWorkerId === "string" && parsed.latestWorkerId.trim() ? { latestWorkerId: parsed.latestWorkerId } : {}),
 			nextWorkerSequence: nonNegativeInteger(parsed.nextWorkerSequence ?? workerRuns + 1, "nextWorkerSequence"),
+			workerProfileBindings: readWorkerProfileBindings(parsed.workerProfileBindings),
 			updatedAt: parsed.updatedAt ?? new Date(0).toISOString(),
 		};
 	} catch (error) {

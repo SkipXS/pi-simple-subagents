@@ -1,6 +1,7 @@
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type, type Static } from "typebox";
 import { ROLE_RUN_PURPOSES, WORKER_PURPOSES } from "./constants.ts";
+import { WORKER_PROFILE_NAMES } from "./config.ts";
 import { DELEGABLE_ROLE_NAMES } from "./role-registry.ts";
 
 export const RoleRunParams = Type.Object({
@@ -9,6 +10,7 @@ export const RoleRunParams = Type.Object({
 	task: Type.String({ minLength: 1, description: "Concrete task for the role. For worker, pass one small work package only—not an entire milestone or full plan section. Include artifact paths, expected output file, likely files, constraints/non-goals, acceptance criteria, validation, and relevant prior artifacts/context." }),
 	round: Type.Optional(Type.Integer({ minimum: 1, description: "Optional review/fix round number for artifact labels and status display." })),
 	workerId: Type.Optional(Type.String({ minLength: 1, description: "Worker session id for role=worker. Omit for a new implementation work package; pass the same id (for example worker-2) for fixes after reviewing that worker's work. If omitted for fix/validation, the latest worker is reused." })),
+	workerProfile: Type.Optional(StringEnum(WORKER_PROFILE_NAMES, { description: "Optional worker profile for role=worker only. Use light for bounded, low-risk tasks when configured; explicit workerProfile=\"light\" is rejected when workerProfiles.light is unset/disabled, so omit workerProfile to use the default worker. Its auto thinking resolves one level above the default worker's resolved thinking. The first effective profile is sticky per workerId: omitted follow-ups reuse it, explicit mismatches reject, and a different profile requires a new workerId/package." })),
 	outputFile: Type.Optional(Type.String({ minLength: 1, description: "Expected handoff artifact filename inside the run dir, e.g. scout.md, worker-round-1.md, verification-round-1.md, review-round-1.md, validation.md. Defaults avoid overwriting existing role artifacts; explicit names should still be unique and must not use reserved run dirs." })),
 });
 export type RoleRunParams = Static<typeof RoleRunParams>;

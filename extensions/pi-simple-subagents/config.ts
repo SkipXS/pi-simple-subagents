@@ -15,12 +15,19 @@ export interface RoleConfig {
 	timeoutMs?: number;
 }
 
+export const WORKER_PROFILE_NAMES = ["light"] as const;
+export type WorkerProfileName = typeof WORKER_PROFILE_NAMES[number];
+export type WorkerProfilesConfig = Partial<Record<WorkerProfileName, RoleConfig>>;
+type WorkerProfilesOverride = Partial<Record<WorkerProfileName, Partial<RoleConfig> | null>>;
+
 export const EXTENSION_FORWARD_MODES = ["auto", "always", "never"] as const;
 
 export type ExtensionForwardMode = typeof EXTENSION_FORWARD_MODES[number];
 
 export interface Config {
 	roles: Record<RoleName, RoleConfig>;
+	/** Optional alternate worker model profiles selectable by the orchestrator for role=worker. */
+	workerProfiles: WorkerProfilesConfig;
 	children: {
 		forwardCurrentExtension: ExtensionForwardMode;
 		/** Child process timeout in milliseconds. Use 0 to disable. */
@@ -56,6 +63,7 @@ export const DEFAULT_CONFIG: Config = {
 		...(Object.fromEntries(ROLE_METADATA.map((role) => [role.id, { ...role.defaultConfig }])) as Record<RoleName, RoleConfig>),
 		orchestrator: { ...ROLE_METADATA.find((role) => role.id === "orchestrator")!.defaultConfig, timeoutMs: 0 },
 	},
+	workerProfiles: {},
 	children: {
 		forwardCurrentExtension: "auto",
 		timeoutMs: 30 * 60 * 1000,
@@ -75,6 +83,7 @@ export const DEFAULT_CONFIG: Config = {
 function cloneConfig(config: Config): Config {
 	return {
 		roles: Object.fromEntries(ROLE_NAMES.map((role) => [role, { ...config.roles[role] }])) as Record<RoleName, RoleConfig>,
+		workerProfiles: Object.fromEntries(WORKER_PROFILE_NAMES.flatMap((profile) => config.workerProfiles[profile] ? [[profile, { ...config.workerProfiles[profile] }]] : [])) as WorkerProfilesConfig,
 		children: { ...config.children },
 		orchestration: { ...config.orchestration },
 		references: { ...config.references },
@@ -166,7 +175,7 @@ function assertProjectArtifactCleanupAllowed(baseDir: string, source: string, cw
 function mergeConfig(base: Config, override: unknown, source = "unknown", options: { allowPiCliPath?: boolean; projectCwd?: string } = {}): Config {
 	if (override === undefined) return cloneConfig(base);
 	const overrideObject = expectObject(override, source, "root");
-	rejectUnknownKeys(overrideObject, source, "root", ["roles", "children", "orchestration", "references", "artifacts"]);
+	rejectUnknownKeys(overrideObject, source, "root", ["roles", "workerProfiles", "children", "orchestration", "references", "artifacts"]);
 	const next = cloneConfig(base);
 
 	if (overrideObject.roles !== undefined) {
@@ -181,6 +190,26 @@ function mergeConfig(base: Config, override: unknown, source = "unknown", option
 			if (roleObject.thinking !== undefined) roleConfig.thinking = expectThinking(roleObject.thinking, source, `roles.${role}.thinking`);
 			if (roleObject.timeoutMs !== undefined) roleConfig.timeoutMs = expectNonNegativeInteger(roleObject.timeoutMs, source, `roles.${role}.timeoutMs`);
 			next.roles[role] = roleConfig;
+		}
+	}
+
+	if (overrideObject.workerProfiles !== undefined) {
+		const workerProfiles = expectObject(overrideObject.workerProfiles, source, "workerProfiles") as WorkerProfilesOverride;
+		rejectUnknownKeys(workerProfiles, source, "workerProfiles", WORKER_PROFILE_NAMES);
+		for (const profile of WORKER_PROFILE_NAMES) {
+			if (workerProfiles[profile] === undefined) continue;
+			if (workerProfiles[profile] === null) {
+				delete next.workerProfiles[profile];
+				continue;
+			}
+			const profileObject = expectObject(workerProfiles[profile], source, `workerProfiles.${profile}`);
+			rejectUnknownKeys(profileObject, source, `workerProfiles.${profile}`, ["model", "thinking", "timeoutMs"]);
+			if (profileObject.model === undefined && next.workerProfiles[profile] === undefined) throw configError(source, `workerProfiles.${profile}.model is required`);
+			const profileConfig: RoleConfig = { ...(next.workerProfiles[profile] ?? { model: "auto", thinking: "auto" }) };
+			if (profileObject.model !== undefined) profileConfig.model = expectModel(profileObject.model, source, `workerProfiles.${profile}.model`);
+			if (profileObject.thinking !== undefined) profileConfig.thinking = expectThinking(profileObject.thinking, source, `workerProfiles.${profile}.thinking`);
+			if (profileObject.timeoutMs !== undefined) profileConfig.timeoutMs = expectNonNegativeInteger(profileObject.timeoutMs, source, `workerProfiles.${profile}.timeoutMs`);
+			next.workerProfiles[profile] = profileConfig;
 		}
 	}
 
@@ -260,6 +289,7 @@ export function applyThinking(model: string, thinking: string | undefined): stri
 }
 
 const THINKING_PRIORITY: ModelThinkingLevel[] = ["xhigh", "high", "medium", "low", "minimal", "off"];
+const THINKING_ASCENDING: ModelThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
 const FALLBACK_AUTO_MODEL = "openai-codex/gpt-5.5";
 const FALLBACK_AUTO_THINKING: Record<RoleName, ModelThinkingLevel> = {
 	orchestrator: "high",
@@ -280,6 +310,20 @@ const FALLBACK_AUTO_THINKING: Record<RoleName, ModelThinkingLevel> = {
  * - worker, reviewer: medium or next higher, fall back to highest available
  * - synthesis: smallest supported non-off level for light deduplication/reasoning, otherwise "off"
  */
+export function nextHigherThinkingLevel(base: string | undefined, supportedLevels?: ModelThinkingLevel[]): ModelThinkingLevel {
+	const baseIndex = THINKING_ASCENDING.indexOf((base ?? "off") as ModelThinkingLevel);
+	const normalizedBaseIndex = baseIndex >= 0 ? baseIndex : THINKING_ASCENDING.indexOf(FALLBACK_AUTO_THINKING.worker);
+	const unrestrictedNext = THINKING_ASCENDING[Math.min(normalizedBaseIndex + 1, THINKING_ASCENDING.length - 1)];
+	if (!supportedLevels) return unrestrictedNext;
+	const levelSet = new Set(supportedLevels);
+	for (const candidate of THINKING_ASCENDING.slice(normalizedBaseIndex + 1)) {
+		if (levelSet.has(candidate)) return candidate;
+	}
+	const baseLevel = THINKING_ASCENDING[normalizedBaseIndex];
+	if (levelSet.has(baseLevel)) return baseLevel;
+	return THINKING_PRIORITY.find((level) => levelSet.has(level)) ?? "off";
+}
+
 export function roleAutoThinking(role: RoleName, supportedLevels: ModelThinkingLevel[]): ModelThinkingLevel {
 	const levelSet = new Set(supportedLevels);
 
@@ -337,6 +381,7 @@ export function resolveModelThinking(
 	parentModel: Model<Api> | undefined,
 	roleConfig: RoleConfig,
 	role: RoleName,
+	options: { autoThinking?: "role" | "worker-plus-one"; baseThinking?: string | undefined } = {},
 ): { model: string; thinking: string | undefined } {
 	let model = roleConfig.model;
 	let thinking: string | undefined = roleConfig.thinking;
@@ -352,8 +397,10 @@ export function resolveModelThinking(
 	// child model is the parent model; otherwise use conservative role defaults.
 	if (thinking === "auto") {
 		const parentMatchesResolvedModel = parentModel && (modelIsAuto || model === parentModel.id || model === parentModelRef);
-		if (parentMatchesResolvedModel) {
-			const supportedLevels = getSupportedThinkingLevels(parentModel);
+		const supportedLevels = parentMatchesResolvedModel ? getSupportedThinkingLevels(parentModel) : undefined;
+		if (options.autoThinking === "worker-plus-one") {
+			thinking = nextHigherThinkingLevel(options.baseThinking ?? FALLBACK_AUTO_THINKING.worker, supportedLevels);
+		} else if (supportedLevels) {
 			thinking = roleAutoThinking(role, supportedLevels);
 		} else {
 			thinking = FALLBACK_AUTO_THINKING[role];

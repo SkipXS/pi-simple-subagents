@@ -6,7 +6,7 @@ import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 import type { Model, Api } from "@earendil-works/pi-ai";
 import { appendArtifactFile, resolveArtifactPath, resolveRoleSessionFile, roleSessionArtifactName, uniqueSuffix, writeArtifact } from "./artifacts.ts";
-import { applyThinking, getRoleTimeoutMs, resolveModelThinking, type Config } from "./config.ts";
+import { applyThinking, getRoleTimeoutMs, resolveModelThinking, type Config, type RoleConfig } from "./config.ts";
 import { roleSystemPrompt } from "./prompts.ts";
 import {
 	MAX_PROGRESS_LINE_BYTES,
@@ -90,6 +90,8 @@ export interface ChildRunResult {
 	outputBytes: number;
 	stderrBytes: number;
 	timedOut: boolean;
+	/** True after the operating system reports that the child process actually spawned. */
+	spawned: boolean;
 	stopReason?: string;
 	errorMessage?: string;
 }
@@ -292,9 +294,14 @@ export async function spawnPiRole(input: {
 	systemPrompt?: string;
 	sessionLabel?: string;
 	parentModel?: Model<Api>;
+	roleConfigOverride?: RoleConfig;
+	autoThinking?: "role" | "worker-plus-one";
 }): Promise<ChildRunResult> {
-	const roleConfig = input.config.roles[input.role];
-	const { model: resolvedModel, thinking: resolvedThinking } = resolveModelThinking(input.parentModel, roleConfig, input.role);
+	const roleConfig = input.roleConfigOverride ?? input.config.roles[input.role];
+	const baseWorkerThinking = input.autoThinking === "worker-plus-one"
+		? resolveModelThinking(input.parentModel, input.config.roles.worker, "worker").thinking
+		: undefined;
+	const { model: resolvedModel, thinking: resolvedThinking } = resolveModelThinking(input.parentModel, roleConfig, input.role, { autoThinking: input.autoThinking, baseThinking: baseWorkerThinking });
 	if (input.signal?.aborted) {
 		const stampBase = `${Date.now()}-${uniqueSuffix()}`;
 		const sessionFile = resolveArtifactPath(input.runDir, roleSessionArtifactName(input.role, input.sessionLabel));
@@ -316,12 +323,13 @@ export async function spawnPiRole(input: {
 			outputBytes: Buffer.byteLength(output, "utf8"),
 			stderrBytes: Buffer.byteLength(output, "utf8"),
 			timedOut: false,
+			spawned: false,
 			stopReason: "aborted",
 			errorMessage: output,
 		};
 	}
 	const sessionFile = resolveRoleSessionFile(input.runDir, input.role, input.sessionLabel);
-	const promptPath = writeArtifact(input.runDir, `prompts/${input.role}-system-${uniqueSuffix()}.md`, input.systemPrompt ?? roleSystemPrompt(input.role, input.runDir, input.config));
+	const promptPath = writeArtifact(input.runDir, `prompts/${input.role}-system-${uniqueSuffix()}.md`, input.systemPrompt ?? roleSystemPrompt(input.role, input.runDir, input.config, { roleConfigOverride: input.roleConfigOverride }));
 	const taskPath = writeArtifact(input.runDir, `tasks/${input.role}-${uniqueSuffix()}.md`, input.task);
 	const args = [
 		"--mode", "json",
@@ -377,6 +385,7 @@ export async function spawnPiRole(input: {
 				outputBytes: Buffer.byteLength(`Child run failed before spawn:\n${message}`, "utf8"),
 				stderrBytes: Buffer.byteLength(message, "utf8"),
 				timedOut: false,
+				spawned: false,
 				stopReason: "error",
 				errorMessage: message,
 			});
@@ -405,6 +414,7 @@ export async function spawnPiRole(input: {
 		let lastStatusActionAt = 0;
 		let lastStatusText = "";
 		let settled = false;
+		let spawned = false;
 		let aborted = false;
 		let timedOut = false;
 		let terminatedAfterTerminalOutput = false;
@@ -626,7 +636,7 @@ export async function spawnPiRole(input: {
 			(killFallbackTimer as { unref?: () => void }).unref?.();
 		};
 		const onAbort = () => abortChild();
-		const timeoutMs = getRoleTimeoutMs(input.config, input.role);
+		const timeoutMs = input.roleConfigOverride?.timeoutMs ?? getRoleTimeoutMs(input.config, input.role);
 		const timeoutTimer = timeoutMs > 0 ? setTimeout(() => abortChild(`Child run timed out after ${timeoutMs} ms.`, { timeout: true }), timeoutMs) : undefined;
 		(timeoutTimer as { unref?: () => void } | undefined)?.unref?.();
 		const finish = (exitCode: number) => {
@@ -693,6 +703,7 @@ export async function spawnPiRole(input: {
 				outputBytes: truncatedOutput.totalBytes,
 				stderrBytes: truncatedStderr.totalBytes,
 				timedOut,
+				spawned,
 				stopReason: finalStopReason,
 				errorMessage: finalErrorMessage,
 			});
@@ -723,6 +734,9 @@ export async function spawnPiRole(input: {
 			if (!text) return;
 			safeAppendCappedArtifactFile(stderrPath, text, stderrCap, MAX_STDERR_ARTIFACT_BYTES, "stderr");
 			stderr = appendBoundedTail(stderr, text, MAX_STDERR_BYTES);
+		});
+		child.on("spawn", () => {
+			spawned = true;
 		});
 		child.on("close", (code, signal) => {
 			finish(timedOut ? 124 : aborted ? 130 : code ?? (signal ? 1 : 0));
